@@ -7,6 +7,9 @@ enum CompositorError: Error {
     case libraryCompilationFailed(String)
     case pipelineFailed(String)
     case textureCreationFailed
+    /// M2는 비디오 텍스처를 그리지 않는다. 진짜 실패와 구분해야
+    /// "왜 이 레이어가 안 그려졌나"를 사용자에게 정확히 말할 수 있다.
+    case videoTextureNotSupported
 }
 
 /// 정점 셰이더에 넘기는 쿼드 하나의 배치 정보.
@@ -172,7 +175,7 @@ final class MetalCompositor {
 
         case .video:
             // M2는 비디오 텍스처를 그리지 않는다. M3에서 AVFoundation과 잇는다.
-            throw CompositorError.textureCreationFailed
+            throw CompositorError.videoTextureNotSupported
         }
     }
 }
