@@ -1394,7 +1394,7 @@ Task 3의 순수 정책에 실제 시스템 값을 물린다.
 **Interfaces:**
 - Consumes: `PowerSignals`, `PowerPolicy`, `PlaybackDirective` (Task 3)
 - Produces:
-  - `final class PowerMonitor` — `init(onChange: @escaping (PlaybackDirective) -> Void)`, `func start()`, `func stop()`, `var isDesktopOccluded: Bool { get set }`, `func poll()`
+  - `final class PowerMonitor` — `init(occlusionProvider: @escaping () -> Bool, onChange: @escaping (PlaybackDirective) -> Void)`, `func start()`, `func stop()`, `func poll()`
 
 - [ ] **Step 1: 구현 작성**
 
@@ -1405,14 +1405,18 @@ import WallflowKit
 
 /// 시스템에서 전력 신호를 모아 PowerPolicy에 넣고, 결과가 바뀔 때만 알린다.
 final class PowerMonitor {
+    private let occlusionProvider: () -> Bool
     private let onChange: (PlaybackDirective) -> Void
     private var timer: Timer?
     private var last: PlaybackDirective?
 
-    /// 배경 윈도우가 가려졌는지. DisplayManager가 갱신한다.
-    var isDesktopOccluded = false
-
-    init(onChange: @escaping (PlaybackDirective) -> Void) {
+    /// 가림 상태는 poll 시점에 DisplayManager에 물어본다.
+    /// 밀어넣는 방식이면 실제로 가려지는 순간을 놓친다.
+    init(
+        occlusionProvider: @escaping () -> Bool,
+        onChange: @escaping (PlaybackDirective) -> Void
+    ) {
+        self.occlusionProvider = occlusionProvider
         self.onChange = onChange
     }
 
@@ -1433,7 +1437,7 @@ final class PowerMonitor {
 
     func poll() {
         let signals = PowerSignals(
-            isOccluded: isDesktopOccluded,
+            isOccluded: occlusionProvider(),
             isFullscreenAppActive: Self.isFullscreenAppActive(),
             idleSeconds: Self.idleSeconds(),
             isOnBattery: Self.isOnBattery(),
@@ -1541,7 +1545,7 @@ MSG
 **Interfaces:**
 - Consumes: `LibraryStore`, `WallpaperItem` (Task 2), `PlaybackDirective` (Task 3), `SteamCmdClient` (Task 4), `WallpaperWindow` (Task 5), `WallpaperRenderer`, `VideoRenderer`, `RendererError` (Task 6), `WebRenderer` (Task 7), `PowerMonitor` (Task 8)
 - Produces:
-  - `final class DisplayManager` — `init()`, `func rebuildWindows()`, `func assign(_ item: WallpaperItem, toDisplay id: CGDirectDisplayID?) throws`, `func apply(_ directive: PlaybackDirective)`, `func stopAll()`, `var updateOcclusion: ((Bool) -> Void)?`
+  - `final class DisplayManager` — `init()`, `func rebuildWindows()`, `func assign(_ item: WallpaperItem, toDisplay id: CGDirectDisplayID?) throws`, `func apply(_ directive: PlaybackDirective)`, `func stopAll()`, `var isOccluded: Bool { get }`
   - `final class MenuBarController` — `init(onSelect:onRefresh:onQuit:)`, `func setItems(_ items: [WallpaperItem])`
   - `final class AppCoordinator: NSObject, NSApplicationDelegate`
 
@@ -1560,8 +1564,12 @@ final class DisplayManager {
     private var assignments: [CGDirectDisplayID: WallpaperItem] = [:]
     private var lastDirective: PlaybackDirective = .playing(fps: PowerPolicy.normalFPS)
 
-    /// 배경이 가려졌는지 알린다. PowerMonitor가 구독한다.
-    var updateOcclusion: ((Bool) -> Void)?
+    /// 배경 윈도우가 전부 가려졌는지. PowerMonitor가 poll 시점에 읽는다.
+    var isOccluded: Bool {
+        guard !windows.isEmpty else { return false }
+        // 하나라도 보이면 그린다.
+        return !windows.values.contains { $0.occlusionState.contains(.visible) }
+    }
 
     init() {
         NotificationCenter.default.addObserver(
@@ -1601,8 +1609,6 @@ final class DisplayManager {
                 try? attach(item, to: id)
             }
         }
-
-        observeOcclusion()
     }
 
     /// 배경화면을 배정한다. displayID가 nil이면 모든 화면에 건다.
@@ -1661,12 +1667,6 @@ final class DisplayManager {
         renderers.removeAll()
         for window in windows.values { window.orderOut(nil) }
         windows.removeAll()
-    }
-
-    private func observeOcclusion() {
-        // 배경 윈도우 중 하나라도 보이면 그린다.
-        let anyVisible = windows.values.contains { $0.occlusionState.contains(.visible) }
-        updateOcclusion?(!anyVisible)
     }
 
     static func displayID(of screen: NSScreen) -> CGDirectDisplayID? {
@@ -1779,13 +1779,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         displays.rebuildWindows()
 
-        let power = PowerMonitor { [weak self] directive in
-            self?.displays.apply(directive)
-        }
-        displays.updateOcclusion = { [weak power] occluded in
-            power?.isDesktopOccluded = occluded
-            power?.poll()
-        }
+        let power = PowerMonitor(
+            occlusionProvider: { [weak self] in self?.displays.isOccluded ?? false },
+            onChange: { [weak self] directive in self?.displays.apply(directive) }
+        )
         power.start()
         self.power = power
 
