@@ -28,7 +28,8 @@ public struct SceneDocument: Sendable {
         let general = root["general"] as? [String: Any] ?? [:]
         guard let ortho = general["orthogonalprojection"] as? [String: Any],
               let width = ortho["width"] as? Int,
-              let height = ortho["height"] as? Int else {
+              let height = ortho["height"] as? Int,
+              width > 0, height > 0 else {
             throw SceneError.missingField("orthogonalprojection")
         }
 
@@ -36,7 +37,10 @@ public struct SceneDocument: Sendable {
             ?? Vec3(x: 0, y: 0, z: 0)
         let clearEnabled = general["clearenabled"] as? Bool ?? true
 
-        let objects = root["objects"] as? [[String: Any]] ?? []
+        // 배열 조건부 캐스트는 전부-아니면-전무다. 원소 하나가 딕셔너리가 아니면
+        // 통째로 실패해 정상 레이어까지 사라진다. 원소별로 걸러 그것을 막는다.
+        let rawObjects = root["objects"] as? [Any] ?? []
+        let objects = rawObjects.compactMap { $0 as? [String: Any] }
         let layers = objects.enumerated().map { index, object in
             makeLayer(object, fallbackID: index, reader: reader)
         }

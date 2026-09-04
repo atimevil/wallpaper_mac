@@ -154,4 +154,89 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertNil(Vec3.parse("a b c"))
         XCTAssertNil(Vec2.parse(""))
     }
+
+    /// Finding 1: 배열 조건부 캐스트는 전부-아니면-전무다.
+    /// 하나의 비-딕셔너리 원소가 정상 레이어까지 사라지게 한다.
+    /// 원소별로 필터링해야 한다.
+    func testMixedArrayElementsDoNotPoisonValidLayers() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "valid", "image": "models/m.json",
+                      "origin": "10.0 10.0 0.0", "size": "5.0 5.0"},
+                     "garbage_string",
+                     123,
+                     {"id": 2, "name": "also_valid", "image": "models/m.json",
+                      "origin": "20.0 20.0 0.0", "size": "5.0 5.0"}]}
+        """,
+            extras: [
+                "models/m.json": #"{"material": "materials/m.json"}"#,
+                "materials/m.json": #"{"passes": [{"textures": ["t"]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader)
+        // 정상 레이어 둘 다 로드되어야 한다. 가비지는 무시된다.
+        XCTAssertEqual(doc.layers.count, 2)
+        XCTAssertEqual(doc.layers[0].name, "valid")
+        XCTAssertEqual(doc.layers[1].name, "also_valid")
+        XCTAssertEqual(doc.layers[0].content, .image(texturePath: "materials/t.tex"))
+        XCTAssertEqual(doc.layers[1].content, .image(texturePath: "materials/t.tex"))
+    }
+
+    /// Finding 2a: Double(_:)은 "inf"와 "nan"을 받아들인다.
+    /// 그런 좌표는 렌더러의 클립 공간 계산을 망쳐 아무것도 그리지 않는다.
+    /// Vec3 파싱에서 유한값만 허용해야 한다.
+    func testNonFiniteVec3ParseReturnsNil() {
+        XCTAssertNil(Vec3.parse("nan nan nan"))
+        XCTAssertNil(Vec3.parse("inf 1.0 1.0"))
+        XCTAssertNil(Vec3.parse("1.0 -inf 1.0"))
+
+        // 정상 유한값은 여전히 파싱되어야 한다.
+        XCTAssertNotNil(Vec3.parse("1.0 2.0 3.0"))
+    }
+
+    /// Finding 2b: Double(_:)은 "inf"와 "nan"을 받아들인다.
+    /// Vec2 파싱에서 유한값만 허용해야 한다.
+    func testNonFiniteVec2ParseReturnsNil() {
+        XCTAssertNil(Vec2.parse("inf 1.0"))
+        XCTAssertNil(Vec2.parse("1.0 nan"))
+
+        // 정상 유한값은 여전히 파싱되어야 한다.
+        XCTAssertNotNil(Vec2.parse("1.0 2.0"))
+    }
+
+    /// Finding 3: 직교 투영의 너비/높이가 양수여야 한다.
+    /// 0이나 음수는 렌더러의 투영 나누기를 의미 없게 만든다.
+    func testZeroOrNegativeProjectionDimensionsThrows() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 0, "height": 100}},
+         "objects": []}
+        """)
+        XCTAssertThrowsError(try SceneDocument.load(from: reader)) { error in
+            XCTAssertEqual(error as? SceneError, .missingField("orthogonalprojection"))
+        }
+    }
+
+    /// Finding 2 integration: 비유한 좌표는 이미지 레이어도 unsupported로 만든다.
+    /// 전체 씬이 깨지지 않고 문제 레이어만 격리된다.
+    func testNonFiniteOriginMakesImageLayerUnsupported() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "badgeo", "image": "models/m.json",
+                          "origin": "nan nan nan", "size": "10.0 10.0"},
+                         {"id": 2, "name": "goodgeo", "image": "models/m.json",
+                          "origin": "10.0 10.0 0.0", "size": "10.0 10.0"}]}
+            """,
+            extras: [
+                "models/m.json": #"{"material": "materials/m.json"}"#,
+                "materials/m.json": #"{"passes": [{"textures": ["t"]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.layers.count, 2)
+        guard case .unsupported = doc.layers[0].content else {
+            return XCTFail("비유한 좌표 레이어는 unsupported여야 한다")
+        }
+        XCTAssertEqual(doc.layers[1].content, .image(texturePath: "materials/t.tex"))
+    }
 }

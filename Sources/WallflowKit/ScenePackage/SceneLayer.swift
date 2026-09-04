@@ -10,9 +10,11 @@ public struct Vec3: Equatable, Sendable {
     }
 
     /// Wallpaper Engine은 벡터를 "1.00000 2.00000 3.00000" 문자열로 쓴다.
+    /// Double(_:)은 "inf"와 "nan"도 받아들인다. 그런 좌표가 통과하면
+    /// 렌더러가 NaN 지오메트리를 받아 아무것도 그리지 않는다. 유한값만 허용한다.
     public static func parse(_ string: String) -> Vec3? {
         let parts = string.split(separator: " ").compactMap { Double($0) }
-        guard parts.count == 3 else { return nil }
+        guard parts.count == 3, parts.allSatisfy(\.isFinite) else { return nil }
         return Vec3(x: parts[0], y: parts[1], z: parts[2])
     }
 }
@@ -25,9 +27,11 @@ public struct Vec2: Equatable, Sendable {
         self.x = x; self.y = y
     }
 
+    /// Double(_:)은 "inf"와 "nan"도 받아들인다. 그런 좌표가 통과하면
+    /// 렌더러가 NaN 지오메트리를 받아 아무것도 그리지 않는다. 유한값만 허용한다.
     public static func parse(_ string: String) -> Vec2? {
         let parts = string.split(separator: " ").compactMap { Double($0) }
-        guard parts.count == 2 else { return nil }
+        guard parts.count == 2, parts.allSatisfy(\.isFinite) else { return nil }
         return Vec2(x: parts[0], y: parts[1])
     }
 }
