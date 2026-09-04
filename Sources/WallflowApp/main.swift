@@ -16,7 +16,15 @@ final class ProbeDelegate: NSObject, NSApplicationDelegate {
             let item = try WallpaperItem.load(from: URL(fileURLWithPath: path))
             for screen in NSScreen.screens {
                 let window = WallpaperWindow(screen: screen)
-                let renderer: WallpaperRenderer = VideoRenderer(item: item)
+                let renderer: WallpaperRenderer
+                switch item.type {
+                case .video:
+                    renderer = VideoRenderer(item: item)
+                case .web:
+                    renderer = WebRenderer(item: item)
+                case .scene, .unsupported:
+                    throw RendererError.unsupportedType(item.type)
+                }
                 window.setContent(renderer.makeView())
                 try renderer.start()
                 window.orderFront(nil)
