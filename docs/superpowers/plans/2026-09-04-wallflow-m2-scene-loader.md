@@ -558,6 +558,10 @@ public enum TexError: Error, Equatable {
     case unsupportedContainer(String)
     case truncated
     case noMipmaps
+    // 아래 셋은 Task 3의 디코더가 쓴다. 태스크 간 파일 수정을 없애려고 여기서 함께 선언한다.
+    case imageDecodeFailed
+    case lz4Failed
+    case unsupportedPixelFormat(Int32)
 }
 
 /// .tex 안에 실제로 무엇이 들어 있는지.
@@ -679,7 +683,9 @@ public struct TexHeader: Equatable, Sendable {
 ```
 
 `Cursor`에 널 종료 문자열 읽기를 더한다. `.pkg`는 길이 접두 문자열을,
-`.tex`는 널 종료 문자열을 쓴다.
+`.tex`는 널 종료 문자열을 쓴다. **이 확장은 `TexHeader.swift` 안에 둔다** —
+`.tex` 전용 파싱이므로 사용처 옆이 맞고, Task 1의 `PkgReader.swift`를
+건드리지 않아도 된다.
 
 ```swift
 extension Cursor {
@@ -738,7 +744,7 @@ MSG
 - Produces:
   - `enum TextureData: Sendable` — `case image(CGImage)`, `case pixels(bytes: Data, width: Int, height: Int, format: TexPixelFormat)`, `case video(Data)`
   - `enum TexDecoder` — `static func decode(_ data: Data) throws -> TextureData`
-  - `TexError`에 케이스 추가: `case imageDecodeFailed`, `case lz4Failed`, `case unsupportedPixelFormat(Int32)`
+  - (`TexError`의 `imageDecodeFailed` / `lz4Failed` / `unsupportedPixelFormat`은 Task 2에서 이미 선언됨)
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
@@ -968,19 +974,8 @@ public enum TexDecoder {
 }
 ```
 
-`TexError`에 케이스를 더한다.
-
-```swift
-public enum TexError: Error, Equatable {
-    case badMagic(String)
-    case unsupportedContainer(String)
-    case truncated
-    case noMipmaps
-    case imageDecodeFailed
-    case lz4Failed
-    case unsupportedPixelFormat(Int32)
-}
-```
+`TexError`는 Task 2에서 이미 7개 케이스를 전부 선언했다. 이 태스크는
+`TexHeader.swift`를 건드리지 않는다.
 
 - [ ] **Step 5: 테스트 통과 확인**
 
@@ -2006,6 +2001,11 @@ extension SceneRenderer: MTKViewDelegate {
 
 Run: `swift build && swift test`
 Expected: 빌드 경고 0, 테스트 전부 통과
+
+`WallpaperRenderer`는 `@MainActor`인데 `MTKViewDelegate`는 격리돼 있지 않아
+Swift 6 동시성 경고가 날 수 있다. 실제로 나는 경고를 보고 대응한다. 추측으로
+`nonisolated`를 붙이지 마라 — 진짜 스레드 문제를 숨길 수 있다. `MTKView`의
+그리기는 항상 메인 스레드에서 일어나므로 격리를 유지하는 방향이 옳다.
 
 Run: `WALLFLOW_TEST_SCENES=~/Downloads/431960 swift test`
 Expected: `RealScenesTests` 포함 전부 통과
