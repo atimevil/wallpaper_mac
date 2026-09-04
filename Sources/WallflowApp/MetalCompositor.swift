@@ -10,6 +10,9 @@ enum CompositorError: Error {
     /// M2는 비디오 텍스처를 그리지 않는다. 진짜 실패와 구분해야
     /// "왜 이 레이어가 안 그려졌나"를 사용자에게 정확히 말할 수 있다.
     case videoTextureNotSupported
+    case commandQueueFailed
+    case bufferAllocationFailed
+    case samplerCreationFailed
 }
 
 /// 정점 셰이더에 넘기는 쿼드 하나의 배치 정보.
@@ -41,7 +44,7 @@ final class MetalCompositor {
 
     init(device: MTLDevice) throws {
         self.device = device
-        guard let queue = device.makeCommandQueue() else { throw CompositorError.noDevice }
+        guard let queue = device.makeCommandQueue() else { throw CompositorError.commandQueueFailed }
         self.queue = queue
 
         let library: MTLLibrary
@@ -60,7 +63,7 @@ final class MetalCompositor {
             bytes: vertices,
             length: MemoryLayout<SIMD2<Float>>.stride * vertices.count,
             options: []
-        ) else { throw CompositorError.noDevice }
+        ) else { throw CompositorError.bufferAllocationFailed }
         vertexBuffer = buffer
 
         let descriptor = MTLRenderPipelineDescriptor()
@@ -95,11 +98,14 @@ final class MetalCompositor {
         samplerDescriptor.sAddressMode = .clampToEdge
         samplerDescriptor.tAddressMode = .clampToEdge
         guard let sampler = device.makeSamplerState(descriptor: samplerDescriptor) else {
-            throw CompositorError.noDevice
+            throw CompositorError.samplerCreationFailed
         }
         self.sampler = sampler
     }
 
+    /// 씬의 직교 공간 크기를 정한다.
+    /// 첫 draw 전에 반드시 불러야 한다. 기본값 (1,1)로 그리면 지오메트리가
+    /// 클립 공간 밖으로 밀려나 아무것도 보이지 않는다.
     func setProjection(width: Int, height: Int) {
         projection = SIMD2(Float(width), Float(height))
     }
