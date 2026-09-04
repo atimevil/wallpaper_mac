@@ -87,8 +87,9 @@ final class DisplayManager {
             renderer = VideoRenderer(item: item)
         case .web:
             renderer = WebRenderer(item: item)
-        case .scene, .unsupported:
-            // M1은 씬을 렌더하지 않는다. preview로 대신한다.
+        case .scene:
+            renderer = SceneRenderer(item: item)
+        case .unsupported:
             showPreview(item, in: window)
             throw RendererError.unsupportedType(item.type)
         }
