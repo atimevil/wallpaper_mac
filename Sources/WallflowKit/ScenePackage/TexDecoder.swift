@@ -31,16 +31,23 @@ public enum TexDecoder {
             guard let format = header.pixelFormat else {
                 throw TexError.unsupportedPixelFormat(header.format)
             }
+            // 픽셀 버퍼의 크기는 차원과 포맷으로 정확히 결정된다.
+            guard mip.width > 0, mip.height > 0 else { throw TexError.lz4Failed }
+            let expectedSize = mip.width * mip.height * format.bytesPerPixel
+            guard expectedSize > 0 else { throw TexError.lz4Failed }
+
             let bytes = mip.isLZ4
-                ? try decompressLZ4(payload, expecting: mip.decompressedSize)
+                ? try decompressLZ4(payload, expecting: expectedSize)
                 : payload
+
+            guard bytes.count == expectedSize else { throw TexError.lz4Failed }
             return .pixels(bytes: bytes, width: mip.width, height: mip.height, format: format)
         }
     }
 
     /// macOS Compression 프레임워크의 LZ4_RAW를 쓴다. 외부 의존성이 필요 없다.
     private static func decompressLZ4(_ input: Data, expecting size: Int) throws -> Data {
-        guard size > 0 else { throw TexError.lz4Failed }
+        guard size > 0, !input.isEmpty else { throw TexError.lz4Failed }
         var output = Data(count: size)
         let written = output.withUnsafeMutableBytes { dst -> Int in
             input.withUnsafeBytes { src -> Int in

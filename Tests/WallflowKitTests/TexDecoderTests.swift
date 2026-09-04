@@ -108,6 +108,42 @@ final class TexDecoderTests: XCTestCase {
             XCTAssertEqual(error as? TexError, .imageDecodeFailed)
         }
     }
+
+    // Regression tests for allocation safety (Finding 1 & 2)
+    func testEmptyLZ4PayloadThrowsInsteadOfCrashing() throws {
+        // LZ4 mipmap with payload size 0, but decompressedSize > 0.
+        // This would cause empty buffer's baseAddress to be nil, trapping on force-unwrap.
+        let tex = buildTex(format: 0, flags: 0, freeImageFormat: -1, size: (8, 8),
+                          mips: [(8, 8, 1, 256, Data())])
+        XCTAssertThrowsError(try TexDecoder.decode(tex)) { error in
+            XCTAssertEqual(error as? TexError, .lz4Failed)
+        }
+    }
+
+    func testDecompressedSizeNotMatchingDimensionsThrows() throws {
+        // LZ4 data that decompresses to 1 byte, but dimensions expect 256 bytes (8×8×4).
+        // When decompressed into a 256-byte buffer, only 1 byte is written, triggering our size check.
+        let tinyData = Data([42])
+        let compressed = try XCTUnwrap(lz4RawCompress(tinyData))
+        let tex = buildTex(
+            format: 0, flags: 0, freeImageFormat: -1, size: (8, 8),
+            mips: [(8, 8, 1, 256, compressed)]
+        )
+        XCTAssertThrowsError(try TexDecoder.decode(tex)) { error in
+            XCTAssertEqual(error as? TexError, .lz4Failed)
+        }
+    }
+
+    func testUncompressedRawPayloadTooShortThrows() throws {
+        // Uncompressed pixel data smaller than width × height × bytesPerPixel.
+        // 8×8×4 = 256 bytes, but we provide 128.
+        let tooSmall = Data(repeating: 0x5A, count: 128)
+        let tex = buildTex(format: 0, flags: 0, freeImageFormat: -1, size: (8, 8),
+                          mips: [(8, 8, 0, 256, tooSmall)])
+        XCTAssertThrowsError(try TexDecoder.decode(tex)) { error in
+            XCTAssertEqual(error as? TexError, .lz4Failed)
+        }
+    }
 }
 
 extension Data {

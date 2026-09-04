@@ -24,6 +24,14 @@ public enum TexPixelFormat: Int32, Sendable {
     case rgba8888 = 0
     /// 단일 채널. 마스크에 쓰인다.
     case r8 = 9
+
+    /// 픽셀 하나가 차지하는 바이트. 디코더가 크기를 검증할 때 쓴다.
+    public var bytesPerPixel: Int {
+        switch self {
+        case .rgba8888: return 4
+        case .r8: return 1
+        }
+    }
 }
 
 public struct TexMipmap: Equatable, Sendable {
