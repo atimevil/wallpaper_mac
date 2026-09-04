@@ -1930,6 +1930,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
     func makeView() -> NSView {
         let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
+        // 컴포지터의 파이프라인이 bgra8Unorm으로 고정돼 있다. 기본값에 기대지 않고
+        // 명시한다. 어긋나면 빌드는 통과하고 화면만 검게 나온다.
+        view.colorPixelFormat = .bgra8Unorm
         view.autoresizingMask = [.width, .height]
         view.isPaused = true                 // 정적 씬이라 필요할 때만 그린다
         view.enableSetNeedsDisplay = true
