@@ -120,18 +120,24 @@ final class TexDecoderTests: XCTestCase {
         }
     }
 
-    func testDecompressedSizeNotMatchingDimensionsThrows() throws {
-        // LZ4 data that decompresses to 1 byte, but dimensions expect 256 bytes (8×8×4).
-        // When decompressed into a 256-byte buffer, only 1 byte is written, triggering our size check.
-        let tinyData = Data([42])
-        let compressed = try XCTUnwrap(lz4RawCompress(tinyData))
+    func testIgnoresDecompressedSizeFieldInFavorOfDimensions() throws {
+        // This test verifies that the file's decompressedSize field is IGNORED
+        // in favor of the dimension-derived expected size.
+        // - Dimensions: 8×8×4 = 256 bytes (expected)
+        // - LZ4 payload: genuinely compresses/decompresses to 256 bytes
+        // - File's decompressedSize field: 999 (mismatched, should be ignored)
+        // Pre-fix: decoder would pass 999 to decompressLZ4, written=256, 256≠999 → throws
+        // Post-fix: decoder passes 256 to decompressLZ4, written=256, 256=256 → succeeds
+        let original = Data((0..<256).map { UInt8($0 % 251) })
+        let compressed = try XCTUnwrap(lz4RawCompress(original))
         let tex = buildTex(
             format: 0, flags: 0, freeImageFormat: -1, size: (8, 8),
-            mips: [(8, 8, 1, 256, compressed)]
+            mips: [(8, 8, 1, 999, compressed)]  // decompressedSize disagrees
         )
-        XCTAssertThrowsError(try TexDecoder.decode(tex)) { error in
-            XCTAssertEqual(error as? TexError, .lz4Failed)
+        guard case .pixels(let bytes, 8, 8, .rgba8888) = try TexDecoder.decode(tex) else {
+            return XCTFail("expected .pixels")
         }
+        XCTAssertEqual(bytes.count, 256, "decoded to dimension-derived size, not file's field")
     }
 
     func testUncompressedRawPayloadTooShortThrows() throws {
@@ -140,6 +146,21 @@ final class TexDecoderTests: XCTestCase {
         let tooSmall = Data(repeating: 0x5A, count: 128)
         let tex = buildTex(format: 0, flags: 0, freeImageFormat: -1, size: (8, 8),
                           mips: [(8, 8, 0, 256, tooSmall)])
+        XCTAssertThrowsError(try TexDecoder.decode(tex)) { error in
+            XCTAssertEqual(error as? TexError, .lz4Failed)
+        }
+    }
+
+    func testArithmeticOverflowThrowsInsteadOfTrapping() throws {
+        // width × height × bytesPerPixel can overflow Int even when each component is valid.
+        // With width=height=Int32.max and format=0 (rgba8888), the multiplication traps
+        // in unchecked arithmetic. The decoder must detect overflow and throw, not crash.
+        let raw = Data(repeating: 0, count: 1)
+        let tex = buildTex(
+            format: 0, flags: 0, freeImageFormat: -1,
+            size: (Int32.max, Int32.max),
+            mips: [(Int32.max, Int32.max, 0, 1, raw)]
+        )
         XCTAssertThrowsError(try TexDecoder.decode(tex)) { error in
             XCTAssertEqual(error as? TexError, .lz4Failed)
         }

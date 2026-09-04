@@ -32,9 +32,13 @@ public enum TexDecoder {
                 throw TexError.unsupportedPixelFormat(header.format)
             }
             // 픽셀 버퍼의 크기는 차원과 포맷으로 정확히 결정된다.
+            // width/height는 파일에서 온 값이다. Swift의 *는 오버플로우에서 포화가 아니라
+            // 트랩하므로, 검사 연산을 써서 트랩 대신 오류로 바꾼다.
             guard mip.width > 0, mip.height > 0 else { throw TexError.lz4Failed }
-            let expectedSize = mip.width * mip.height * format.bytesPerPixel
-            guard expectedSize > 0 else { throw TexError.lz4Failed }
+            let (area, areaOverflow) = mip.width.multipliedReportingOverflow(by: mip.height)
+            guard !areaOverflow else { throw TexError.lz4Failed }
+            let (expectedSize, sizeOverflow) = area.multipliedReportingOverflow(by: format.bytesPerPixel)
+            guard !sizeOverflow, expectedSize > 0 else { throw TexError.lz4Failed }
 
             let bytes = mip.isLZ4
                 ? try decompressLZ4(payload, expecting: expectedSize)
