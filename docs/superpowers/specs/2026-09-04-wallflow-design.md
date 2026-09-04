@@ -32,10 +32,29 @@ Wallpaper Engine 창작마당 콘텐츠(Video / Web / Scene)를 재생하는 것
 | 확인 항목 | 결과 |
 |---|---|
 | `.pkg` 컨테이너 | 해결. `PKGV00XX` 헤더 + (이름, 오프셋, 길이) 엔트리 테이블 + 블롭. 파싱 성공 |
-| `.tex` 텍스처 | `TEXV/TEXI/TEXB` 헤더 래퍼. 내부는 평범한 JPEG. 일부는 DXT/BC (Apple Silicon Metal 네이티브 지원) |
+| `.tex` 텍스처 | `TEXV/TEXI/TEXB` 헤더 래퍼. 내용물은 JPEG / PNG / LZ4 압축 원시 픽셀 / **MP4** (아래 참조) |
 | `scene.json` | 평범한 JSON. 2D 직교 카메라, 레이어 6~11개 |
 | 셰이더 | 진짜 GLSL. 단 레거시 문법(`varying`, `texture2D`)이고 `#if COMBO` 전처리기와 JSON 주석 어노테이션을 씀 |
 | 표준 셰이더 / `common.h` | **`.pkg`에 없음.** Wallpaper Engine 설치 폴더의 `assets/`에 존재 → 별도 반입 필요 |
+
+### `.tex` 포맷 (M1 이후 실물 전수 해독, 잔여 바이트 0으로 검증)
+
+```
+"TEXV0005\0" "TEXI0001\0"
+int32 format, flags, texWidth, texHeight, imgWidth, imgHeight, color
+"TEXB0003\0" 또는 "TEXB0004\0"
+int32 imageCount, freeImageFormat, [0004는 int32 하나 더], mipmapCount
+밉맵마다: int32 width, height, isLZ4, decompressedSize, dataSize + 데이터
+```
+
+- `freeImageFormat`: `2`=JPEG, `13`=PNG, `-1`=원시 픽셀 또는 비디오
+- `flags` 비트 `32`: **비디오 텍스처 — 데이터가 통째로 MP4(H.264) 파일**
+- `format`: `0`=RGBA8888, `9`=R8(단일 채널, 마스크용)
+- `isLZ4`: LZ4 블록 압축. macOS `Compression` 프레임워크의 `COMPRESSION_LZ4_RAW`로
+  풀 수 있어 외부 의존성이 필요 없다.
+
+보유 씬의 가장 큰 텍스처 두 개(각 226MB)가 전부 MP4였다. 즉 두 씬의 배경 레이어는
+M1에서 이미 만든 AVFoundation 하드웨어 디코딩 경로를 그대로 쓴다.
 
 ### 보유 씬 4개 구성
 
