@@ -31,7 +31,15 @@ final class RealScenesTests: XCTestCase {
             throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
         }
         let url = root.appendingPathComponent(id).appendingPathComponent("scene.pkg")
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            // ROOT는 설정되고 유효한데 이 씬만 없다. 여기서 nil을 반환하면 호출부의
+            // `guard let ... else { throw XCTSkip(...) }`로 빠져 "환경변수 미설정"으로
+            // 오인 보고된다. 사용자가 창작마당 폴더 넷 중 하나를 옮기거나 지웠을 때
+            // 그 씬의 포맷 테스트가 보호를 멈춘 걸 아무도 모르게 되므로, nil이 아니라
+            // 실제 오류를 던져 호출부가 XCTSkip으로 흡수하지 못하게 한다.
+            XCTFail("WALLFLOW_TEST_SCENES는 설정되었지만 씬을 찾을 수 없음: \(url.path)")
+            throw MissingSceneError(path: url.path)
+        }
         return try PkgReader(data: try Data(contentsOf: url, options: .mappedIfSafe))
     }
 
@@ -222,4 +230,11 @@ final class RealScenesTests: XCTestCase {
         }
         XCTAssertFalse(images.isEmpty, "이미지 레이어가 하나도 해석되지 않았다")
     }
+}
+
+/// ROOT는 유효한데 이름 붙인 씬 디렉토리가 없을 때 던진다. XCTFail로 이미 실패를
+/// 기록한 뒤 이 오류를 던져, 호출부의 XCTSkip 폴백이 그 실패를 "미설정"으로
+/// 가려버리지 않게 한다.
+private struct MissingSceneError: Error {
+    let path: String
 }

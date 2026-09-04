@@ -35,6 +35,17 @@ public enum TexDecoder {
             // width/height는 파일에서 온 값이다. Swift의 *는 오버플로우에서 포화가 아니라
             // 트랩하므로, 검사 연산을 써서 트랩 대신 오류로 바꾼다.
             guard mip.width > 0, mip.height > 0 else { throw TexError.lz4Failed }
+            // 차원 자체를 먼저 제한한다. area/expectedSize의 오버플로우 검사만으로는
+            // 부족하다 — format=9(r8, bytesPerPixel=1)에서 width=height=Int32.max이면
+            // area가 약 4.6e18로 Int 오버플로우 없이 거대해지고, 그 결과가 그대로
+            // Data(count:) 할당으로 흘러가 malloc 실패로 트랩한다.
+            // 16384는 애플 실리콘의 maxTexture2DDimension이다. WallflowKit은 Metal을
+            // import하지 않으므로 이 값을 여기서 물어볼 수 없어 상수로 못박는다 —
+            // 이보다 큰 차원은 어차피 Metal 텍스처가 될 수 없다.
+            let maxTextureDimension = 16384
+            guard mip.width <= maxTextureDimension, mip.height <= maxTextureDimension else {
+                throw TexError.dimensionsOutOfRange
+            }
             let (area, areaOverflow) = mip.width.multipliedReportingOverflow(by: mip.height)
             guard !areaOverflow else { throw TexError.lz4Failed }
             let (expectedSize, sizeOverflow) = area.multipliedReportingOverflow(by: format.bytesPerPixel)

@@ -9,6 +9,10 @@ public enum TexError: Error, Equatable {
     case imageDecodeFailed
     case lz4Failed
     case unsupportedPixelFormat(Int32)
+    /// width/height가 Metal의 maxTexture2DDimension(애플 실리콘 16384)을 넘는다.
+    /// 산술 이전에 걸러야 한다. area가 오버플로우 없이 거대해질 수 있기 때문이다
+    /// (예: r8 포맷에서 width=height=Int32.max).
+    case dimensionsOutOfRange
 }
 
 /// .tex 안에 실제로 무엇이 들어 있는지.

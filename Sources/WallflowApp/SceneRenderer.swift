@@ -79,13 +79,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             }
         }
 
-        guard !drawable.isEmpty else {
-            throw RendererError.unsupportedType(.scene)
-        }
-
-        compositor.setLayers(drawable)
-        self.compositor = compositor
-
+        // 건너뛴 이유는 drawable이 비어 폴백하는 경우에 사용자가 가장 필요로 한다.
+        // isEmpty 가드보다 먼저 써야 그 경로에서도 진단이 버려지지 않는다.
         if !skipped.isEmpty {
             FileHandle.standardError.write(Data(
                 "씬 \(item.title)에서 건너뛴 레이어 \(skipped.count)개:\n  "
@@ -93,13 +88,29 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     .appending("\n").utf8
             ))
         }
+
+        guard !drawable.isEmpty else {
+            // Metal 자체가 없는 경우(unsupportedType)와는 원인이 다르다 — 여기 도달했다는
+            // 것 자체가 device가 있었다는 뜻이다. DisplayManager.attach는 어떤 오류든
+            // 잡아 preview로 폴백하므로(WallflowApp/DisplayManager.swift 참고) 동작은
+            // 바뀌지 않지만, 로그와 향후 분기를 위해 원인을 구분해 던진다.
+            throw RendererError.noDrawableLayers
+        }
+
+        compositor.setLayers(drawable)
+        self.compositor = compositor
         view.needsDisplay = true
     }
 
     func apply(_ directive: PlaybackDirective) {
-        // M2의 씬은 정적이라 프레임레이트가 의미 없다. 정지 시 그리기만 멈춘다.
+        // M2의 씬은 완전히 정적이고 MTKView는 이미 isPaused = true다.
+        // .paused에서 view를 숨기면 WallpaperWindow의 검은 배경이 드러나 사용자가
+        // 자리를 비운 15분 동안 검은 화면을 보게 된다(PowerPolicy가 900초 후 이 상태로
+        // 전환한다). 화면은 켜져 있고 바탕화면은 여전히 보여야 하므로, 정적 씬에서는
+        // 숨길 이유가 없다 — VideoRenderer.apply가 일시정지만 하고 마지막 프레임을
+        // 남겨두는 것과 같은 이유다. 이 no-op을 "복원"하지 말 것.
         switch directive {
-        case .paused: view?.isHidden = true
+        case .paused: break
         case .playing:
             view?.isHidden = false
             view?.needsDisplay = true

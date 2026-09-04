@@ -153,8 +153,10 @@ final class TexDecoderTests: XCTestCase {
 
     func testArithmeticOverflowThrowsInsteadOfTrapping() throws {
         // width × height × bytesPerPixel can overflow Int even when each component is valid.
-        // With width=height=Int32.max and format=0 (rgba8888), the multiplication traps
-        // in unchecked arithmetic. The decoder must detect overflow and throw, not crash.
+        // With width=height=Int32.max and format=0 (rgba8888), the C1 fix now catches this
+        // via the 16384 dimension bound before the multiplication is ever attempted — the
+        // bound subsumes this case. The overflow-reporting arithmetic below it stays as
+        // defense in depth, but for dimensions this large it never gets a chance to fire.
         let raw = Data(repeating: 0, count: 1)
         let tex = buildTex(
             format: 0, flags: 0, freeImageFormat: -1,
@@ -162,7 +164,24 @@ final class TexDecoderTests: XCTestCase {
             mips: [(Int32.max, Int32.max, 0, 1, raw)]
         )
         XCTAssertThrowsError(try TexDecoder.decode(tex)) { error in
-            XCTAssertEqual(error as? TexError, .lz4Failed)
+            XCTAssertEqual(error as? TexError, .dimensionsOutOfRange)
+        }
+    }
+
+    func testR8DimensionsAtInt32MaxThrowDimensionsOutOfRangeInsteadOfCrashing() throws {
+        // format=9(r8, bytesPerPixel=1)이면 width×height가 오버플로우 없이 거대해질 수
+        // 있다. width=height=Int32.max일 때 area는 약 4.6e18로, 오버플로우 검사 두
+        // 단계를 그대로 통과해 (isLZ4=1이라) decompressLZ4의 Data(count:) 할당까지
+        // 도달하면 malloc 실패로 트랩한다. 차원 자체를 먼저 제한해야만 이 값을 걸러낼
+        // 수 있다.
+        let raw = Data(repeating: 0, count: 1)
+        let tex = buildTex(
+            format: 9, flags: 0, freeImageFormat: -1,
+            size: (Int32.max, Int32.max),
+            mips: [(Int32.max, Int32.max, 1, 1, raw)]
+        )
+        XCTAssertThrowsError(try TexDecoder.decode(tex)) { error in
+            XCTAssertEqual(error as? TexError, .dimensionsOutOfRange)
         }
     }
 }

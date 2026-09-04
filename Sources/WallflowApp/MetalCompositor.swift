@@ -160,6 +160,20 @@ final class MetalCompositor {
             ])
 
         case .pixels(let bytes, let width, let height, let format):
+            // TextureData.pixels는 public case라 누구나 만들 수 있다. TexDecoder가
+            // 보장하는 "0이 아닌 정확한 크기의 버퍼"라는 불변조건은 이 타깃에서는
+            // 검증된 적이 없으므로, 여기서 실제로 필요한 조건을 직접 확인한다.
+            // C1(TexDecoder의 16384 상한)이 width/height 자체는 막아주지만, 그 보장이
+            // 이 코드에까지 닿는다고 그냥 믿지 않는다.
+            let bytesPerPixel = format == .rgba8888 ? 4 : 1
+            guard width > 0, height > 0 else { throw CompositorError.textureCreationFailed }
+            let (area, areaOverflow) = width.multipliedReportingOverflow(by: height)
+            guard !areaOverflow else { throw CompositorError.textureCreationFailed }
+            let (expectedTotal, sizeOverflow) = area.multipliedReportingOverflow(by: bytesPerPixel)
+            guard !sizeOverflow, bytes.count == expectedTotal else {
+                throw CompositorError.textureCreationFailed
+            }
+
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: format == .rgba8888 ? .rgba8Unorm : .r8Unorm,
                 width: width, height: height, mipmapped: false
@@ -168,15 +182,21 @@ final class MetalCompositor {
             guard let texture = device.makeTexture(descriptor: descriptor) else {
                 throw CompositorError.textureCreationFailed
             }
-            let bytesPerPixel = format == .rgba8888 ? 4 : 1
+            let bytesPerRow = width * bytesPerPixel
+            var replaceFailed = false
             bytes.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else {
+                    replaceFailed = true
+                    return
+                }
                 texture.replace(
                     region: MTLRegionMake2D(0, 0, width, height),
                     mipmapLevel: 0,
-                    withBytes: raw.baseAddress!,
-                    bytesPerRow: width * bytesPerPixel
+                    withBytes: base,
+                    bytesPerRow: bytesPerRow
                 )
             }
+            guard !replaceFailed else { throw CompositorError.textureCreationFailed }
             return texture
 
         case .video:

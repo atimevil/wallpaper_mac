@@ -4,6 +4,9 @@ import WallflowKit
 enum RendererError: Error {
     case unsupportedType(WallpaperType)
     case contentMissing(URL)
+    /// 씬은 열렸지만 그릴 수 있는 레이어가 하나도 없다. Metal 자체가 없는
+    /// unsupportedType(.scene)과는 원인이 달라 구분한다.
+    case noDrawableLayers
 }
 
 /// 배경화면 한 장을 그리는 것의 공통 인터페이스.
