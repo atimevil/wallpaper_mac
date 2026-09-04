@@ -36,9 +36,9 @@ public struct PkgReader: Sendable {
         // int32 이름 길이, int32 오프셋, int32 길이. 절대 그 수보다 많을 수 없다.
         // 손상된 파일이 이 값을 거짓말할 수 있다. 검증 전에 그것을 믿고 할당하면
         // 수십 GB를 잡으려다 OOM으로 죽는다. 대신 truncated를 던진다.
+        // Int32를 Int로 승격해서 비교한다. Int 축소는 트랩하지만 승격은 안전하다.
         let remainingBytes = data.count - cursor.offset
-        let maxEntries = Int32(remainingBytes / 12)
-        guard count <= maxEntries else { throw PkgError.truncated }
+        guard Int(count) <= remainingBytes / 12 else { throw PkgError.truncated }
 
         var raw: [(String, Int, Int)] = []
         raw.reserveCapacity(Int(count))

@@ -88,4 +88,16 @@ final class PkgReaderTests: XCTestCase {
             XCTAssertEqual(error as? PkgError, .truncated)
         }
     }
+
+    /// 비교는 Int에서 수행한다. Int32로 축소하면 큰 파일에서
+    /// 산술 오버플로우가 트랩한다. 이 테스트는 정상 크기 파일이 여전히
+    /// 파싱되는지 확인한다. (25 GB 파일은 구성할 수 없다.)
+    func testBoundCheckIsPerformedInInt() throws {
+        let pkg = buildPkg(version: "PKGV0023", entries: [
+            ("test.bin", Data([1, 2, 3, 4, 5])),
+        ])
+        let reader = try PkgReader(data: pkg)
+        XCTAssertEqual(reader.version, "PKGV0023")
+        XCTAssertTrue(reader.contains("test.bin"))
+    }
 }
