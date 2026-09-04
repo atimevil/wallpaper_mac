@@ -100,6 +100,11 @@ public struct TexHeader: Equatable, Sendable {
         let mipCount = try cursor.readInt32()
         guard mipCount > 0 else { throw TexError.noMipmaps }
 
+        // Bound mipCount: each mipmap is at least 20 bytes (5 int32s: w, h, lz4, decompressed, size)
+        let remainingBytes = data.count - cursor.offset
+        let maxMipmaps = remainingBytes / 20
+        guard Int(mipCount) <= maxMipmaps else { throw TexError.truncated }
+
         var mipmaps: [TexMipmap] = []
         mipmaps.reserveCapacity(Int(mipCount))
         for _ in 0..<mipCount {

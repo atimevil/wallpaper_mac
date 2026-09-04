@@ -109,4 +109,25 @@ final class TexHeaderTests: XCTestCase {
         tex = tex.prefix(tex.count - 50)   // 데이터 절반을 잘라낸다
         XCTAssertThrowsError(try TexHeader.parse(tex))
     }
+
+    /// 손상된 파일이 밉맵 수를 거짓말할 수 있다. 검증 전에 그것을 믿고 할당하면 죽는다.
+    func testAbsurdMipmapCountThrowsInsteadOfAllocating() {
+        var tex = nullTerminated("TEXV0005") + nullTerminated("TEXI0001")
+        tex += le32(0) + le32(2)
+        tex += le32(8) + le32(8) + le32(8) + le32(8)
+        tex += le32(0)
+        tex += nullTerminated("TEXB0004")
+        tex += le32(1) + le32(2) + le32(0)
+        tex += le32(Int32.max)          // 밉맵이 21억 개라고 주장한다
+        XCTAssertThrowsError(try TexHeader.parse(tex)) { error in
+            XCTAssertEqual(error as? TexError, .truncated)
+        }
+    }
+
+    func testZeroMipmapCountThrows() {
+        let tex = buildTex(mips: [])
+        XCTAssertThrowsError(try TexHeader.parse(tex)) { error in
+            XCTAssertEqual(error as? TexError, .noMipmaps)
+        }
+    }
 }
