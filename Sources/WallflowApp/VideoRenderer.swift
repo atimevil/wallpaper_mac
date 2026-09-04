@@ -4,6 +4,7 @@ import WallflowKit
 
 /// mp4/mov 배경화면을 무한 루프로 재생한다.
 /// AVPlayerLooper 대신 rate=0 감지 후 seek을 쓰지 않고, 끝 알림에서 되감는다.
+@MainActor
 final class VideoRenderer: WallpaperRenderer {
     private let item: WallpaperItem
     private let player = AVQueuePlayer()

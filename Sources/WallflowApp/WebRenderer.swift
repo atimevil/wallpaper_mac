@@ -10,6 +10,7 @@ import WallflowKit
 ///    requestAnimationFrame 콜백도 더 이상 호출하지 않는다.
 ///
 /// 이 클래스는 rAF를 직접 후킹하지 않는다. rAF가 멎는 것은 isHidden의 결과다.
+@MainActor
 final class WebRenderer: WallpaperRenderer {
     private let item: WallpaperItem
     private var webView: WKWebView?
