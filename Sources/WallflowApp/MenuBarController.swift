@@ -48,8 +48,8 @@ final class MenuBarController {
                 )
                 menuItem.target = self
                 menuItem.tag = index
-                // M1은 씬을 재생하지 못한다. 고를 수 없게 둔다.
-                menuItem.isEnabled = (item.type == .video || item.type == .web)
+                // 씬은 M2부터 이미지 레이어를 그린다. 못 그리면 preview로 폴백한다.
+                menuItem.isEnabled = (item.type != .unsupported)
                 menu.addItem(menuItem)
             }
         }
