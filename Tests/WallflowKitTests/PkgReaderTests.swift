@@ -78,4 +78,14 @@ final class PkgReaderTests: XCTestCase {
         pkg += i32(-5)
         XCTAssertThrowsError(try PkgReader(data: pkg))
     }
+
+    /// 손상된 파일이 엔트리 수를 거짓말할 수 있다. 검증 전에 그 값을 믿고
+    /// 할당하면 수십 GB를 잡으려다 죽는다.
+    func testAbsurdEntryCountThrowsInsteadOfAllocating() {
+        var pkg = le32(8) + Data("PKGV0023".utf8)
+        pkg += le32(Int32.max)
+        XCTAssertThrowsError(try PkgReader(data: pkg)) { error in
+            XCTAssertEqual(error as? PkgError, .truncated)
+        }
+    }
 }

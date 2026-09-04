@@ -186,6 +186,16 @@ final class PkgReaderTests: XCTestCase {
         }
     }
 
+    /// 손상된 파일이 엔트리 수를 거짓말할 수 있다. 검증 전에 그 값을 믿고
+    /// 할당하면 수십 GB를 잡으려다 죽는다.
+    func testAbsurdEntryCountThrowsInsteadOfAllocating() {
+        var pkg = le32(8) + Data("PKGV0023".utf8)
+        pkg += le32(Int32.max)
+        XCTAssertThrowsError(try PkgReader(data: pkg)) { error in
+            XCTAssertEqual(error as? PkgError, .truncated)
+        }
+    }
+
     func testNegativeLengthThrows() {
         func i32(_ v: Int32) -> Data {
             var x = v
@@ -273,7 +283,13 @@ public struct PkgReader: Sendable {
         guard version.hasPrefix("PKGV") else { throw PkgError.badVersionString }
 
         let count = try cursor.readInt32()
-        guard count >= 0 else { throw PkgError.truncated }
+        // 파일에서 읽은 값이다. 검증 전에 reserveCapacity에 넘기면 손상된 파일이
+        // 수십 GB 할당을 유발할 수 있다. 엔트리 하나는 최소 12바이트(길이4+오프셋4+크기4)를
+        // 차지하므로 남은 바이트로 상한이 정해진다.
+        let remaining = data.count - cursor.offset
+        guard count >= 0, Int(count) <= remaining / 12 else {
+            throw PkgError.truncated
+        }
 
         var raw: [(String, Int, Int)] = []
         raw.reserveCapacity(Int(count))
@@ -355,7 +371,7 @@ struct Cursor {
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `swift test --filter PkgReaderTests`
-Expected: PASS (8개)
+Expected: PASS (9개)
 
 - [ ] **Step 5: 커밋**
 
