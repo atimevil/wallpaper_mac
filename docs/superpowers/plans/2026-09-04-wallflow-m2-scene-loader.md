@@ -499,6 +499,27 @@ final class TexHeaderTests: XCTestCase {
         XCTAssertEqual(header.mipmaps.map(\.height), [1164, 582, 291, 145])
     }
 
+    /// 손상된 파일이 밉맵 수를 거짓말할 수 있다. 검증 전에 그것을 믿고 할당하면 죽는다.
+    func testAbsurdMipmapCountThrowsInsteadOfAllocating() {
+        var tex = nullTerminated("TEXV0005") + nullTerminated("TEXI0001")
+        tex += le32(0) + le32(2)
+        tex += le32(8) + le32(8) + le32(8) + le32(8)
+        tex += le32(0)
+        tex += nullTerminated("TEXB0004")
+        tex += le32(1) + le32(2) + le32(0)
+        tex += le32(Int32.max)          // 밉맵이 21억 개라고 주장한다
+        XCTAssertThrowsError(try TexHeader.parse(tex)) { error in
+            XCTAssertEqual(error as? TexError, .truncated)
+        }
+    }
+
+    func testZeroMipmapCountThrows() {
+        let tex = buildTex(mips: [])
+        XCTAssertThrowsError(try TexHeader.parse(tex)) { error in
+            XCTAssertEqual(error as? TexError, .noMipmaps)
+        }
+    }
+
     func testBadMagicThrows() {
         let junk = Data("NOTATEXTURE\0".utf8) + Data(repeating: 0, count: 80)
         XCTAssertThrowsError(try TexHeader.parse(junk)) { error in
@@ -593,6 +614,14 @@ public enum TexPixelFormat: Int32, Sendable {
     case rgba8888 = 0
     /// 단일 채널. 마스크에 쓰인다.
     case r8 = 9
+
+    /// 픽셀 하나가 차지하는 바이트. 디코더가 크기를 검증할 때 쓴다.
+    public var bytesPerPixel: Int {
+        switch self {
+        case .rgba8888: return 4
+        case .r8: return 1
+        }
+    }
 }
 
 public struct TexMipmap: Equatable, Sendable {
@@ -668,6 +697,11 @@ public struct TexHeader: Equatable, Sendable {
         if extraField { _ = try cursor.readInt32() }
         let mipCount = try cursor.readInt32()
         guard mipCount > 0 else { throw TexError.noMipmaps }
+        // mipCount는 파일에서 읽은 값이다. 검증 전에 믿고 할당하면 손상된 파일이
+        // OOM을 유발한다. 밉맵 레코드 하나는 최소 20바이트(int32 5개)를 차지하므로
+        // 남은 바이트로 상한이 정해진다. Int로 승격해 비교한다. 축소는 트랩한다.
+        let remainingBytes = data.count - cursor.offset
+        guard Int(mipCount) <= remainingBytes / 20 else { throw TexError.truncated }
 
         var mipmaps: [TexMipmap] = []
         mipmaps.reserveCapacity(Int(mipCount))
@@ -726,7 +760,7 @@ extension Cursor {
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `swift test --filter TexHeaderTests`
-Expected: PASS (10개)
+Expected: PASS (12개)
 
 - [ ] **Step 5: 커밋**
 
@@ -964,16 +998,30 @@ public enum TexDecoder {
             guard let format = header.pixelFormat else {
                 throw TexError.unsupportedPixelFormat(header.format)
             }
+            // 원시 픽셀은 정답 크기가 산술로 정해진다. 실측으로 확인했다:
+            // waterripplenormal 262144 = 256*256*4, 마스크 1440000 = 1600*900*1.
+            // 어긋나면 손상이다. 이 모듈이 버퍼의 모양을 보장하지 않으면
+            // 크기가 맞지 않는 버퍼가 Metal 업로드로 흘러가 OOB 읽기가 된다.
+            // width/height는 파일에서 온 값이다. Swift의 *는 오버플로에서 포화가 아니라
+            // 트랩하므로, 검사 연산을 써서 트랩 대신 오류로 바꾼다.
+            guard mip.width > 0, mip.height > 0 else { throw TexError.lz4Failed }
+            let (area, areaOverflow) = mip.width.multipliedReportingOverflow(by: mip.height)
+            guard !areaOverflow else { throw TexError.lz4Failed }
+            let (expected, sizeOverflow) = area.multipliedReportingOverflow(by: format.bytesPerPixel)
+            guard !sizeOverflow, expected > 0 else { throw TexError.lz4Failed }
             let bytes = mip.isLZ4
-                ? try decompressLZ4(payload, expecting: mip.decompressedSize)
+                ? try decompressLZ4(payload, expecting: expected)
                 : payload
+            guard bytes.count == expected else { throw TexError.lz4Failed }
             return .pixels(bytes: bytes, width: mip.width, height: mip.height, format: format)
         }
     }
 
     /// macOS Compression 프레임워크의 LZ4_RAW를 쓴다. 외부 의존성이 필요 없다.
     private static func decompressLZ4(_ input: Data, expecting size: Int) throws -> Data {
-        guard size > 0 else { throw TexError.lz4Failed }
+        // 빈 입력에 withUnsafeBytes를 걸면 baseAddress가 nil이라 강제 언랩이 트랩한다.
+        // 헤더 파서는 페이로드 크기 0을 허용하므로 여기서 막아야 한다.
+        guard size > 0, !input.isEmpty else { throw TexError.lz4Failed }
         var output = Data(count: size)
         let written = output.withUnsafeMutableBytes { dst -> Int in
             input.withUnsafeBytes { src -> Int in
@@ -1221,9 +1269,11 @@ public struct Vec3: Equatable, Sendable {
     }
 
     /// Wallpaper Engine은 벡터를 "1.00000 2.00000 3.00000" 문자열로 쓴다.
+    /// Double(_:)은 "inf"와 "nan"도 받아들인다. 그런 좌표가 통과하면
+    /// 렌더러가 NaN 지오메트리를 받아 아무것도 그리지 않는다. 유한값만 허용한다.
     public static func parse(_ string: String) -> Vec3? {
         let parts = string.split(separator: " ").compactMap { Double($0) }
-        guard parts.count == 3 else { return nil }
+        guard parts.count == 3, parts.allSatisfy(\.isFinite) else { return nil }
         return Vec3(x: parts[0], y: parts[1], z: parts[2])
     }
 }
@@ -1238,7 +1288,7 @@ public struct Vec2: Equatable, Sendable {
 
     public static func parse(_ string: String) -> Vec2? {
         let parts = string.split(separator: " ").compactMap { Double($0) }
-        guard parts.count == 2 else { return nil }
+        guard parts.count == 2, parts.allSatisfy(\.isFinite) else { return nil }
         return Vec2(x: parts[0], y: parts[1])
     }
 }
@@ -1295,7 +1345,9 @@ public struct SceneDocument: Sendable {
         let general = root["general"] as? [String: Any] ?? [:]
         guard let ortho = general["orthogonalprojection"] as? [String: Any],
               let width = ortho["width"] as? Int,
-              let height = ortho["height"] as? Int else {
+              let height = ortho["height"] as? Int,
+              // 0이나 음수면 렌더러의 투영 나눗셈이 무의미해진다. 여기서 막는다.
+              width > 0, height > 0 else {
             throw SceneError.missingField("orthogonalprojection")
         }
 
@@ -1303,7 +1355,10 @@ public struct SceneDocument: Sendable {
             ?? Vec3(x: 0, y: 0, z: 0)
         let clearEnabled = general["clearenabled"] as? Bool ?? true
 
-        let objects = root["objects"] as? [[String: Any]] ?? []
+        // 배열 조건부 캐스트는 전부-아니면-전무다. 원소 하나가 딕셔너리가 아니면
+        // 통째로 실패해 정상 레이어까지 사라진다. 원소별로 걸러 그것을 막는다.
+        let rawObjects = root["objects"] as? [Any] ?? []
+        let objects = rawObjects.compactMap { $0 as? [String: Any] }
         let layers = objects.enumerated().map { index, object in
             makeLayer(object, fallbackID: index, reader: reader)
         }
