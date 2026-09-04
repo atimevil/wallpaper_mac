@@ -22,8 +22,20 @@ public struct LibraryStore: Sendable {
         )
 
         return entries
-            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .filter(Self.isDirectory)
             .compactMap { try? WallpaperItem.load(from: $0) }
             .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    /// 심볼릭 링크도 디렉터리로 인정한다.
+    /// 배경화면은 용량이 커서 라이브러리 밖에 두고 링크로 참조하는 것이 자연스럽고,
+    /// URL의 isDirectoryKey는 링크 자체를 보므로 디렉터리로 판정하지 않는다.
+    private static func isDirectory(_ url: URL) -> Bool {
+        var isDir: ObjCBool = false
+        // fileExists는 링크를 따라가므로 대상이 디렉터리면 true를 준다.
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+            return false
+        }
+        return isDir.boolValue
     }
 }

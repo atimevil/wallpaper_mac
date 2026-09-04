@@ -99,6 +99,26 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertEqual(try LibraryStore(root: root).scan().count, 1)
     }
 
+    /// 배경화면은 용량이 커서 라이브러리 밖에 두고 링크로 참조하는 것이 자연스럽다.
+    /// URL의 isDirectoryKey는 심볼릭 링크를 디렉터리로 보지 않으므로 별도 처리가 필요하다.
+    func testScanFollowsDirectorySymlinks() throws {
+        let outside = root.appendingPathComponent("outside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        let real = outside.appendingPathComponent("real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try Data(#"{"type":"video","file":"a.mp4","title":"Linked"}"#.utf8)
+            .write(to: real.appendingPathComponent("project.json"))
+        try Data("x".utf8).write(to: real.appendingPathComponent("a.mp4"))
+
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("linked"), withDestinationURL: real
+        )
+
+        let titles = try LibraryStore(root: root).scan().map(\.title)
+        XCTAssertTrue(titles.contains("Linked"), "심볼릭 링크로 참조한 배경화면이 목록에 없다: \(titles)")
+    }
+
     func testScanOnMissingRootReturnsEmpty() throws {
         let missing = root.appendingPathComponent("nope")
         XCTAssertEqual(try LibraryStore(root: missing).scan(), [])
