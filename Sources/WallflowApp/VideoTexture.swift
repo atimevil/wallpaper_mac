@@ -26,7 +26,11 @@ final class VideoTexture {
     private let temporaryURL: URL
     /// CVMetalTexture를 살려둬야 그것이 감싼 MTLTexture가 유효하다.
     private var retainedFrame: CVMetalTexture?
-    private var endObserver: NSObjectProtocol?
+    /// deinit에서 만져야 하므로 비격리로 둔다. @MainActor deinit을 쓰면 마지막
+    /// 해제가 메인 밖에서 일어날 때 해제가 비동기로 미뤄지고, 그러면 226MB짜리
+    /// 임시 파일 삭제도 함께 늦어진다. 이 프로퍼티는 init/stop/deinit에서만
+    /// 만지고 전부 사실상 단일 스레드다.
+    private nonisolated(unsafe) var endObserver: NSObjectProtocol?
 
     private(set) var isPlaying = false
 
@@ -73,7 +77,6 @@ final class VideoTexture {
         }
     }
 
-    @MainActor
     deinit {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         try? FileManager.default.removeItem(at: temporaryURL)
@@ -118,6 +121,9 @@ final class VideoTexture {
             return retainedFrame.flatMap(CVMetalTextureGetTexture)
         }
         retainedFrame = created
+        // 참조가 끊긴 텍스처를 캐시가 놓아주게 한다. 비우지 않으면 며칠 켜두는
+        // 배경화면에서 메모리가 계속 는다.
+        CVMetalTextureCacheFlush(cache, 0)
         return CVMetalTextureGetTexture(created)
     }
 }
