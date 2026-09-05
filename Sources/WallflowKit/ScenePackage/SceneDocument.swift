@@ -69,16 +69,26 @@ public struct SceneDocument: Sendable {
         let name = object["name"] as? String ?? "object\(fallbackID)"
         let visible = object["visible"] as? Bool ?? true
 
-        // origin/scale이 문자열이 아니라 {"script": ...} 객체인 씬이 실제로 있다.
-        let origin = (object["origin"] as? String).flatMap(Vec3.parse)
-        let size = (object["size"] as? String).flatMap(Vec2.parse)
+        // origin/size가 문자열이 아니라 {"script": ..., "value": ...} 객체인 씬이 있다.
+        // 그 객체에도 `value`가 있고 그게 편집기에서 마지막으로 정해진 좌표다.
+        // 스크립트를 아직 못 돌려도 이 값으로 제자리에 그릴 수 있다 —
+        // 실물 씬 하나는 origin 스크립트의 update가 통째로 주석 처리돼 있어
+        // `value`가 유일한 좌표다.
+        let origin = Self.scalarOrScripted(object["origin"]).flatMap(Vec3.parse)
+        let size = Self.scalarOrScripted(object["size"]).flatMap(Vec2.parse)
+        // 스크립트가 붙어 있는데 우리가 못 돌리는 경우를 사용자에게 알린다.
+        var unrun: [String] = []
+        for key in ["origin", "size", "scale", "alpha", "color", "visible"]
+        where (object[key] as? [String: Any])?["script"] != nil {
+            unrun.append(key)
+        }
 
         func unsupported(_ reason: String) -> SceneLayer {
             SceneLayer(
                 id: id, name: name, visible: visible,
                 origin: origin ?? Vec3(x: 0, y: 0, z: 0),
                 size: size ?? Vec2(x: 0, y: 0),
-                content: .unsupported(reason: reason)
+                content: .unsupported(reason: reason), unrunScripts: unrun
             )
         }
 
@@ -92,12 +102,25 @@ public struct SceneDocument: Sendable {
             return SceneLayer(
                 id: id, name: name, visible: visible,
                 origin: origin, size: particleSize,
-                content: content
+                content: content, unrunScripts: unrun
             )
         }
 
         guard let modelPath = object["image"] as? String else {
-            if object["text"] != nil { return unsupported("텍스트는 M5에서 지원한다") }
+            // text가 객체가 아니라 그냥 문자열인 레이어가 있다(실물 "Audio visualizer").
+            // 스크립트 없이 고정 글자만 그리는 경우다.
+            let textObject: [String: Any]? = (object["text"] as? [String: Any])
+                ?? (object["text"] as? String).map { ["value": $0] }
+            if let text = textObject {
+                guard let origin else {
+                    return unsupported("텍스트 레이어의 origin에 좌표가 없다")
+                }
+                return SceneLayer(
+                    id: id, name: name, visible: visible,
+                    origin: origin, size: size ?? Vec2(x: 0, y: 0),
+                    content: .text(makeTextLayer(text, object: object)),
+                    unrunScripts: unrun)
+            }
             if object["sound"] != nil { return unsupported("사운드는 M6에서 지원한다") }
             return unsupported("알 수 없는 레이어 종류")
         }
@@ -109,8 +132,43 @@ public struct SceneDocument: Sendable {
         return SceneLayer(
             id: id, name: name, visible: visible,
             origin: origin, size: size,
-            content: content
+            content: content, unrunScripts: unrun
         )
+    }
+
+    /// 문자열이거나, `{"script": ..., "value": ...}` 객체면 그 `value`.
+    private static func scalarOrScripted(_ raw: Any?) -> String? {
+        if let text = raw as? String { return text }
+        return (raw as? [String: Any])?["value"] as? String
+    }
+
+    /// 텍스트 레이어를 읽는다.
+    ///
+    /// 실패시킬 이유가 거의 없다 — 폰트가 없거나 글자가 비어도 나중에 래스터화가
+    /// 판단한다. 여기서 unsupported로 떨구면 사용자는 "왜 시계가 없지"만 알 뿐
+    /// 무엇이 없는지 모른다.
+    private static func makeTextLayer(
+        _ text: [String: Any], object: [String: Any]
+    ) -> TextLayer {
+        // 값이 수만 있는 게 아니다. 실물 시계의 delimiter는 ":"라는 문자열이고,
+        // 이걸 버리면 스크립트가 "00" + undefined + "22"를 만든다.
+        var properties: [String: ScriptPropertyValue] = [:]
+        if let props = text["scriptproperties"] as? [String: Any] {
+            for (key, value) in props {
+                // 문자열을 먼저 본다. 나머지는 전부 수로 담는다 —
+                // JSON의 true/false도 NSNumber라 1/0이 된다(자바스크립트에선 같다).
+                if let s = value as? String { properties[key] = .text(s) }
+                else if let b = value as? Bool { properties[key] = .number(b ? 1 : 0) }
+                else if let d = value as? Double { properties[key] = .number(d) }
+            }
+        }
+        return TextLayer(
+            value: text["value"] as? String ?? "",
+            fontPath: object["font"] as? String ?? "systemfont",
+            // 실물 텍스트의 color는 이미 0~1이다. 파티클(0~255)과 다르니 나누지 마라.
+            color: (object["color"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 1, y: 1, z: 1),
+            script: text["script"] as? String,
+            scriptProperties: properties)
     }
 
     /// 파티클 프리셋을 따라가 레이어 내용을 판정한다.

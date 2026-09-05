@@ -15,6 +15,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var view: MTKView?
     private var compositor: MetalCompositor?
     private var skipped: [String] = []
+    /// 그리기는 하는데 온전하지 않은 레이어. 건너뛴 것과 섞으면 사용자가
+    /// "안 그려진 것"과 "덜 그려진 것"을 구별하지 못한다.
+    private var degraded: [String] = []
     /// 이 씬이 재생 중인 비디오 텍스처들. 렌더러가 소유한다.
     private var videos: [VideoTexture] = []
     /// 파티클 레이어마다 시뮬레이션과 렌더러 한 쌍. 매 프레임 전진시킨다.
@@ -22,6 +25,52 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                              textureRatio: Float)] = []
     /// 직전 프레임 시각. 첫 프레임에는 없다.
     private var lastFrameTime: CFTimeInterval?
+    /// 텍스트 레이어마다 스크립트와 구운 글자. 값이 바뀔 때만 다시 굽는다.
+    private var texts: [TextState] = []
+    /// 스크립트를 마지막으로 돌린 시각. 시계는 초 단위로 바뀌므로 1초에 한 번이면 된다.
+    private var lastScriptTime: CFTimeInterval?
+    /// 스크립트를 다시 돌리는 주기.
+    private static let scriptInterval: CFTimeInterval = 1.0
+    /// 컴포지터에 준 레이어 목록. 글자 크기가 바뀌면 다시 줘야 해서 들고 있는다.
+    private var layerList: [(QuadInstance, LayerSource)] = []
+
+    /// 텍스트 레이어 하나의 상태.
+    ///
+    /// 스크립트는 **렌더 스레드에서 돌리지 않는다.** 창작마당 코드라 무한 루프가
+    /// 있을 수 있고 그것을 중단시킬 공개 API가 없다(ScriptEngine 참고). 레이어마다
+    /// 직렬 큐 하나에 가둬 두면, 폭주해도 그 레이어의 글자만 마지막 값에서 멈추고
+    /// 화면과 나머지 레이어는 계속 돈다.
+    @MainActor
+    private final class TextState {
+        let text: TextLayer
+        let fontData: Data?
+        let pointSize: Double
+        /// 씬이 정한 글자 상자(직교 공간). 구운 글자를 여기 맞춰 넣는다.
+        let box: SIMD2<Float>
+        let origin: SIMD2<Float>
+        let queue: DispatchQueue
+        let engine: ScriptEngine?
+        var value: String
+        var texture: MTLTexture?
+        var size: SIMD2<Float> = .zero
+        /// 이미 돌고 있으면 또 던지지 않는다. 느린 스크립트가 큐에 쌓이면
+        /// 나중엔 몇 분 전 시각을 그리게 된다.
+        var inFlight = false
+        /// 컴포지터 레이어 목록에서의 자리. 글자 폭이 바뀌면 그 자리의 쿼드를 고쳐야 한다.
+        var layerIndex = 0
+
+        init(text: TextLayer, fontData: Data?, pointSize: Double, origin: SIMD2<Float>,
+             box: SIMD2<Float>, engine: ScriptEngine?, name: String) {
+            self.text = text
+            self.fontData = fontData
+            self.pointSize = pointSize
+            self.box = box
+            self.origin = origin
+            self.engine = engine
+            self.value = text.value
+            self.queue = DispatchQueue(label: "wallflow.script.\(name)", qos: .utility)
+        }
+    }
 
     /// 씬 하나가 동시에 열 수 있는 비디오 레이어 수. 보유한 실물 씬 넷은 각각
     /// 최대 1개뿐이라 4는 정상 콘텐츠에 넉넉하다. 상한이 없으면 악의적인
@@ -36,6 +85,63 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     init(item: WallpaperItem) {
         self.item = item
         super.init()
+    }
+
+    /// 글자를 굽고 텍스처와 쿼드 크기를 갱신한다.
+    /// 직교 공간과 픽셀이 1:1이라 구운 이미지 크기를 그대로 쿼드 크기로 쓴다.
+    private func rasterize(_ state: TextState, compositor: MetalCompositor) {
+        guard let image = try? TextRasterizer.rasterize(
+            text: state.value, fontData: state.fontData,
+            pointSize: state.pointSize, color: state.text.color)
+        else {
+            // 빈 문자열이면 텍스처를 지운다. 이전 글자가 남으면 시계가 멈춘 것처럼 보인다.
+            state.texture = nil
+            state.size = .zero
+            return
+        }
+        state.texture = try? compositor.makeTexture(from: .image(image))
+        // 구운 글자를 씬이 정한 상자에 비율 그대로 맞춰 넣는다. 상자를 무시하면
+        // 글자가 상자를 넘어 화면 밖으로 밀려난다.
+        let fitted = TextRasterizer.fit(
+            imageWidth: image.width, imageHeight: image.height,
+            boxWidth: Double(state.box.x), boxHeight: Double(state.box.y))
+        state.size = SIMD2(Float(fitted.width), Float(fitted.height))
+    }
+
+    /// 스크립트를 돌려 값이 바뀌었으면 다시 굽는다.
+    ///
+    /// 스크립트는 레이어의 직렬 큐에서 돌고, 결과만 메인으로 돌아온다. 굽는 것과
+    /// 텍스처 업로드는 메인에서 한다(Metal 객체가 메인 격리라서).
+    private func runScripts() {
+        guard let compositor else { return }
+        for state in texts {
+            guard let engine = state.engine, !state.inFlight else { continue }
+            state.inFlight = true
+            let current = state.value
+            state.queue.async { [weak self, weak state] in
+                let produced = engine.update(value: current)
+                Task { @MainActor in
+                    guard let self, let state else { return }
+                    state.inFlight = false
+                    guard let produced, produced != state.value else { return }
+                    state.value = produced
+                    self.rasterize(state, compositor: compositor)
+                    self.refreshLayers()
+                }
+            }
+        }
+    }
+
+    /// 글자 폭은 글자 수에 따라 바뀐다. 쿼드를 그대로 두면 "9:59"와 "10:00"이
+    /// 같은 상자에 늘어나 붙는다. 바뀐 크기를 레이어 목록에 반영해 다시 준다.
+    /// 1초에 한 번 남짓이라 비용이 문제되지 않는다.
+    private func refreshLayers() {
+        guard let compositor else { return }
+        for state in texts where state.layerIndex < layerList.count {
+            layerList[state.layerIndex].0 = QuadInstance(
+                origin: state.origin, size: state.size)
+        }
+        compositor.setLayers(layerList)
     }
 
     /// 파티클 텍스처가 스프라이트 시트면 그 배치를 읽는다.
@@ -113,9 +219,16 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var videos: [VideoTexture] = []
         var particles: [(system: ParticleSystem, renderer: ParticleRenderer,
                          textureRatio: Float)] = []
+        var texts: [TextState] = []
         var drawable: [(QuadInstance, LayerSource)] = []
 
         for layer in document.layers where layer.visible {
+            if !layer.unrunScripts.isEmpty {
+                // 조용히 무시하면 사용자가 레이어가 왜 안 움직이는지 알 수 없다.
+                degraded.append(
+                    "\(layer.name): \(layer.unrunScripts.joined(separator: ", "))의 스크립트를 "
+                        + "아직 돌리지 못해 저장된 값으로 그린다")
+            }
             let quad = QuadInstance(
                 origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
                 size: SIMD2(Float(layer.size.x), Float(layer.size.y)))
@@ -185,7 +298,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                         let system = ParticleSystem(
                             preset: preset, random: SeededRandom(seed: UInt64(bitPattern: Int64(layer.id))))
                         if !system.unimplementedOperators.isEmpty {
-                            skipped.append(
+                            degraded.append(
                                 "\(layer.name): 아직 처리하지 않는 연산자 "
                                     + system.unimplementedOperators.joined(separator: ", "))
                         }
@@ -198,19 +311,62 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     skipped.append("\(layer.name): 파티클 텍스처 로드 실패 \(error)")
                 }
 
+            case .text(let text):
+                // 폰트가 없어도 그린다 — 시스템 폰트로 대체된다. 글자가 아예
+                // 안 나오는 것보다 다른 폰트로라도 나오는 게 낫다.
+                let fontData = text.usesSystemFont ? nil : resolver.data(for: text.fontPath)
+                if fontData == nil && !text.usesSystemFont {
+                    degraded.append("\(layer.name): 폰트를 찾을 수 없어 시스템 폰트로 그린다: \(text.fontPath)")
+                }
+                // 오브젝트의 size는 글자 크기가 아니라 **상자**다. 실물에서 411x5300짜리도
+                // 있어서 그대로 점 크기로 쓰면 글자가 화면 밖으로 밀려난다. 대신 고정
+                // 크기로 굽고 상자에 맞춰 줄인다. 256은 레티나에서 흐리지 않을 만큼 크다.
+                let pointSize = 256.0
+                let engine = text.script.map {
+                    ScriptEngine(
+                        source: $0,
+                        properties: text.scriptProperties.mapValues(\.jsValue))
+                }
+                if let failure = engine?.failure {
+                    skipped.append("\(layer.name): 스크립트를 쓸 수 없다: \(failure)")
+                }
+                let state = TextState(
+                    text: text, fontData: fontData, pointSize: pointSize,
+                    origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
+                    box: SIMD2(Float(layer.size.x), Float(layer.size.y)),
+                    engine: engine?.failure == nil ? engine : nil, name: layer.name)
+                texts.append(state)
+                // 첫 값을 바로 구워 둔다. 스크립트가 처음 도는 1초 동안 비어 보이면
+                // 사용자는 고장으로 읽는다.
+                if let engine = state.engine, let first = engine.update(value: state.value) {
+                    state.value = first
+                }
+                rasterize(state, compositor: compositor)
+                state.layerIndex = drawable.count
+                drawable.append((QuadInstance(origin: state.origin, size: state.size),
+                                 .dynamic { [weak state] in state?.texture }))
+
             case .unsupported(let reason):
                 skipped.append("\(layer.name): \(reason)")
             }
         }
         self.videos = videos
         self.particles = particles
+        self.texts = texts
 
         // 건너뛴 이유는 drawable이 비어 폴백하는 경우에 사용자가 가장 필요로 한다.
         // isEmpty 가드보다 먼저 써야 그 경로에서도 진단이 버려지지 않는다.
         if !skipped.isEmpty {
             FileHandle.standardError.write(Data(
-                "씬 \(item.title)에서 건너뛴 레이어 \(skipped.count)개:\n  "
+                "씬 \(item.title)에서 그리지 못한 레이어 \(skipped.count)개:\n  "
                     .appending(skipped.joined(separator: "\n  "))
+                    .appending("\n").utf8
+            ))
+        }
+        if !degraded.isEmpty {
+            FileHandle.standardError.write(Data(
+                "씬 \(item.title)에서 온전하지 않게 그린 레이어 \(degraded.count)개:\n  "
+                    .appending(degraded.joined(separator: "\n  "))
                     .appending("\n").utf8
             ))
         }
@@ -223,11 +379,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             throw RendererError.noDrawableLayers
         }
 
+        self.layerList = drawable
         compositor.setLayers(drawable)
         self.compositor = compositor
 
-        // 비디오와 파티클은 둘 다 매 프레임 갱신이 필요하다.
-        if !videos.isEmpty || !particles.isEmpty {
+        // 비디오·파티클·텍스트는 모두 시간에 따라 바뀐다.
+        if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty {
             view.isPaused = false
             view.enableSetNeedsDisplay = false
             // 전력 정책이 30fps를 지시한다. 60fps 소스라도 그 이상 그리지 않는다.
@@ -251,7 +408,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             view?.isHidden = false
             // VideoRenderer.apply와 맞춘다: 이미 재생 중이면 다시 부르지 않는다.
             for video in videos where !video.isPlaying { video.play() }
-            if !videos.isEmpty || !particles.isEmpty {
+            if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty {
                 view?.isPaused = false
                 view?.preferredFramesPerSecond = fps
             }
@@ -263,8 +420,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         for video in videos { video.stop() }
         videos.removeAll()
         particles.removeAll()
+        texts.removeAll()
         lastFrameTime = nil
+        lastScriptTime = nil
         compositor = nil
+        layerList = []
         view?.delegate = nil
     }
 }
@@ -275,6 +435,13 @@ extension SceneRenderer: MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        if !texts.isEmpty {
+            let now = CACurrentMediaTime()
+            if lastScriptTime.map({ now - $0 >= Self.scriptInterval }) ?? true {
+                lastScriptTime = now
+                runScripts()
+            }
+        }
         if !particles.isEmpty {
             let now = CACurrentMediaTime()
             // 첫 프레임에는 직전 시각이 없다. 0을 넘기면 시뮬레이션이 그냥 넘어간다.

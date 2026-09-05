@@ -182,9 +182,12 @@ final class RealScenesTests: XCTestCase {
     /// origin이 문자열이 아니라 스크립트 객체인 image 레이어.
     /// 실물에서 이 조건을 만족하는 것은 이 둘뿐이다. particle/text 오브젝트는
     /// image 키가 없어 origin을 읽기 전에 걸러지므로 여기에 넣으면 안 된다.
-    func testScriptedOriginImageLayersBecomeUnsupported() throws {
-        let cases = [("3536506287", "Audio bar"), ("3552439823", "cursor")]
-        for (id, name) in cases {
+    /// origin이 스크립트여도 그 객체의 `value`에 편집기가 저장한 좌표가 있다.
+    /// M2는 이걸 몰라서 레이어를 통째로 버렸다. 이제는 저장된 좌표로 그리고,
+    /// 못 돌린 스크립트를 `unrunScripts`로 알린다 — 조용히 무시하면 사용자가
+    /// 레이어가 왜 안 움직이는지 알 수 없다.
+    func testScriptedOriginUsesSavedValueAndIsReported() throws {
+        for (id, name) in [("3536506287", "Audio bar"), ("3552439823", "cursor")] {
             guard let reader = try scenePkg(id) else {
                 throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
             }
@@ -193,44 +196,39 @@ final class RealScenesTests: XCTestCase {
                 XCTFail("\(id)에 레이어 '\(name)'이 없다")
                 continue
             }
-            guard case .unsupported(let reason) = layer.content else {
-                return XCTFail("\(id)/\(name)은 스크립트 origin이라 unsupported여야 한다")
-            }
-            // 이유까지 확인해야 origin 가드를 탔다는 것이 증명된다.
-            // 다른 가드에 걸려도 unsupported가 되기 때문이다.
-            XCTAssertTrue(
-                reason.contains("스크립트"),
-                "\(id)/\(name)이 origin 가드가 아닌 다른 이유로 걸렸다: \(reason)"
-            )
+            XCTAssertTrue(layer.unrunScripts.contains("origin"),
+                          "\(id)/\(name)의 못 돌린 origin 스크립트를 알리지 않는다")
+            // 좌표를 실제로 읽었는지. 전부 0이면 value를 못 읽고 기본값을 쓴 것이다.
+            let o = layer.origin
+            XCTAssertFalse(o.x == 0 && o.y == 0 && o.z == 0,
+                           "\(id)/\(name)의 저장된 좌표를 읽지 못했다")
         }
     }
 
-    /// 파티클과 텍스트 레이어는 M2가 그리지 않는다.
-    /// origin 가드보다 앞에서 각자의 이유로 걸러져야 한다.
-    func testParticleAndTextLayersAreUnsupportedForTheirOwnReason() throws {
-        let cases = [
-            ("3552439823", "zzz", "파티클"),
-            ("3616103296", "Song Title", "텍스트"),
-            ("3616103296", "Clock", "텍스트"),
-        ]
-        for (id, name, expectedReason) in cases {
-            guard let reader = try scenePkg(id) else {
-                throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
-            }
-            let doc = try SceneDocument.load(from: reader)
+    /// M2가 버리던 레이어들이 이제 각자의 내용으로 해석되어야 한다.
+    /// zzz는 파티클, Song Title과 Clock은 텍스트다. 셋 다 origin이 스크립트라
+    /// 예전엔 통째로 unsupported였다.
+    func testFormerlyUnsupportedLayersNowResolve() throws {
+        guard let assets = try assetsStore() else { throw XCTSkip("환경변수 미설정") }
+        for (id, name, kind) in [("3552439823", "zzz", "particle"),
+                                 ("3616103296", "Song Title", "text"),
+                                 ("3616103296", "Clock", "text")] {
+            guard let reader = try scenePkg(id) else { throw XCTSkip("환경변수 미설정") }
+            let doc = try SceneDocument.load(from: reader, assets: assets)
             guard let layer = doc.layers.first(where: { $0.name == name }) else {
-                XCTFail("\(id)에 레이어 '\(name)'이 없다")
+                XCTFail("\(id)에 '\(name)'이 없다")
                 continue
             }
-            guard case .unsupported(let reason) = layer.content else {
-                return XCTFail("\(id)/\(name)은 unsupported여야 한다")
+            switch (kind, layer.content) {
+            case ("particle", .particle): break
+            case ("text", .text): break
+            default:
+                XCTFail("\(id)/\(name)이 \(kind)로 해석되지 않았다: \(layer.content)")
             }
-            XCTAssertTrue(
-                reason.contains(expectedReason),
-                "\(id)/\(name)의 이유가 '\(expectedReason)'을 담지 않는다: \(reason)"
-            )
         }
     }
+
+
 
     /// 값 단언이 한 번도 닿지 않던 씬. PNG 텍스처가 많다.
     func testSmallestSceneResolvesLayers() throws {
