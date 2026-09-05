@@ -118,8 +118,9 @@ M3의 디코더는 `TEXB0001`/`TEXB0002`를 거부하고, `flags & 4`인 텍스�
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
-`Fixtures.swift`의 `buildTex`가 `TEXB0004` 전용이므로 버전을 받도록 넓힌다.
-기존 호출부는 기본값으로 그대로 동작해야 한다.
+`Fixtures.swift`에 구형 컨테이너용 빌더를 **별도 함수로** 더한다.
+기존 `buildTex`는 건드리지 않는다 — 호출부가 26곳(`TexDecoderTests` 15,
+`TexHeaderTests` 11)이라 시그니처를 바꾸면 diff가 커져 리뷰 범위가 흐려진다.
 
 ```swift
 /// TEXB0001은 freeImageFormat도 LZ4 필드도 없다. 항상 원시 픽셀이다.
@@ -1074,6 +1075,19 @@ MSG
 
 - [ ] **Step 2~4:** 실패 확인 → `makeLayer`의 `object["particle"]` 분기를 해석으로 바꿈 → 통과 확인
 
+**빌드를 초록으로 유지하려면 `SceneRenderer`도 같이 손봐야 한다.**
+`SceneRenderer.swift`의 `switch layer.content`는 `default`가 없는 소진형이라,
+`.particle`을 더하면 이 태스크에서 컴파일이 실패한다. 다음 한 분기를 더한다 —
+Task 6이 실제 처리로 대체한다.
+
+```swift
+            case .particle:
+                // Task 6에서 시뮬레이션과 렌더러를 붙인다.
+                skipped.append("\(layer.name): 파티클 렌더러는 Task 6에서 연결한다")
+```
+
+태스크마다 빌드가 통과해야 그 태스크의 리뷰와 회귀 판정이 성립한다.
+
 M2가 `"파티클은 M3에서 지원한다"`로 떨구던 자리를 실제 해석으로 대체한다.
 텍스처 이름은 이미지 레이어와 같은 규칙으로 `materials/<name>.tex`가 된다.
 
@@ -1103,6 +1117,11 @@ MSG
 - Create: `Sources/WallflowApp/ParticleRenderer.swift`
 - Modify: `Sources/WallflowApp/SceneShaders.swift`
 - Modify: `Sources/WallflowApp/MetalCompositor.swift`
+
+`MetalCompositor`의 `draw(in:)`에 있는 `switch source`도 `default`가 없는
+소진형이다. `LayerSource.particles`를 더하면서 **같은 태스크에서** 그 분기를
+반드시 함께 추가해야 빌드가 통과한다. 분기는 파티클 렌더러에게 인코딩을
+위임하기만 한다.
 
 **Interfaces:**
 - Consumes: `Particle`, `ParticleSystem` (Task 3), `QuadUniforms` (M2)
