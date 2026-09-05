@@ -22,6 +22,20 @@ final class RealScenesTests: XCTestCase {
         }
     }
 
+    private func assetsStore() throws -> AssetsStore? {
+        guard let path = ProcessInfo.processInfo.environment["WALLFLOW_TEST_ASSETS"] else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+              isDir.boolValue else {
+            XCTFail("WALLFLOW_TEST_ASSETS가 가리키는 경로가 없다: \(url.path)")
+            throw MissingSceneError()
+        }
+        return AssetsStore(root: url)
+    }
+
     private func scenePkg(_ id: String) throws -> PkgReader? {
         if let badPath = badPath {
             XCTFail("WALLFLOW_TEST_SCENES가 설정되었지만 디렉토리가 아니거나 존재하지 않음: \(badPath)")
@@ -230,11 +244,50 @@ final class RealScenesTests: XCTestCase {
         }
         XCTAssertFalse(images.isEmpty, "이미지 레이어가 하나도 해석되지 않았다")
     }
+
+    /// assets가 있으면 M2에서 참조가 끊겼던 레이어들이 해석되어야 한다.
+    func testAssetsResolveSolidInstanceModels() throws {
+        guard let reader = try scenePkg("3616103296") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        guard let assets = try assetsStore() else {
+            throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정")
+        }
+
+        let without = try SceneDocument.load(from: reader, assets: nil)
+        let with = try SceneDocument.load(from: reader, assets: assets)
+
+        func unsupportedCount(_ doc: SceneDocument) -> Int {
+            doc.layers.filter { if case .unsupported = $0.content { return true } else { return false } }.count
+        }
+        XCTAssertLessThan(unsupportedCount(with), unsupportedCount(without),
+                          "assets를 주면 해석되는 레이어가 늘어야 한다")
+    }
+
+    /// composelayer는 assets가 있어도 렌더 타깃이라 그릴 수 없다. 이유가 구분되어야 한다.
+    func testComposeLayerReportsRenderTargetEvenWithAssets() throws {
+        guard let reader = try scenePkg("3552439823") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        guard let assets = try assetsStore() else {
+            throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader, assets: assets)
+        let layer = try XCTUnwrap(doc.layers.first { $0.name == "Audio Visualizer" })
+        guard case .unsupported(let reason) = layer.content else {
+            return XCTFail("렌더 타깃 레이어는 여전히 unsupported여야 한다")
+        }
+        XCTAssertTrue(reason.contains("렌더 타깃"), "이유: \(reason)")
+    }
 }
 
 /// ROOT는 유효한데 이름 붙인 씬 디렉토리가 없을 때 던진다. XCTFail로 이미 실패를
 /// 기록한 뒤 이 오류를 던져, 호출부의 XCTSkip 폴백이 그 실패를 "미설정"으로
 /// 가려버리지 않게 한다.
 private struct MissingSceneError: Error {
-    let path: String
+    let path: String?
+
+    init(path: String? = nil) {
+        self.path = path
+    }
 }

@@ -14,10 +14,23 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var view: MTKView?
     private var compositor: MetalCompositor?
     private var skipped: [String] = []
+    /// 이 씬이 재생 중인 비디오 텍스처들. 렌더러가 소유한다.
+    private var videos: [VideoTexture] = []
 
     init(item: WallpaperItem) {
         self.item = item
         super.init()
+    }
+
+    /// Wallpaper Engine의 표준 에셋. 사용자가 윈도우 설치 폴더에서 반입한다.
+    /// 없으면 nil이고, 그 경우 표준 모델을 참조하는 레이어만 unsupported가 된다.
+    static func defaultAssetsStore() -> AssetsStore? {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Wallflow/Assets")
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+              isDir.boolValue else { return nil }
+        return AssetsStore(root: url)
     }
 
     func makeView() -> NSView {
@@ -44,7 +57,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             options: .mappedIfSafe
         )
         let reader = try PkgReader(data: raw)
-        let document = try SceneDocument.load(from: reader)
+        let assets = Self.defaultAssetsStore()
+        let document = try SceneDocument.load(from: reader, assets: assets)
 
         let compositor = try MetalCompositor(device: device)
         compositor.setProjection(width: document.orthoWidth, height: document.orthoHeight)
@@ -55,29 +69,45 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             ))
         }
 
+        let resolver = ReferenceResolver(pkg: reader, assets: assets)
+
+        var videos: [VideoTexture] = []
         var drawable: [(QuadInstance, LayerSource)] = []
+
         for layer in document.layers where layer.visible {
-            guard case .image(let path) = layer.content else {
-                if case .unsupported(let reason) = layer.content {
-                    skipped.append("\(layer.name): \(reason)")
+            let quad = QuadInstance(
+                origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
+                size: SIMD2(Float(layer.size.x), Float(layer.size.y)))
+
+            switch layer.content {
+            case .solidColor(let c):
+                drawable.append((quad, .solid(SIMD4(Float(c.x), Float(c.y), Float(c.z), 1))))
+
+            case .image(let path), .video(let path):
+                guard let raw = resolver.data(for: path) else {
+                    skipped.append("\(layer.name): 텍스처를 찾을 수 없다: \(path)")
+                    continue
                 }
-                continue
-            }
-            do {
-                let texture = try compositor.makeTexture(
-                    from: try TexDecoder.decode(try reader.data(for: path))
-                )
-                drawable.append((
-                    QuadInstance(
-                        origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
-                        size: SIMD2(Float(layer.size.x), Float(layer.size.y))
-                    ),
-                    .fixed(texture)
-                ))
-            } catch {
-                skipped.append("\(layer.name): 텍스처 로드 실패 \(error)")
+                do {
+                    let decoded = try TexDecoder.decode(raw)
+                    if case .video(let mp4) = decoded {
+                        let video = try VideoTexture(mp4: mp4, device: device)
+                        video.play()
+                        videos.append(video)
+                        drawable.append((quad, .dynamic { [weak video] in video?.currentTexture() }))
+                    } else {
+                        let texture = try compositor.makeTexture(from: decoded)
+                        drawable.append((quad, .fixed(texture)))
+                    }
+                } catch {
+                    skipped.append("\(layer.name): 텍스처 로드 실패 \(error)")
+                }
+
+            case .unsupported(let reason):
+                skipped.append("\(layer.name): \(reason)")
             }
         }
+        self.videos = videos
 
         // 건너뛴 이유는 drawable이 비어 폴백하는 경우에 사용자가 가장 필요로 한다.
         // isEmpty 가드보다 먼저 써야 그 경로에서도 진단이 버려지지 않는다.
@@ -99,25 +129,38 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
         compositor.setLayers(drawable)
         self.compositor = compositor
+
+        if !videos.isEmpty {
+            view.isPaused = false
+            view.enableSetNeedsDisplay = false
+            // 전력 정책이 30fps를 지시한다. 60fps 소스라도 그 이상 그리지 않는다.
+            view.preferredFramesPerSecond = PowerPolicy.normalFPS
+        }
+
         view.needsDisplay = true
     }
 
     func apply(_ directive: PlaybackDirective) {
-        // M2의 씬은 완전히 정적이고 MTKView는 이미 isPaused = true다.
-        // .paused에서 view를 숨기면 WallpaperWindow의 검은 배경이 드러나 사용자가
-        // 자리를 비운 15분 동안 검은 화면을 보게 된다(PowerPolicy가 900초 후 이 상태로
-        // 전환한다). 화면은 켜져 있고 바탕화면은 여전히 보여야 하므로, 정적 씬에서는
-        // 숨길 이유가 없다 — VideoRenderer.apply가 일시정지만 하고 마지막 프레임을
-        // 남겨두는 것과 같은 이유다. 이 no-op을 "복원"하지 말 것.
         switch directive {
-        case .paused: break
-        case .playing:
+        case .paused:
+            // 뷰를 숨기지 않는다. 마지막 프레임이 남아야 검은 화면이 되지 않는다.
+            // 정적 씬은 애초에 그릴 것이 없어 이 분기가 아무 일도 하지 않는다.
+            for video in videos { video.pause() }
+            view?.isPaused = true
+        case .playing(let fps):
             view?.isHidden = false
+            for video in videos { video.play() }
+            if !videos.isEmpty {
+                view?.isPaused = false
+                view?.preferredFramesPerSecond = fps
+            }
             view?.needsDisplay = true
         }
     }
 
     func stop() {
+        for video in videos { video.stop() }
+        videos.removeAll()
         compositor = nil
         view?.delegate = nil
     }
