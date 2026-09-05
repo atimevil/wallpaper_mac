@@ -1266,8 +1266,19 @@ distancemax가 없다. 그런데 우리 파서는 `guard let ... else { return n
 
 `MetalCompositor`의 `draw(in:)`에 있는 `switch source`도 `default`가 없는
 소진형이다. `LayerSource.particles`를 더하면서 **같은 태스크에서** 그 분기를
-반드시 함께 추가해야 빌드가 통과한다. 분기는 파티클 렌더러에게 인코딩을
-위임하기만 한다.
+반드시 함께 추가해야 빌드가 통과한다.
+
+그 분기에는 함정이 둘 있다(컨트롤러가 코드를 읽고 확인했다):
+
+1. **`switch` 바로 뒤에 공통 `drawPrimitives(type: .triangleStrip, vertexCount: 4)`가 있다.**
+   파티클은 인스턴싱으로 자기 draw를 인코딩하므로, 분기 끝에서 반드시 `continue`해
+   이 공통 draw를 건너뛰어야 한다. 안 그러면 파티클 위에 정체불명의 쿼드가
+   한 장 더 그려진다.
+2. **루프 밖에서 `encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)`을 한 번만 한다.**
+   파티클 셰이더가 인스턴스 버퍼를 같은 index 0으로 받으면, 파티클 레이어 다음에
+   오는 일반 레이어가 인스턴스 배열을 정점 배열로 읽는다. 화면이 깨지는데 원인이
+   파티클로 보이지 않는다. 그래서 **인스턴스는 index 2, 파티클 유니폼은 index 3**을
+   쓴다. index 0/1은 기존 쿼드 경로가 쓰므로 건드리지 않는다.
 
 **Interfaces:**
 - Consumes: `Particle`, `ParticleSystem` (Task 3), `QuadUniforms` (M2)
@@ -1312,8 +1323,8 @@ distancemax가 없다. 그런데 우리 파서는 `guard let ... else { return n
     vertex VertexOut particle_vertex(
         uint vid [[vertex_id]],
         uint iid [[instance_id]],
-        constant ParticleInstance *instances [[buffer(0)]],
-        constant ParticleUniforms &u [[buffer(1)]]
+        constant ParticleInstance *instances [[buffer(2)]],
+        constant ParticleUniforms &u [[buffer(3)]]
     ) {
         // 삼각형 스트립 코너: (0,0) (1,0) (0,1) (1,1)
         float2 corner = float2(float(vid & 1), float((vid >> 1) & 1));
