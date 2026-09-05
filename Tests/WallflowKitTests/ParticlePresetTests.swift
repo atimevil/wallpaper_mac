@@ -74,12 +74,12 @@ final class ParticlePresetTests: XCTestCase {
         {"material":"m.json","maxcount":10,
          "operator":[{"name":"movement","gravity":"0 -9 0","drag":0.1},
                      {"name":"alphafade","fadeintime":0.1,"fadeouttime":0.2},
-                     {"name":"angularmovement","gravity":"0 0 0","drag":0.0},
+                     {"name":"angularmovement","force":"0 0 0","drag":0.0},
                      {"name":"oscillateposition","mask":"1 0.5 0","scalemin":20,"scalemax":35,
                       "frequencymin":0.8,"frequencymax":1.0,"phasemin":0,"phasemax":1},
                      {"name":"oscillatealpha","frequencymin":0.5,"frequencymax":1.5,
-                      "phasemin":0,"phasemax":1},
-                     {"name":"controlpointattract","controlpoint":2,"scale":1.0,"radius":100}]}
+                      "scalemin":0.2,"scalemax":0.8},
+                     {"name":"controlpointattract","controlpoint":2,"origin":"0 0 0","scale":1.0,"threshold":100}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
         XCTAssertEqual(p.operators.count, 6, "여섯 종류가 전부 인식되어야 한다")
@@ -97,10 +97,10 @@ final class ParticlePresetTests: XCTestCase {
         XCTAssertEqual(fadeInTime, 0.1)
         XCTAssertEqual(fadeOutTime, 0.2)
 
-        guard case .angularMovement(let gravity, let drag) = p.operators[2] else {
+        guard case .angularMovement(let force, let drag) = p.operators[2] else {
             return XCTFail("angularmovement이어야 한다")
         }
-        XCTAssertEqual(gravity, Vec3(x: 0, y: 0, z: 0))
+        XCTAssertEqual(force, Vec3(x: 0, y: 0, z: 0))
         XCTAssertEqual(drag, 0.0)
 
         guard case .oscillatePosition(let mask, let scaleMin, let scaleMax,
@@ -115,37 +115,38 @@ final class ParticlePresetTests: XCTestCase {
         XCTAssertEqual(phaseMin, 0)
         XCTAssertEqual(phaseMax, 1)
 
-        guard case .oscillateAlpha(let freqMin, let freqMax, let phaseMin, let phaseMax) = p.operators[4] else {
+        guard case .oscillateAlpha(let freqMin, let freqMax, let scaleMin, let scaleMax) = p.operators[4] else {
             return XCTFail("oscillatealpha이어야 한다")
         }
         XCTAssertEqual(freqMin, 0.5)
         XCTAssertEqual(freqMax, 1.5)
-        XCTAssertEqual(phaseMin, 0)
-        XCTAssertEqual(phaseMax, 1)
+        XCTAssertEqual(scaleMin, 0.2)
+        XCTAssertEqual(scaleMax, 0.8)
 
-        guard case .controlPointAttract(let controlPoint, let scale, let radius) = p.operators[5] else {
+        guard case .controlPointAttract(let controlPoint, let origin, let scale, let threshold) = p.operators[5] else {
             return XCTFail("controlpointattract이어야 한다")
         }
         XCTAssertEqual(controlPoint, 2)
+        XCTAssertEqual(origin, Vec3(x: 0, y: 0, z: 0))
         XCTAssertEqual(scale, 1.0)
-        XCTAssertEqual(radius, 100)
+        XCTAssertEqual(threshold, 100)
     }
 
     func testBoxRandomEmitter() throws {
         let json = try XCTUnwrap(preset("""
         {"material":"m.json","maxcount":10,
          "emitter":[{"name":"boxrandom","rate":5,"origin":"1 2 3",
-                     "directions":"0 -1 0","min":"-100 -10 0","max":"100 10 50"}]}
+                     "directions":"0 -1 0","distancemin":"-100 -10 0","distancemax":"100 10 50"}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        guard case .boxRandom(let rate, let origin, let directions, let min, let max) = p.emitters[0] else {
+        guard case .boxRandom(let rate, let origin, let directions, let distanceMin, let distanceMax) = p.emitters[0] else {
             return XCTFail("boxrandom이어야 한다")
         }
         XCTAssertEqual(rate, 5)
         XCTAssertEqual(origin, Vec3(x: 1, y: 2, z: 3))
         XCTAssertEqual(directions, Vec3(x: 0, y: -1, z: 0))
-        XCTAssertEqual(min, Vec3(x: -100, y: -10, z: 0))
-        XCTAssertEqual(max, Vec3(x: 100, y: 10, z: 50))
+        XCTAssertEqual(distanceMin, Vec3(x: -100, y: -10, z: 0))
+        XCTAssertEqual(distanceMax, Vec3(x: 100, y: 10, z: 50))
     }
 
     /// 모르는 이름은 씬 전체를 버리지 않고 그것만 빠진다.
@@ -334,5 +335,121 @@ final class ParticlePresetTests: XCTestCase {
         // unsupportedNames에는 들어가지 않아야 한다.
         XCTAssertFalse(p.unsupportedNames.contains("velocityrandom"),
                       "알려진 이름은 unsupportedNames가 아니라 malformedNames에만 들어가야 한다")
+    }
+
+    // Task 4b: 실물 필드 모양에 맞춘 새로운 테스트들
+
+    /// 1. `{"name":"boxrandom","rate":200}` — 필드가 이것뿐이어도 파싱되고 malformed가 아니다.
+    func testBoxRandomWithMinimalFields() throws {
+        let json = try XCTUnwrap(preset(#"{"material":"m.json","maxcount":10,"emitter":[{"name":"boxrandom","rate":200}]}"#))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertEqual(p.emitters.count, 1, "필드가 최소일 때도 파싱되어야 한다")
+        guard case .boxRandom(let rate, _, _, _, _) = p.emitters[0] else {
+            return XCTFail("boxrandom이어야 한다")
+        }
+        XCTAssertEqual(rate, 200)
+        XCTAssertTrue(p.malformedNames.isEmpty, "필드가 이것뿐이어도 malformed가 아니다")
+    }
+
+    /// 2. `{"name":"boxrandom","distancemax":"1024 512 0"}` — rate 없이 파싱되고 rate가 `defaultEmitRate`다.
+    func testBoxRandomWithDefaultRate() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "emitter":[{"name":"boxrandom","distancemax":"1024 512 0"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        guard case .boxRandom(let rate, _, _, _, let distanceMax) = p.emitters[0] else {
+            return XCTFail("boxrandom이어야 한다")
+        }
+        XCTAssertEqual(rate, ParticlePreset.defaultEmitRate, "rate가 없으면 defaultEmitRate를 쓴다")
+        XCTAssertEqual(distanceMax, Vec3(x: 1024, y: 512, z: 0))
+    }
+
+    /// 3. `{"name":"angularmovement","force":"0 0 0"}` — malformed가 아니다.
+    func testAngularMovementWithForce() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "operator":[{"name":"angularmovement","force":"0 0 0"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        guard case .angularMovement(let force, _) = p.operators[0] else {
+            return XCTFail("angularmovement이어야 한다")
+        }
+        XCTAssertEqual(force, Vec3(x: 0, y: 0, z: 0))
+        XCTAssertTrue(p.malformedNames.isEmpty, "force 필드로 파싱되어야 한다")
+    }
+
+    /// 4. `{"name":"turbulentvelocityrandom","offset":3,"scale":0.5,"speedmin":35,"speedmax":100}` — 네 값이 모델에 들어간다.
+    func testTurbulentVelocityRandomAllFields() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"turbulentvelocityrandom","offset":3,"scale":0.5,"speedmin":35,"speedmax":100}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        guard case .turbulentVelocityRandom(let offset, let scale, let speedMin, let speedMax) = p.initializers[0] else {
+            return XCTFail("turbulentvelocityrandom이어야 한다")
+        }
+        XCTAssertEqual(offset, 3)
+        XCTAssertEqual(scale, 0.5)
+        XCTAssertEqual(speedMin, 35)
+        XCTAssertEqual(speedMax, 100)
+    }
+
+    /// 5. `{"name":"controlpointattract","controlpoint":1,"origin":"0 0 0","scale":-1024,"threshold":32}` — malformed가 아니고 threshold가 들어간다.
+    func testControlPointAttractWithThreshold() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "operator":[{"name":"controlpointattract","controlpoint":1,"origin":"0 0 0","scale":-1024,"threshold":32}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        guard case .controlPointAttract(let cp, let origin, let scale, let threshold) = p.operators[0] else {
+            return XCTFail("controlpointattract이어야 한다")
+        }
+        XCTAssertEqual(cp, 1)
+        XCTAssertEqual(origin, Vec3(x: 0, y: 0, z: 0))
+        XCTAssertEqual(scale, -1024)
+        XCTAssertEqual(threshold, 32)
+        XCTAssertTrue(p.malformedNames.isEmpty, "threshold 필드로 파싱되어야 한다")
+    }
+
+    /// 6. `{"name":"oscillatealpha","frequencymin":3,"frequencymax":7,"scalemin":0.5,"scalemax":0.8}` — scale 두 값이 모델에 들어간다.
+    func testOscillateAlphaWithScale() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "operator":[{"name":"oscillatealpha","frequencymin":3,"frequencymax":7,"scalemin":0.5,"scalemax":0.8}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        guard case .oscillateAlpha(let freqMin, let freqMax, let scaleMin, let scaleMax) = p.operators[0] else {
+            return XCTFail("oscillatealpha이어야 한다")
+        }
+        XCTAssertEqual(freqMin, 3)
+        XCTAssertEqual(freqMax, 7)
+        XCTAssertEqual(scaleMin, 0.5)
+        XCTAssertEqual(scaleMax, 0.8)
+    }
+
+    /// 7. `{"name":"velocityrandom","min":"1 2 3"}` — max가 없으면 min과 같아진다.
+    func testVelocityRandomWithMinOnly() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"velocityrandom","min":"1 2 3"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        guard case .velocityRandom(let min, let max) = p.initializers[0] else {
+            return XCTFail("velocityrandom이어야 한다")
+        }
+        XCTAssertEqual(min, Vec3(x: 1, y: 2, z: 3))
+        XCTAssertEqual(max, Vec3(x: 1, y: 2, z: 3), "max가 없으면 min과 같아진다")
+    }
+
+    /// 8. `{"name":"velocityrandom","min":"쓰레기"}` — 여전히 malformed다.
+    func testVelocityRandomWithGarbageIsStillMalformed() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"velocityrandom","min":"쓰레기"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertTrue(p.initializers.isEmpty, "파싱되지 않는 필드는 엔트리를 버린다")
+        XCTAssertTrue(p.malformedNames.contains("velocityrandom"), "있는데 해석 안 되는 것은 malformed다")
     }
 }

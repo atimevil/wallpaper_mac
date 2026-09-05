@@ -202,11 +202,11 @@ public final class ParticleSystem {
                 z: origin.z + offset.z
             )
 
-        case .boxRandom(_, let origin, let directions, let min, let max):
+        case .boxRandom(_, let origin, let directions, let distanceMin, let distanceMax):
             let offset = Vec3(
-                x: (min.x + random.next() * (max.x - min.x)) * directions.x,
-                y: (min.y + random.next() * (max.y - min.y)) * directions.y,
-                z: (min.z + random.next() * (max.z - min.z)) * directions.z
+                x: (distanceMin.x + random.next() * (distanceMax.x - distanceMin.x)) * directions.x,
+                y: (distanceMin.y + random.next() * (distanceMax.y - distanceMin.y)) * directions.y,
+                z: (distanceMin.z + random.next() * (distanceMax.z - distanceMin.z)) * directions.z
             )
             particle.position = Vec3(
                 x: origin.x + offset.x,
@@ -262,11 +262,15 @@ public final class ParticleSystem {
                 z: min.z + random.next() * (max.z - min.z)
             )
 
-        case .turbulentVelocityRandom(let min, let max):
+        case .turbulentVelocityRandom(let offset, let scale, let speedMin, let speedMax):
+            // offset, scale, speedMin, speedMax를 조합해 난수 속도 생성
+            let speed = speedMin + random.next() * (speedMax - speedMin)
+            let theta = random.next() * 2 * .pi
+            let phi = acos(2 * random.next() - 1)
             let turbulence = Vec3(
-                x: min.x + random.next() * (max.x - min.x),
-                y: min.y + random.next() * (max.y - min.y),
-                z: min.z + random.next() * (max.z - min.z)
+                x: (offset + speed * sin(phi) * cos(theta)) * scale,
+                y: (offset + speed * sin(phi) * sin(theta)) * scale,
+                z: (offset + speed * cos(phi)) * scale
             )
             particle.velocity = Vec3(
                 x: particle.velocity.x + turbulence.x,
@@ -313,12 +317,12 @@ public final class ParticleSystem {
                 z: particle.position.z + particle.velocity.z * dt
             )
 
-        case .angularMovement(let gravity, let drag):
-            // Similar to movement but for angular velocity
+        case .angularMovement(let force, let drag):
+            // Apply force as angular acceleration
             particle.angularVelocity = Vec3(
-                x: particle.angularVelocity.x + gravity.x * dt,
-                y: particle.angularVelocity.y + gravity.y * dt,
-                z: particle.angularVelocity.z + gravity.z * dt
+                x: particle.angularVelocity.x + force.x * dt,
+                y: particle.angularVelocity.y + force.y * dt,
+                z: particle.angularVelocity.z + force.z * dt
             )
 
             if drag > 0 {
@@ -367,18 +371,19 @@ public final class ParticleSystem {
                 z: particle.position.z + mask.z * oscillation * dt
             )
 
-        case .oscillateAlpha(let frequencyMin, let frequencyMax, let phaseMin, let phaseMax):
+        case .oscillateAlpha(let frequencyMin, let frequencyMax, let scaleMin, let scaleMax):
             let frequency = frequencyMin + random.next() * (frequencyMax - frequencyMin)
-            let phase = phaseMin + random.next() * (phaseMax - phaseMin)
+            let scale = scaleMin + random.next() * (scaleMax - scaleMin)
 
-            particle.alpha = abs(sin(frequency * particle.age * 2 * .pi + phase))
+            particle.alpha = scale * abs(sin(frequency * particle.age * 2 * .pi))
 
-        case .controlPointAttract(let controlPoint, let scale, let radius):
+        case .controlPointAttract(let controlPoint, let origin, let scale, let threshold):
             // 제어점 데이터가 모델에 없어 구현하지 못했고 unimplementedOperators로 보고한다.
             // 조용히 무시하면 사용자가 레이어가 안 움직이는 이유를 알 수 없다.
             _ = controlPoint
+            _ = origin
             _ = scale
-            _ = radius
+            _ = threshold
         }
     }
 

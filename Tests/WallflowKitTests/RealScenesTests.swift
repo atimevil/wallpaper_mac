@@ -313,6 +313,52 @@ final class RealScenesTests: XCTestCase {
         XCTAssertTrue(failures.isEmpty, "파싱 실패 \(failures.count)건: \(failures.prefix(5))")
         XCTAssertTrue(residualFailures.isEmpty, "잔여 바이트 \(residualFailures.count)건: \(residualFailures.prefix(5))")
     }
+
+    /// Task 4b: 실물 씬의 파티클 프리셋에서 malformedNames가 비어 있어야 한다.
+    func testRealScenesParticlePresetsAreParsedCorrectly() throws {
+        guard let root, let assets = try assetsStore() else {
+            throw XCTSkip("환경변수 미설정")
+        }
+
+        var allMalformed: [String: [(String, [String])]] = [:]  // scene ID -> [(layer name, malformed names)]
+        var dustMotesEmitterCount: [String: Int] = [:]  // scene ID -> emitter count for dust_motes_0
+
+        for id in try FileManager.default.contentsOfDirectory(atPath: root.path)
+            where id.allSatisfy(\.isNumber) {
+            guard let reader = try scenePkg(id) else { continue }
+            do {
+                let doc = try SceneDocument.load(from: reader, assets: assets)
+                for layer in doc.layers {
+                    if case .particle(let preset, _) = layer.content {
+                        if !preset.malformedNames.isEmpty {
+                            if allMalformed[id] == nil { allMalformed[id] = [] }
+                            allMalformed[id]?.append((layer.name, preset.malformedNames))
+                        }
+                        if layer.name == "dust_motes_0" {
+                            dustMotesEmitterCount[id] = preset.emitters.count
+                        }
+                    }
+                }
+            } catch {
+                // 씬 로드 실패는 무시. 이 테스트는 파티클만 검증한다.
+            }
+        }
+
+        // 모든 씬의 파티클 프리셋에서 malformedNames가 비어 있어야 한다.
+        XCTAssertTrue(allMalformed.isEmpty,
+                     "실물 씬의 파티클 필드가 잘못되었다. 씬별 malformed 필드:\n" +
+                     allMalformed.sorted { $0.key < $1.key }
+                         .map { id, layers in
+                             "\(id): " + layers.map { "레이어 '\($0)': \($1.joined(separator: ", "))" }
+                                 .joined(separator: "; ")
+                         }.joined(separator: "\n"))
+
+        // dust_motes_0의 이미터가 1개 이상이어야 한다.
+        if let emitterCount = dustMotesEmitterCount[dustMotesEmitterCount.keys.first ?? ""] {
+            XCTAssertGreaterThanOrEqual(emitterCount, 1,
+                                       "dust_motes_0 레이어의 이미터가 없다")
+        }
+    }
 }
 
 /// ROOT는 유효한데 이름 붙인 씬 디렉토리가 없을 때 던진다. XCTFail로 이미 실패를

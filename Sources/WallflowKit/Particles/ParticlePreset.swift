@@ -3,7 +3,8 @@ import Foundation
 public enum ParticleEmitter: Equatable, Sendable {
     case sphereRandom(rate: Double, origin: Vec3, directions: Vec3,
                       distanceMin: Double, distanceMax: Double)
-    case boxRandom(rate: Double, origin: Vec3, directions: Vec3, min: Vec3, max: Vec3)
+    case boxRandom(rate: Double, origin: Vec3, directions: Vec3,
+                   distanceMin: Vec3, distanceMax: Vec3)
 }
 
 public enum ParticleInitializer: Equatable, Sendable {
@@ -14,25 +15,30 @@ public enum ParticleInitializer: Equatable, Sendable {
     case colorRandom(min: Vec3, max: Vec3)
     case rotationRandom(min: Vec3, max: Vec3)
     case angularVelocityRandom(min: Vec3, max: Vec3)
-    case turbulentVelocityRandom(min: Vec3, max: Vec3)
+    case turbulentVelocityRandom(offset: Double, scale: Double, speedMin: Double, speedMax: Double)
 }
 
 public enum ParticleOperator: Equatable, Sendable {
     case movement(gravity: Vec3, drag: Double)
-    case angularMovement(gravity: Vec3, drag: Double)
+    case angularMovement(force: Vec3, drag: Double)
     case alphaFade(fadeInTime: Double, fadeOutTime: Double)
     case oscillatePosition(mask: Vec3, scaleMin: Double, scaleMax: Double,
                            frequencyMin: Double, frequencyMax: Double,
                            phaseMin: Double, phaseMax: Double)
     case oscillateAlpha(frequencyMin: Double, frequencyMax: Double,
-                        phaseMin: Double, phaseMax: Double)
-    case controlPointAttract(controlPoint: Int, scale: Double, radius: Double)
+                        scaleMin: Double, scaleMax: Double)
+    case controlPointAttract(controlPoint: Int, origin: Vec3, scale: Double, threshold: Double)
 }
 
 public struct ParticlePreset: Equatable, Sendable {
     /// maxcount는 파일에서 온 값이고 시뮬레이션 버퍼 크기를 정한다.
     /// 실물 프리셋의 최대가 300이므로 8192는 충분히 관대하다.
     public static let maxAllowedCount = 8192
+
+    /// 이미터의 rate 필드가 없을 때 쓰는 기본 방출률.
+    /// WE 자체 예제 particles/example.json에서 20을 쓴다.
+    /// 0으로 두면 레이어가 영영 안 보인다.
+    public static let defaultEmitRate = 20.0
 
     /// name을 읽지 못한 엔트리를 진단에 남길 때 쓰는 라벨.
     /// 실제 타입 이름은 전부 소문자 ASCII 식별자라 괄호가 든 이 문자열과 겹치지 않는다.
@@ -225,21 +231,67 @@ public struct ParticlePreset: Equatable, Sendable {
     private static func parseEmitter(_ dict: [String: Any]) -> ParticleEmitter? {
         guard let name = dict["name"] as? String else { return nil }
 
-        guard let rate = getDouble(dict["rate"]) else { return nil }
-        guard let origin = dict["origin"] as? String, let originVec = Vec3.parse(origin) else { return nil }
-        guard let directions = dict["directions"] as? String, let directionsVec = Vec3.parse(directions) else { return nil }
+        // rate는 선택. 기본값은 defaultEmitRate.
+        let rate = getDouble(dict["rate"]) ?? defaultEmitRate
+
+        // origin은 선택. 기본값은 (0, 0, 0).
+        let origin: Vec3
+        if let originStr = dict["origin"] as? String, let originVec = Vec3.parse(originStr) {
+            origin = originVec
+        } else {
+            origin = Vec3(x: 0, y: 0, z: 0)
+        }
+
+        // directions는 선택. 기본값은 (1, 1, 0) (2D 배경화면).
+        let directions: Vec3
+        if let dirStr = dict["directions"] as? String, let dirVec = Vec3.parse(dirStr) {
+            directions = dirVec
+        } else {
+            directions = Vec3(x: 1, y: 1, z: 0)
+        }
 
         switch name {
         case "sphererandom":
-            guard let distanceMin = getDouble(dict["distancemin"]) else { return nil }
-            guard let distanceMax = getDouble(dict["distancemax"]) else { return nil }
-            return .sphereRandom(rate: rate, origin: originVec, directions: directionsVec,
+            // distancemin과 distancemax는 Double이고 선택. 한쪽만 있으면 양쪽에 쓴다.
+            let distanceMin: Double
+            let distanceMax: Double
+            if let minVal = getDouble(dict["distancemin"]) {
+                distanceMin = minVal
+            } else if let maxVal = getDouble(dict["distancemax"]) {
+                distanceMin = maxVal
+            } else {
+                distanceMin = 0
+            }
+            if let maxVal = getDouble(dict["distancemax"]) {
+                distanceMax = maxVal
+            } else if let minVal = getDouble(dict["distancemin"]) {
+                distanceMax = minVal
+            } else {
+                distanceMax = 0
+            }
+            return .sphereRandom(rate: rate, origin: origin, directions: directions,
                                 distanceMin: distanceMin, distanceMax: distanceMax)
 
         case "boxrandom":
-            guard let min = dict["min"] as? String, let minVec = Vec3.parse(min) else { return nil }
-            guard let max = dict["max"] as? String, let maxVec = Vec3.parse(max) else { return nil }
-            return .boxRandom(rate: rate, origin: originVec, directions: directionsVec, min: minVec, max: maxVec)
+            // distancemin과 distancemax는 Vec3이고 선택. 한쪽만 있으면 양쪽에 쓴다.
+            let distanceMin: Vec3
+            let distanceMax: Vec3
+            if let minStr = dict["distancemin"] as? String, let minVec = Vec3.parse(minStr) {
+                distanceMin = minVec
+            } else if let maxStr = dict["distancemax"] as? String, let maxVec = Vec3.parse(maxStr) {
+                distanceMin = maxVec
+            } else {
+                distanceMin = Vec3(x: 0, y: 0, z: 0)
+            }
+            if let maxStr = dict["distancemax"] as? String, let maxVec = Vec3.parse(maxStr) {
+                distanceMax = maxVec
+            } else if let minStr = dict["distancemin"] as? String, let minVec = Vec3.parse(minStr) {
+                distanceMax = minVec
+            } else {
+                distanceMax = Vec3(x: 0, y: 0, z: 0)
+            }
+            return .boxRandom(rate: rate, origin: origin, directions: directions,
+                             distanceMin: distanceMin, distanceMax: distanceMax)
 
         default:
             return nil
@@ -251,44 +303,191 @@ public struct ParticlePreset: Equatable, Sendable {
 
         switch name {
         case "lifetimerandom":
-            guard let min = getDouble(dict["min"]) else { return nil }
-            guard let max = getDouble(dict["max"]) else { return nil }
+            let min: Double
+            let max: Double
+            // min 필드가 JSON에 있는가?
+            if let minVal = getDouble(dict["min"]) {
+                min = minVal
+            } else if dict["min"] != nil {
+                // min이 있지만 파싱 불가
+                return nil
+            } else {
+                // min이 없음. max가 있는가?
+                if let maxVal = getDouble(dict["max"]) {
+                    min = maxVal
+                } else {
+                    return nil
+                }
+            }
+            // max 필드가 JSON에 있는가?
+            if let maxVal = getDouble(dict["max"]) {
+                max = maxVal
+            } else if dict["max"] != nil {
+                // max가 있지만 파싱 불가
+                return nil
+            } else {
+                // max가 없음. min이 있는가? (이미 위에서 확인했으므로)
+                if let minVal = getDouble(dict["min"]) {
+                    max = minVal
+                } else {
+                    return nil
+                }
+            }
             return .lifetimeRandom(min: min, max: max)
 
         case "sizerandom":
-            guard let min = getDouble(dict["min"]) else { return nil }
-            guard let max = getDouble(dict["max"]) else { return nil }
+            let min: Double
+            let max: Double
+            if let minVal = getDouble(dict["min"]) {
+                min = minVal
+            } else if dict["min"] != nil {
+                return nil
+            } else if let maxVal = getDouble(dict["max"]) {
+                min = maxVal
+            } else {
+                return nil
+            }
+            if let maxVal = getDouble(dict["max"]) {
+                max = maxVal
+            } else if dict["max"] != nil {
+                return nil
+            } else if let minVal = getDouble(dict["min"]) {
+                max = minVal
+            } else {
+                return nil
+            }
             return .sizeRandom(min: min, max: max)
 
         case "alpharandom":
-            guard let min = getDouble(dict["min"]) else { return nil }
-            guard let max = getDouble(dict["max"]) else { return nil }
+            let min: Double
+            let max: Double
+            if let minVal = getDouble(dict["min"]) {
+                min = minVal
+            } else if dict["min"] != nil {
+                return nil
+            } else if let maxVal = getDouble(dict["max"]) {
+                min = maxVal
+            } else {
+                return nil
+            }
+            if let maxVal = getDouble(dict["max"]) {
+                max = maxVal
+            } else if dict["max"] != nil {
+                return nil
+            } else if let minVal = getDouble(dict["min"]) {
+                max = minVal
+            } else {
+                return nil
+            }
             return .alphaRandom(min: min, max: max)
 
         case "velocityrandom":
-            guard let minStr = dict["min"] as? String, let minVec = Vec3.parse(minStr) else { return nil }
-            guard let maxStr = dict["max"] as? String, let maxVec = Vec3.parse(maxStr) else { return nil }
+            let minVec: Vec3
+            let maxVec: Vec3
+            if let minStr = dict["min"] as? String {
+                guard let mv = Vec3.parse(minStr) else { return nil }
+                minVec = mv
+            } else if dict["min"] != nil {
+                return nil
+            } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
+                minVec = mv
+            } else {
+                return nil
+            }
+            if let maxStr = dict["max"] as? String {
+                guard let mv = Vec3.parse(maxStr) else { return nil }
+                maxVec = mv
+            } else if dict["max"] != nil {
+                return nil
+            } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
+                maxVec = mv
+            } else {
+                return nil
+            }
             return .velocityRandom(min: minVec, max: maxVec)
 
         case "colorrandom":
-            guard let minStr = dict["min"] as? String, let minVec = Vec3.parse(minStr) else { return nil }
-            guard let maxStr = dict["max"] as? String, let maxVec = Vec3.parse(maxStr) else { return nil }
+            let minVec: Vec3
+            let maxVec: Vec3
+            if let minStr = dict["min"] as? String {
+                guard let mv = Vec3.parse(minStr) else { return nil }
+                minVec = mv
+            } else if dict["min"] != nil {
+                return nil
+            } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
+                minVec = mv
+            } else {
+                return nil
+            }
+            if let maxStr = dict["max"] as? String {
+                guard let mv = Vec3.parse(maxStr) else { return nil }
+                maxVec = mv
+            } else if dict["max"] != nil {
+                return nil
+            } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
+                maxVec = mv
+            } else {
+                return nil
+            }
             return .colorRandom(min: minVec, max: maxVec)
 
         case "rotationrandom":
-            guard let minStr = dict["min"] as? String, let minVec = Vec3.parse(minStr) else { return nil }
-            guard let maxStr = dict["max"] as? String, let maxVec = Vec3.parse(maxStr) else { return nil }
+            let minVec: Vec3
+            let maxVec: Vec3
+            if let minStr = dict["min"] as? String {
+                guard let mv = Vec3.parse(minStr) else { return nil }
+                minVec = mv
+            } else if dict["min"] != nil {
+                return nil
+            } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
+                minVec = mv
+            } else {
+                return nil
+            }
+            if let maxStr = dict["max"] as? String {
+                guard let mv = Vec3.parse(maxStr) else { return nil }
+                maxVec = mv
+            } else if dict["max"] != nil {
+                return nil
+            } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
+                maxVec = mv
+            } else {
+                return nil
+            }
             return .rotationRandom(min: minVec, max: maxVec)
 
         case "angularvelocityrandom":
-            guard let minStr = dict["min"] as? String, let minVec = Vec3.parse(minStr) else { return nil }
-            guard let maxStr = dict["max"] as? String, let maxVec = Vec3.parse(maxStr) else { return nil }
+            let minVec: Vec3
+            let maxVec: Vec3
+            if let minStr = dict["min"] as? String {
+                guard let mv = Vec3.parse(minStr) else { return nil }
+                minVec = mv
+            } else if dict["min"] != nil {
+                return nil
+            } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
+                minVec = mv
+            } else {
+                return nil
+            }
+            if let maxStr = dict["max"] as? String {
+                guard let mv = Vec3.parse(maxStr) else { return nil }
+                maxVec = mv
+            } else if dict["max"] != nil {
+                return nil
+            } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
+                maxVec = mv
+            } else {
+                return nil
+            }
             return .angularVelocityRandom(min: minVec, max: maxVec)
 
         case "turbulentvelocityrandom":
-            guard let minStr = dict["min"] as? String, let minVec = Vec3.parse(minStr) else { return nil }
-            guard let maxStr = dict["max"] as? String, let maxVec = Vec3.parse(maxStr) else { return nil }
-            return .turbulentVelocityRandom(min: minVec, max: maxVec)
+            // 필드: offset, scale, speedmin, speedmax (모두 Double)
+            let offset = getDouble(dict["offset"]) ?? 0
+            let scale = getDouble(dict["scale"]) ?? 0
+            let speedMin = getDouble(dict["speedmin"]) ?? 0
+            let speedMax = getDouble(dict["speedmax"]) ?? 0
+            return .turbulentVelocityRandom(offset: offset, scale: scale, speedMin: speedMin, speedMax: speedMax)
 
         default:
             return nil
@@ -300,14 +499,26 @@ public struct ParticlePreset: Equatable, Sendable {
 
         switch name {
         case "movement":
-            guard let gravityStr = dict["gravity"] as? String, let gravityVec = Vec3.parse(gravityStr) else { return nil }
+            // gravity와 drag는 모두 선택
+            let gravity: Vec3
+            if let gravityStr = dict["gravity"] as? String, let gravityVec = Vec3.parse(gravityStr) {
+                gravity = gravityVec
+            } else {
+                gravity = Vec3(x: 0, y: 0, z: 0)
+            }
             let drag = getDouble(dict["drag"]) ?? 0
-            return .movement(gravity: gravityVec, drag: drag)
+            return .movement(gravity: gravity, drag: drag)
 
         case "angularmovement":
-            guard let gravityStr = dict["gravity"] as? String, let gravityVec = Vec3.parse(gravityStr) else { return nil }
+            // force (formerly gravity)와 drag는 모두 선택
+            let force: Vec3
+            if let forceStr = dict["force"] as? String, let forceVec = Vec3.parse(forceStr) {
+                force = forceVec
+            } else {
+                force = Vec3(x: 0, y: 0, z: 0)
+            }
             let drag = getDouble(dict["drag"]) ?? 0
-            return .angularMovement(gravity: gravityVec, drag: drag)
+            return .angularMovement(force: force, drag: drag)
 
         case "alphafade":
             let fadeInTime = getDouble(dict["fadeintime"]) ?? 0
@@ -315,30 +526,44 @@ public struct ParticlePreset: Equatable, Sendable {
             return .alphaFade(fadeInTime: fadeInTime, fadeOutTime: fadeOutTime)
 
         case "oscillateposition":
-            guard let maskStr = dict["mask"] as? String, let maskVec = Vec3.parse(maskStr) else { return nil }
-            guard let scaleMin = getDouble(dict["scalemin"]) else { return nil }
-            guard let scaleMax = getDouble(dict["scalemax"]) else { return nil }
-            guard let frequencyMin = getDouble(dict["frequencymin"]) else { return nil }
-            guard let frequencyMax = getDouble(dict["frequencymax"]) else { return nil }
-            guard let phaseMin = getDouble(dict["phasemin"]) else { return nil }
-            guard let phaseMax = getDouble(dict["phasemax"]) else { return nil }
-            return .oscillatePosition(mask: maskVec, scaleMin: scaleMin, scaleMax: scaleMax,
+            // 모든 필드 선택
+            let mask: Vec3
+            if let maskStr = dict["mask"] as? String, let maskVec = Vec3.parse(maskStr) {
+                mask = maskVec
+            } else {
+                mask = Vec3(x: 1, y: 1, z: 1)
+            }
+            let scaleMin = getDouble(dict["scalemin"]) ?? 0
+            let scaleMax = getDouble(dict["scalemax"]) ?? 0
+            let frequencyMin = getDouble(dict["frequencymin"]) ?? 0
+            let frequencyMax = getDouble(dict["frequencymax"]) ?? 0
+            let phaseMin = getDouble(dict["phasemin"]) ?? 0
+            let phaseMax = getDouble(dict["phasemax"]) ?? 0
+            return .oscillatePosition(mask: mask, scaleMin: scaleMin, scaleMax: scaleMax,
                                      frequencyMin: frequencyMin, frequencyMax: frequencyMax,
                                      phaseMin: phaseMin, phaseMax: phaseMax)
 
         case "oscillatealpha":
+            // frequencymin/frequencymax와 scalemin/scalemax 필수. phasemin/phasemax는 없음.
             guard let frequencyMin = getDouble(dict["frequencymin"]) else { return nil }
             guard let frequencyMax = getDouble(dict["frequencymax"]) else { return nil }
-            guard let phaseMin = getDouble(dict["phasemin"]) else { return nil }
-            guard let phaseMax = getDouble(dict["phasemax"]) else { return nil }
+            guard let scaleMin = getDouble(dict["scalemin"]) else { return nil }
+            guard let scaleMax = getDouble(dict["scalemax"]) else { return nil }
             return .oscillateAlpha(frequencyMin: frequencyMin, frequencyMax: frequencyMax,
-                                  phaseMin: phaseMin, phaseMax: phaseMax)
+                                  scaleMin: scaleMin, scaleMax: scaleMax)
 
         case "controlpointattract":
             guard let controlPoint = getInt(dict["controlpoint"]) else { return nil }
-            guard let scale = getDouble(dict["scale"]) else { return nil }
-            guard let radius = getDouble(dict["radius"]) else { return nil }
-            return .controlPointAttract(controlPoint: controlPoint, scale: scale, radius: radius)
+            // origin, scale, threshold는 선택 (기본값 설정)
+            let origin: Vec3
+            if let originStr = dict["origin"] as? String, let originVec = Vec3.parse(originStr) {
+                origin = originVec
+            } else {
+                origin = Vec3(x: 0, y: 0, z: 0)
+            }
+            let scale = getDouble(dict["scale"]) ?? 0
+            let threshold = getDouble(dict["threshold"]) ?? 0
+            return .controlPointAttract(controlPoint: controlPoint, origin: origin, scale: scale, threshold: threshold)
 
         default:
             return nil

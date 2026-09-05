@@ -270,7 +270,7 @@ final class ParticleSystemTests: XCTestCase {
         // controlpointattract가 든 프리셋
         let withOp = ParticleSystem(
             preset: preset(
-                operators: [.controlPointAttract(controlPoint: 0, scale: 1.0, radius: 5.0)]),
+                operators: [.controlPointAttract(controlPoint: 0, origin: Vec3(x: 0, y: 0, z: 0), scale: 1.0, threshold: 5.0)]),
             random: FixedRandom([0.5]))
         XCTAssert(withOp.unimplementedOperators.contains("controlpointattract"),
                   "unimplementedOperators에 controlpointattract가 있어야 한다")
