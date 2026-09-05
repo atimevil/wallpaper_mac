@@ -38,6 +38,11 @@ public final class ParticleSystem {
     /// Accumulated fractional emission for each emitter.
     private var emissionCredits: [Double] = []
 
+    /// 프리셋에 있지만 이 시뮬레이션이 아직 처리하지 않는 연산자 이름들.
+    /// 조용히 무시하면 사용자가 레이어가 안 움직이는 이유를 알 수 없고,
+    /// 나중에 렌더러 버그로 오인된다.
+    public private(set) var unimplementedOperators: [String] = []
+
     public init(preset: ParticlePreset, random: RandomSource) {
         self.preset = preset
         self.random = random
@@ -59,6 +64,15 @@ public final class ParticleSystem {
         self.deadSlots = Array(0..<maxCount).reversed()
         // Initialize emission credits
         self.emissionCredits = Array(repeating: 0.0, count: preset.emitters.count)
+
+        // Detect unimplemented operators
+        var unimplemented = Set<String>()
+        for op in preset.operators {
+            if case .controlPointAttract = op {
+                unimplemented.insert("controlpointattract")
+            }
+        }
+        self.unimplementedOperators = Array(unimplemented).sorted()
     }
 
     /// Returns only alive particles.
@@ -128,8 +142,11 @@ public final class ParticleSystem {
             }
 
             // Emit integer number of particles
-            let toEmit = Int(emissionCredits[emitterIndex])
-            let emitCount = min(toEmit, deadSlots.count)
+            // Int(Double)은 범위 밖에서 트랩한다. 파일에서 온 rate가 거대할 수 있으므로
+            // Double 단계에서 먼저 슬롯 수 이하로 죈다. 그 뒤엔 변환이 안전하다.
+            let available = Double(deadSlots.count)
+            let toEmit = Swift.min(emissionCredits[emitterIndex].rounded(.down), available)
+            let emitCount = toEmit > 0 ? Int(toEmit) : 0
 
             for _ in 0..<emitCount {
                 if let slotIndex = deadSlots.popLast() {
@@ -145,8 +162,10 @@ public final class ParticleSystem {
                 }
             }
 
-            // Keep only fractional part
-            emissionCredits[emitterIndex] -= Double(emitCount)
+            // 슬롯이 없어 못 내보낸 몫은 버린다. 남겨두면 프레임마다 쌓였다가
+            // 슬롯이 비는 순간 한꺼번에 터진다.
+            emissionCredits[emitterIndex] = Swift.min(
+                emissionCredits[emitterIndex] - Double(emitCount), 1.0)
         }
     }
 
@@ -354,13 +373,11 @@ public final class ParticleSystem {
             particle.alpha = abs(sin(frequency * particle.age * 2 * .pi + phase))
 
         case .controlPointAttract(let controlPoint, let scale, let radius):
-            // Control point attraction - simplified implementation
-            // Without actual control points defined, we use it as a placeholder
-            // In a real implementation, control points would be defined globally
+            // 제어점 데이터가 모델에 없어 구현하지 못했고 unimplementedOperators로 보고한다.
+            // 조용히 무시하면 사용자가 레이어가 안 움직이는 이유를 알 수 없다.
             _ = controlPoint
             _ = scale
             _ = radius
-            // Skip for now - control points require external data
         }
     }
 

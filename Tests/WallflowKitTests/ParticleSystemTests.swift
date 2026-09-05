@@ -224,4 +224,70 @@ final class ParticleSystemTests: XCTestCase {
             XCTAssertTrue(p.position.x.isFinite, "NaN 위치가 렌더러로 새면 안 된다")
         }
     }
+
+    /// 파일에서 온 rate가 거대하면(1e300) 방출 크레딧을 Int로 바꾸는 지점에서
+    /// 트랩해 앱이 죽었다. 실물 파서를 통과시켜 재현했다.
+    /// 방출량은 어차피 빈 슬롯 수 이하이므로 Double 단계에서 먼저 죄어 변환을 안전하게 했다.
+    func testAbsurdRateDoesNotTrap() {
+        let absurdEmitter = ParticleEmitter.sphereRandom(
+            rate: 1e300, origin: Vec3(x: 0, y: 0, z: 0),
+            directions: Vec3(x: 1, y: 0, z: 0),
+            distanceMin: 0, distanceMax: 0)
+        let system = ParticleSystem(
+            preset: preset(maxCount: 100, emitters: [absurdEmitter],
+                           initializers: [.lifetimeRandom(min: 100, max: 100)]),
+            random: FixedRandom([0.5]))
+        // 이 호출이 SIGTRAP으로 죽으면 테스트 실패다.
+        system.update(deltaTime: 0.016)
+        XCTAssertLessThanOrEqual(system.aliveCount, 100, "maxCount를 넘어서면 안 된다")
+    }
+
+    /// 슬롯이 없어 못 내보낸 몫이 프레임마다 쌓여, 파티클이 한꺼번에 죽는
+    /// 순간 밀린 물량이 폭발적으로 방출되었다.
+    /// "눈이 잠깐 멈췄다가 갑자기 쏟아지는" 증상이었다.
+    /// 지나간 방출 기회는 버려야 한다.
+    func testSaturatedEmitterDoesNotBankCredit() {
+        let system = ParticleSystem(
+            preset: preset(maxCount: 5, emitters: [emitter(rate: 1000)],
+                           initializers: [.lifetimeRandom(min: 0.01, max: 0.01)]),
+            random: FixedRandom([0.5]))
+        // 슬롯을 꽉 채운다
+        advance(system, seconds: 0.1)
+        XCTAssertEqual(system.aliveCount, 5, "슬롯이 가득 차야 한다")
+
+        // 이제 emissionCredits는 크지만, 방출할 슬롯이 없다.
+        // 여러 프레임을 더 돌아도 deadSlots가 비어있으므로 새 파티클이 나오지 않는다.
+        // 그 동안 emissionCredits는 계속 쌓인다.
+        // 모든 파티클이 죽는 순간 (lifetime=0.01), deadSlots가 가득 찬다.
+        // 수정된 코드: emissionCredits는 1.0 이하로 죽으므로 폭발하지 않는다.
+
+        // 여러 프레임 동안 모든 파티클이 죽을 때까지 기다린다
+        for _ in 0..<100 {
+            system.update(deltaTime: Self.step)
+        }
+
+        // 이 시점에서 emissionCredits는 1.0 이하이고, deadSlots는 가득 차 있다.
+        // 다음 프레임에서 방출되는 파티클이 maxCount를 넘지 않는지 확인한다.
+        system.update(deltaTime: Self.step)
+        XCTAssertLessThanOrEqual(system.aliveCount, 5, "크레딧이 폭발해서 maxCount를 넘었다")
+    }
+
+    /// controlpointattract를 조용히 무시하던 것을 unimplementedOperators로
+    /// 드러냈다. 실물 씬 "Phrolova 4K"가 이 타입을 실제로 쓰는데
+    /// 조용하면 렌더러 버그로 오인된다.
+    func testControlPointAttractIsReported() {
+        // controlpointattract가 든 프리셋
+        let withOp = ParticleSystem(
+            preset: preset(
+                operators: [.controlPointAttract(controlPoint: 0, scale: 1.0, radius: 5.0)]),
+            random: FixedRandom([0.5]))
+        XCTAssert(withOp.unimplementedOperators.contains("controlpointattract"),
+                  "unimplementedOperators에 controlpointattract가 있어야 한다")
+
+        // controlpointattract가 없는 프리셋
+        let noOp = ParticleSystem(
+            preset: preset(operators: [.alphaFade(fadeInTime: 1.0, fadeOutTime: 1.0)]),
+            random: FixedRandom([0.5]))
+        XCTAssertTrue(noOp.unimplementedOperators.isEmpty, "없으면 빈 배열이어야 한다")
+    }
 }
