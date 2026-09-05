@@ -34,6 +34,10 @@ public struct ParticlePreset: Equatable, Sendable {
     /// 실물 프리셋의 최대가 300이므로 8192는 충분히 관대하다.
     public static let maxAllowedCount = 8192
 
+    /// name을 읽지 못한 엔트리를 진단에 남길 때 쓰는 라벨.
+    /// 실제 타입 이름은 전부 소문자 ASCII 식별자라 괄호가 든 이 문자열과 겹치지 않는다.
+    private static let unnamedEntryLabel = "(이름 없는 엔트리)"
+
     public let maxCount: Int
     public let startTime: Double
     public let materialPath: String
@@ -42,7 +46,10 @@ public struct ParticlePreset: Equatable, Sendable {
     public let operators: [ParticleOperator]
     /// 인식하지 못한 이름들. 무엇이 빠졌는지 사용자에게 말할 수 있게 남긴다.
     public let unsupportedNames: [String]
-    /// 이름은 아는데 필드가 깨져서 버린 엔트리들. 지원하지 않는 것과 구분한다.
+    /// 이름은 아는데 필드가 깨져서 버린 엔트리가 있는 이름들.
+    /// 이름 단위라서 개수는 담지 못한다 — 같은 이름이 여러 번 나오고 그중 일부만
+    /// 깨졌으면, 나머지가 정상 동작하는 중에도 그 이름이 여기 들어간다.
+    /// "이 타입이 통째로 망가졌다"가 아니라 "이 이름의 엔트리 중 하나 이상을 버렸다"로 읽어야 한다.
     public let malformedNames: [String]
 
     /// public struct의 memberwise 이니셜라이저는 internal이라 테스트 타깃에서
@@ -119,6 +126,11 @@ public struct ParticlePreset: Equatable, Sendable {
                     } else {
                         unsupportedNames.insert(name)
                     }
+                } else {
+                    // name 키가 없거나 String이 아니다. 이름을 모르니 어느 타입인지 말할 수 없지만,
+                    // 엔트리를 버렸다는 사실 자체는 남겨야 한다. 그냥 사라지면 사용자가
+                    // 파티클이 안 나오는 이유를 알 수 없다.
+                    malformedNames.insert(unnamedEntryLabel)
                 }
             }
         }
@@ -135,6 +147,11 @@ public struct ParticlePreset: Equatable, Sendable {
                     } else {
                         unsupportedNames.insert(name)
                     }
+                } else {
+                    // name 키가 없거나 String이 아니다. 이름을 모르니 어느 타입인지 말할 수 없지만,
+                    // 엔트리를 버렸다는 사실 자체는 남겨야 한다. 그냥 사라지면 사용자가
+                    // 파티클이 안 나오는 이유를 알 수 없다.
+                    malformedNames.insert(unnamedEntryLabel)
                 }
             }
         }
@@ -151,6 +168,11 @@ public struct ParticlePreset: Equatable, Sendable {
                     } else {
                         unsupportedNames.insert(name)
                     }
+                } else {
+                    // name 키가 없거나 String이 아니다. 이름을 모르니 어느 타입인지 말할 수 없지만,
+                    // 엔트리를 버렸다는 사실 자체는 남겨야 한다. 그냥 사라지면 사용자가
+                    // 파티클이 안 나오는 이유를 알 수 없다.
+                    malformedNames.insert(unnamedEntryLabel)
                 }
             }
         }

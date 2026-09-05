@@ -244,4 +244,95 @@ final class ParticlePresetTests: XCTestCase {
         let p = try XCTUnwrap(ParticlePreset.parse(json))
         XCTAssertEqual(p.operators.count, 0, "범위 밖 controlpoint는 엔트리를 버린다")
     }
+
+    /// name 키가 없는 emitter 엔트리는 조용히 사라지지 않고 진단에 남는다.
+    func testEmitterWithoutNameIsRecordedNotSilentlyDropped() throws {
+        let json: [String: Any] = [
+            "material": "m.json",
+            "maxcount": 10,
+            "emitter": [
+                ["rate": 1]  // name 키 없음
+            ]
+        ]
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertTrue(p.emitters.isEmpty, "필드가 깨진 엔트리는 버린다")
+        XCTAssertTrue(p.malformedNames.contains("(이름 없는 엔트리)"),
+                     "name을 읽지 못한 엔트리는 sentinel 라벨로 malformedNames에 남아야 한다")
+    }
+
+    /// name 키가 없는 initializer 엔트리는 조용히 사라지지 않고 진단에 남는다.
+    func testInitializerWithoutNameIsRecordedNotSilentlyDropped() throws {
+        let json: [String: Any] = [
+            "material": "m.json",
+            "maxcount": 10,
+            "initializer": [
+                ["min": 1, "max": 2]  // name 키 없음
+            ]
+        ]
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertTrue(p.initializers.isEmpty, "필드가 깨진 엔트리는 버린다")
+        XCTAssertTrue(p.malformedNames.contains("(이름 없는 엔트리)"),
+                     "name을 읽지 못한 엔트리는 sentinel 라벨로 malformedNames에 남아야 한다")
+    }
+
+    /// name 키가 없는 operator 엔트리는 조용히 사라지지 않고 진단에 남는다.
+    func testOperatorWithoutNameIsRecordedNotSilentlyDropped() throws {
+        let json: [String: Any] = [
+            "material": "m.json",
+            "maxcount": 10,
+            "operator": [
+                ["gravity": "0 -9 0"]  // name 키 없음
+            ]
+        ]
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertTrue(p.operators.isEmpty, "필드가 깨진 엔트리는 버린다")
+        XCTAssertTrue(p.malformedNames.contains("(이름 없는 엔트리)"),
+                     "name을 읽지 못한 엔트리는 sentinel 라벨로 malformedNames에 남아야 한다")
+    }
+
+    /// name이 String이 아닌 엔트리는 조용히 사라지지 않고 진단에 남는다.
+    func testEntryWithNonStringNameIsRecorded() throws {
+        let json: [String: Any] = [
+            "material": "m.json",
+            "maxcount": 10,
+            "initializer": [
+                ["name": 3, "min": 1, "max": 2]  // name이 Int
+            ]
+        ]
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertTrue(p.initializers.isEmpty, "필드가 깨진 엔트리는 버린다")
+        XCTAssertTrue(p.malformedNames.contains("(이름 없는 엔트리)"),
+                     "name이 String이 아니면 sentinel 라벨로 malformedNames에 남아야 한다")
+    }
+
+    /// 같은 이름의 엔트리가 여러 개인데 일부만 깨진 경우, 정상 엔트리는 파싱되고 동시에
+    /// 그 이름이 malformedNames에도 들어간다. 이건 의도된 동작이다. malformedNames는
+    /// 이름 단위라서 "이 이름의 엔트리 중 하나 이상을 버렸다"고 읽어야 한다.
+    func testDuplicateNameWithOneBrokenReportsBothOutcomes() throws {
+        let json: [String: Any] = [
+            "material": "m.json",
+            "maxcount": 10,
+            "initializer": [
+                ["name": "velocityrandom", "min": "-10 -50 0", "max": "-37 -90 0"],  // 정상
+                ["name": "velocityrandom", "min": "garbage", "max": "0 0 0"]  // 깨짐
+            ]
+        ]
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        // 정상 엔트리는 파싱되어야 한다.
+        XCTAssertEqual(p.initializers.count, 1, "정상 엔트리는 파싱되어야 한다")
+        guard case .velocityRandom(let min, let max) = p.initializers[0] else {
+            return XCTFail("velocityrandom이어야 한다")
+        }
+        XCTAssertEqual(min, Vec3(x: -10, y: -50, z: 0))
+        XCTAssertEqual(max, Vec3(x: -37, y: -90, z: 0))
+
+        // 동시에 깨진 엔트리 때문에 그 이름이 malformedNames에 들어간다.
+        // 이건 의도된 동작 — 일부라도 버린 엔트리가 있으면 그 사실을 사용자에게 알려야 한다.
+        XCTAssertTrue(p.malformedNames.contains("velocityrandom"),
+                     "같은 이름의 일부만 깨져도 그 이름이 malformedNames에 들어가야 한다")
+
+        // unsupportedNames에는 들어가지 않아야 한다.
+        XCTAssertFalse(p.unsupportedNames.contains("velocityrandom"),
+                      "알려진 이름은 unsupportedNames가 아니라 malformedNames에만 들어가야 한다")
+    }
 }
