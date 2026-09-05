@@ -184,16 +184,19 @@ final class TexHeaderTests: XCTestCase {
         XCTAssertEqual(sheet.gridHeight, 128)
     }
 
-    /// flags & 4가 없으면 뒤를 읽으려 하지 않는다.
-    func testNoSpriteSheetWhenFlagAbsent() throws {
-        let tex = buildTex(flags: 2, mips: [(8, 8, 0, 0, Data(repeating: 0, count: 20))])
+    /// flags & 4가 없으면 뒤에 읽을 수 있는 TEXS 섹션이 있어도 읽지 않는다.
+    /// 뒤가 비어 있는 픽스처로는 이것을 증명할 수 없다 — 가드를 지워도
+    /// EOF 때문에 nil이 나오기 때문이다.
+    func testNoSpriteSheetWhenFlagAbsentEvenWithParseableSection() throws {
+        var tex = buildTex(flags: 2, mips: [(8, 8, 0, 0, Data(repeating: 0, count: 20))])
+        tex += spriteSheetV2(frameCount: 4)
         XCTAssertNil(try TexHeader.parse(tex).spriteSheet)
     }
 
     /// 프레임 수도 파일에서 온 값이다. 검증 전에 믿고 할당하면 죽는다.
-    /// 파일에서 온 값이 검증을 통과하지 못하면 spriteSheet는 nil이 되지만
-    /// 텍스처 자체는 여전히 쓸 수 있다.
-    func testAbsurdFrameCountThrowsInsteadOfAllocating() throws {
+    /// 스프라이트 시트 파싱은 try?로 감싸므로 오류가 호출자에 도달하지 않는다 —
+    /// 관측 가능한 결과는 "spriteSheet가 nil이고 밉맵은 살아 있다"이다.
+    func testAbsurdFrameCountYieldsNilSheetInsteadOfAllocating() throws {
         var tex = buildTex(flags: 4, mips: [(8, 8, 0, 0, Data(repeating: 0, count: 20))])
         tex += nullTerminated("TEXS0002") + le32(Int32.max)
         let header = try TexHeader.parse(tex)

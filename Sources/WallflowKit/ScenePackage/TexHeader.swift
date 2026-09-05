@@ -92,6 +92,8 @@ public struct TexHeader: Equatable, Sendable {
     public let freeImageFormat: Int32
     public let mipmaps: [TexMipmap]
     public let spriteSheet: TexSpriteSheet?
+    /// 원본 데이터에서 파싱된 바이트 수. 파일이 완전히 소비되는지 검증할 때 쓴다.
+    public let consumedBytes: Int
 
     public var isVideo: Bool { flags & Self.videoFlag != 0 }
 
@@ -192,7 +194,7 @@ public struct TexHeader: Equatable, Sendable {
             textureWidth: texW, textureHeight: texH,
             imageWidth: imgW, imageHeight: imgH,
             freeImageFormat: freeImageFormat, mipmaps: mipmaps,
-            spriteSheet: spriteSheet
+            spriteSheet: spriteSheet, consumedBytes: cursor.offset
         )
     }
 
@@ -218,6 +220,11 @@ public struct TexHeader: Equatable, Sendable {
         guard frameCount >= 0, frameCount <= remaining / bytesPerFrame else {
             throw TexError.truncated
         }
+        // 프레임 데이터 테이블을 건너뛴다. 오버플로우가 발생하면 truncated를 던진다.
+        let (frameDataSize, multipliedOverflow) = frameCount.multipliedReportingOverflow(by: bytesPerFrame)
+        guard !multipliedOverflow else { throw TexError.truncated }
+        try cursor.skip(frameDataSize)
+
         return TexSpriteSheet(frameCount: frameCount, gridWidth: width, gridHeight: height)
     }
 }

@@ -281,6 +281,8 @@ final class RealScenesTests: XCTestCase {
     }
 
     /// assets의 모든 .tex가 파싱되어야 한다. M2의 이해는 여기서 불완전했다.
+    /// 각 파일이 정확히 소비되는지 검증한다 — 파서가 남은 바이트를 남겨두면
+    /// 그것을 감지한다. M2의 대결함이 정확히 이것이었다.
     func testAllAssetTexturesParse() throws {
         guard let assets = try assetsStore() else {
             throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정")
@@ -288,6 +290,7 @@ final class RealScenesTests: XCTestCase {
         let root = assets.root
         var checked = 0
         var failures: [String] = []
+        var residualFailures: [String] = []
         let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
         while let url = files?.nextObject() as? URL {
             guard url.pathExtension == "tex" else { continue }
@@ -295,11 +298,20 @@ final class RealScenesTests: XCTestCase {
             guard !url.path.contains("/lut/") else { continue }
             let data = try Data(contentsOf: url)
             checked += 1
-            do { _ = try TexHeader.parse(data) }
-            catch { failures.append("\(url.lastPathComponent): \(error)") }
+            do {
+                let header = try TexHeader.parse(data)
+                if header.consumedBytes != data.count {
+                    residualFailures.append(
+                        "\(url.lastPathComponent): parsed \(header.consumedBytes) of \(data.count) bytes"
+                    )
+                }
+            } catch {
+                failures.append("\(url.lastPathComponent): \(error)")
+            }
         }
         XCTAssertGreaterThan(checked, 250, "검사한 텍스처가 너무 적다")
         XCTAssertTrue(failures.isEmpty, "파싱 실패 \(failures.count)건: \(failures.prefix(5))")
+        XCTAssertTrue(residualFailures.isEmpty, "잔여 바이트 \(residualFailures.count)건: \(residualFailures.prefix(5))")
     }
 }
 
