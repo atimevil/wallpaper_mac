@@ -8,6 +8,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController?
     private var power: PowerMonitor?
     private let library: LibraryStore
+    private let installer: WorkshopInstaller
+    private var workshop: WorkshopWindowController?
 
     /// 마지막으로 고른 배경화면의 id. 배경화면 앱이 켤 때마다 빈 화면으로
     /// 시작하면 매번 메뉴에서 다시 골라야 한다.
@@ -19,6 +21,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             .appendingPathComponent("Library/Application Support/Wallflow/Library")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         library = LibraryStore(root: root)
+        // 받은 원본은 라이브러리 밖에 둔다. 라이브러리에서 링크를 지워도 원본이
+        // 남아 다시 받지 않아도 된다.
+        installer = WorkshopInstaller(
+            downloadRoot: root.deletingLastPathComponent()
+                .appendingPathComponent("Workshop"),
+            libraryRoot: root)
         super.init()
     }
 
@@ -41,6 +49,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar = MenuBarController(
             onSelect: { [weak self] item in self?.select(item) },
             onRefresh: { [weak self] in self?.refreshLibrary() },
+            onBrowseWorkshop: { [weak self] in self?.showWorkshop() },
             onQuit: { NSApp.terminate(nil) }
         )
         refreshLibrary()
@@ -61,6 +70,19 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         power?.stop()
         displays.stopAll()
+    }
+
+    /// 창작마당 창을 띄운다. 이미 떠 있으면 앞으로 가져온다.
+    private func showWorkshop() {
+        if workshop == nil {
+            workshop = WorkshopWindowController(installer: installer) { [weak self] in
+                self?.refreshLibrary()
+            }
+        }
+        // 메뉴바 전용 앱이라 창을 띄우려면 앱을 활성화해야 한다.
+        NSApp.activate(ignoringOtherApps: true)
+        workshop?.showWindow(nil)
+        workshop?.window?.makeKeyAndOrderFront(nil)
     }
 
     private func refreshLibrary() {

@@ -7,16 +7,19 @@ final class MenuBarController {
     private let statusItem: NSStatusItem
     private let onSelect: (WallpaperItem) -> Void
     private let onRefresh: () -> Void
+    private let onBrowseWorkshop: () -> Void
     private let onQuit: () -> Void
     private var items: [WallpaperItem] = []
 
     init(
         onSelect: @escaping (WallpaperItem) -> Void,
         onRefresh: @escaping () -> Void,
+        onBrowseWorkshop: @escaping () -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.onSelect = onSelect
         self.onRefresh = onRefresh
+        self.onBrowseWorkshop = onBrowseWorkshop
         self.onQuit = onQuit
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(
@@ -55,6 +58,11 @@ final class MenuBarController {
         }
 
         menu.addItem(.separator())
+        let browse = NSMenuItem(
+            title: "창작마당 둘러보기…", action: #selector(browseWorkshop), keyEquivalent: "w")
+        browse.target = self
+        menu.addItem(browse)
+
         let refresh = NSMenuItem(title: "라이브러리 새로고침", action: #selector(refresh), keyEquivalent: "r")
         refresh.target = self
         menu.addItem(refresh)
@@ -65,6 +73,8 @@ final class MenuBarController {
 
         statusItem.menu = menu
     }
+
+    @objc private func browseWorkshop() { onBrowseWorkshop() }
 
     @objc private func select(_ sender: NSMenuItem) {
         guard items.indices.contains(sender.tag) else { return }

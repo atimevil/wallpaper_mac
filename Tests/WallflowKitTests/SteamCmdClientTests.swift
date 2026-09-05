@@ -83,3 +83,53 @@ final class SteamCmdClientTests: XCTestCase {
         XCTAssertNil(SteamCmdClient.locateExecutable(searching: [missing]))
     }
 }
+
+extension SteamCmdClientTests {
+    /// 스팀의 loginusers.vdf에서 계정 이름만 읽는다. 비밀번호는 거기 없다.
+    func testPicksMostRecentAccount() {
+        let vdf = """
+        "users"
+        {
+            "111"
+            {
+                "AccountName"		"old_account"
+                "MostRecent"		"0"
+            }
+            "222"
+            {
+                "AccountName"		"current_account"
+                "MostRecent"		"1"
+            }
+        }
+        """
+        XCTAssertEqual(SteamCmdClient.parseAccountName(vdf), "current_account")
+    }
+
+    /// MostRecent 표시가 없으면 첫 계정을 쓴다.
+    func testFallsBackToFirstAccount() {
+        let vdf = """
+        "users"
+        {
+            "111"
+            {
+                "AccountName"		"only_account"
+                "PersonaName"		"보이는 이름"
+            }
+        }
+        """
+        XCTAssertEqual(SteamCmdClient.parseAccountName(vdf), "only_account")
+    }
+
+    func testNoAccountsYieldsNil() {
+        XCTAssertNil(SteamCmdClient.parseAccountName("\"users\"\n{\n}\n"))
+        XCTAssertNil(SteamCmdClient.parseAccountName(""))
+    }
+
+    /// 로그인 실패는 종료 코드가 0일 때도 있어 출력으로 알아봐야 한다.
+    func testDetectsLoginFailureFromOutput() {
+        XCTAssertTrue(SteamCmdClient.indicatesLoginFailure("FAILED (Invalid Password)"))
+        XCTAssertTrue(SteamCmdClient.indicatesLoginFailure("Failed to log in with cached"))
+        XCTAssertTrue(SteamCmdClient.indicatesLoginFailure("Rate Limit Exceeded"))
+        XCTAssertFalse(SteamCmdClient.indicatesLoginFailure("Success. Downloaded item 1 to \"/x\""))
+    }
+}
