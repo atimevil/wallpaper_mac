@@ -744,6 +744,7 @@ M2의 컴포지터는 레이어를 `(QuadInstance, MTLTexture)` 쌍으로 한 �
 **Files:**
 - Modify: `Sources/WallflowApp/SceneShaders.swift` (단색 프래그먼트 셰이더 추가)
 - Modify: `Sources/WallflowApp/MetalCompositor.swift`
+- Modify: `Sources/WallflowApp/SceneRenderer.swift` (호출부 한 줄만 — 빌드 유지용)
 
 **Interfaces:**
 - Consumes: `QuadInstance`, `CompositorError` (M2 Task 6)
@@ -772,7 +773,10 @@ enum LayerSource {
     /// 한 번 만들어 두고 바뀌지 않는 텍스처.
     case fixed(MTLTexture)
     /// 매 프레임 물어보는 텍스처. 비디오가 이 경우다.
-    case dynamic(() -> MTLTexture?)
+    /// VideoTexture가 @MainActor라 페이로드도 격리해야 한다. draw(in:)이 이미
+    /// @MainActor이므로 호출 측은 문제없다. nonisolated로 우회하지 마라 —
+    /// 실제 스레딩 가정을 표현하는 대신 숨기게 된다.
+    case dynamic(@MainActor () -> MTLTexture?)
     /// 텍스처 없이 단색으로 칠한다. 셰이더 flat 레이어가 이 경우다.
     case solid(SIMD4<Float>)
 }
@@ -809,6 +813,12 @@ enum LayerSource {
 
 `setLayers`의 시그니처가 `[(QuadInstance, LayerSource)]`로 바뀐다.
 
+**호출부를 같이 고쳐야 빌드가 초록으로 남는다.** 유일한 호출부인
+`SceneRenderer.swift`의 `compositor.setLayers(drawable)`는 아직
+`[(QuadInstance, MTLTexture)]`를 만든다. 그 배열을 만드는 곳에서 텍스처를
+`.fixed(texture)`로 감싸도록 최소 수정하라. Task 5가 그 부분을 다시 크게
+고치지만, 태스크마다 빌드가 통과해야 리뷰와 회귀 판정이 성립한다.
+
 - [ ] **Step 3: 빌드 확인**
 
 Run: `rm -rf .build && swift build 2>&1 | grep -c warning:`
@@ -817,7 +827,7 @@ Expected: `0`
 - [ ] **Step 4: 커밋**
 
 ```bash
-git add Sources/WallflowApp/SceneShaders.swift Sources/WallflowApp/MetalCompositor.swift
+git add Sources/WallflowApp/SceneShaders.swift Sources/WallflowApp/MetalCompositor.swift Sources/WallflowApp/SceneRenderer.swift
 git commit -m "$(cat <<'MSG'
 feat: 컴포지터에 동적 텍스처와 단색 레이어 지원
 
