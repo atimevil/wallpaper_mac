@@ -82,14 +82,27 @@ public struct SceneDocument: Sendable {
             )
         }
 
+        if let particlePresetPath = object["particle"] as? String {
+            guard let origin else {
+                return unsupported("파티클 레이어지만 origin이 스크립트다. 스크립팅은 M5에서 지원한다")
+            }
+            let particleSize = (object["size"] as? String).flatMap(Vec2.parse)
+                ?? Vec2(x: 0, y: 0)
+            let content = resolveParticleContent(presetPath: particlePresetPath, resolver: resolver)
+            return SceneLayer(
+                id: id, name: name, visible: visible,
+                origin: origin, size: particleSize,
+                content: content
+            )
+        }
+
         guard let modelPath = object["image"] as? String else {
-            if object["particle"] != nil { return unsupported("파티클은 M3에서 지원한다") }
-            if object["text"] != nil { return unsupported("텍스트는 M3에서 지원한다") }
-            if object["sound"] != nil { return unsupported("사운드는 M4에서 지원한다") }
+            if object["text"] != nil { return unsupported("텍스트는 M5에서 지원한다") }
+            if object["sound"] != nil { return unsupported("사운드는 M6에서 지원한다") }
             return unsupported("알 수 없는 레이어 종류")
         }
         guard let origin, let size else {
-            return unsupported("origin이나 size가 스크립트다. 스크립팅은 M4에서 지원한다")
+            return unsupported("origin이나 size가 스크립트다. 스크립팅은 M5에서 지원한다")
         }
 
         let content = resolveContent(modelPath: modelPath, object: object, resolver: resolver)
@@ -98,6 +111,43 @@ public struct SceneDocument: Sendable {
             origin: origin, size: size,
             content: content
         )
+    }
+
+    /// 파티클 프리셋을 따라가 레이어 내용을 판정한다.
+    private static func resolveParticleContent(
+        presetPath: String, resolver: ReferenceResolver
+    ) -> LayerContent {
+        // 프리셋 JSON을 읽는다
+        guard let presetJson = resolver.json(for: presetPath) else {
+            return .unsupported(reason: "파티클 프리셋을 찾을 수 없다: \(presetPath)")
+        }
+
+        // 프리셋을 파싱한다
+        guard let preset = ParticlePreset.parse(presetJson) else {
+            return .unsupported(reason: "파티클 프리셋 파싱 실패: \(presetPath)")
+        }
+
+        // 프리셋의 머티리얼 경로를 따라 머티리얼을 읽는다
+        guard let material = resolver.json(for: preset.materialPath),
+              let passes = material["passes"] as? [[String: Any]],
+              let pass = passes.first else {
+            return .unsupported(reason: "파티클 머티리얼을 찾을 수 없다: \(preset.materialPath)")
+        }
+
+        // 첫 텍스처 이름을 얻는다
+        guard let textures = pass["textures"] as? [Any],
+              let textureName = textures.first as? String else {
+            return .unsupported(reason: "파티클 머티리얼의 첫 텍스처가 없다: \(preset.materialPath)")
+        }
+
+        // 합성 방식. 없으면 씬 머티리얼의 기본값인 translucent다.
+        // additive만 특별 취급하는 이유는 실물에서 이 둘만 나오기 때문이다.
+        let blend: ParticleBlendMode =
+            (pass["blending"] as? String) == "additive" ? .additive : .translucent
+
+        // 텍스처 경로를 만든다
+        let texturePath = "materials/\(textureName).tex"
+        return .particle(preset: preset, texturePath: texturePath, blend: blend)
     }
 
     /// 머티리얼을 읽어 이 레이어가 무엇인지 판정한다.

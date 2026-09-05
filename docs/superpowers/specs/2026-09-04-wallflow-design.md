@@ -48,6 +48,29 @@ int32 imageCount, freeImageFormat, [0004는 int32 하나 더], mipmapCount
 ```
 
 - `freeImageFormat`: `2`=JPEG, `13`=PNG, `-1`=원시 픽셀 또는 비디오
+
+**컨테이너 버전 네 가지** (M3 이후 assets 311개 전수 해독, 잔여 바이트 0으로 검증).
+씬 `.pkg` 안에는 `0003`/`0004`뿐이라 M2에서는 보이지 않았다.
+
+| 버전 | 헤더 필드 | 밉맵 항목 |
+|---|---|---|
+| `TEXB0001` | `imageCount, mipmapCount` | `w, h, dataSize` |
+| `TEXB0002` | `imageCount, mipmapCount` | `w, h, isLZ4, decompressedSize, dataSize` |
+| `TEXB0003` | `imageCount, freeImageFormat, mipmapCount` | 위와 같음 |
+| `TEXB0004` | `imageCount, freeImageFormat, ?, mipmapCount` | 위와 같음 |
+
+`TEXB0001`에는 `freeImageFormat`도 LZ4 필드도 없다. 항상 원시 픽셀이다.
+
+**`flags & 4`면 밉맵 뒤에 스프라이트 시트 섹션이 붙는다.** M2의 이해가 여기서
+불완전했다 — 씬 텍스처에 이 경우가 없어 드러나지 않았을 뿐, `0003`/`0004`에도 나온다.
+
+| 섹션 | 헤더 | 프레임 |
+|---|---|---|
+| `TEXS0002` | 매직(9) + `frameCount` | 32바이트 x frameCount |
+| `TEXS0003` | 매직(9) + `frameCount` + 격자 폭 + 격자 높이 | 32바이트 x frameCount |
+
+`materials/lut/*.tex` 28개는 `TEXV` 매직이 없다. 컬러 그레이딩 LUT의 원시 데이터이고
+확장자만 `.tex`다. 이펙트에서 쓰이므로 M6의 몫이다.
 - `flags` 비트 `32`: **비디오 텍스처 — 데이터가 통째로 MP4(H.264) 파일**
 - `format`: `0`=RGBA8888, `9`=R8(단일 채널, 마스크용)
 - `isLZ4`: LZ4 블록 압축. macOS `Compression` 프레임워크의 `COMPRESSION_LZ4_RAW`로

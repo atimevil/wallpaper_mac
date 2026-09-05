@@ -39,6 +39,8 @@ enum LayerSource {
     case dynamic(@MainActor () -> MTLTexture?)
     /// 텍스처 없이 단색으로 칠한다. 셰이더 flat 레이어가 이 경우다.
     case solid(SIMD4<Float>)
+    /// 파티클. 쿼드 하나가 아니라 인스턴싱으로 직접 그린다.
+    case particles(ParticleRenderer)
 }
 
 /// 직교 투영 공간에 텍스처 쿼드를 겹쳐 그린다.
@@ -51,6 +53,7 @@ final class MetalCompositor {
     private let solidPipeline: MTLRenderPipelineState
     private let vertexBuffer: MTLBuffer
     private let sampler: MTLSamplerState
+    private let library: MTLLibrary
 
     private var projection = SIMD2<Float>(1, 1)
     private var layers: [(QuadInstance, LayerSource)] = []
@@ -67,6 +70,7 @@ final class MetalCompositor {
         } catch {
             throw CompositorError.libraryCompilationFailed("\(error)")
         }
+        self.library = library
 
         // 단위 쿼드. 삼각형 스트립 4정점.
         let vertices: [SIMD2<Float>] = [
@@ -125,6 +129,18 @@ final class MetalCompositor {
         self.sampler = sampler
     }
 
+    /// 파티클 레이어 하나에 붙일 렌더러를 만든다.
+    /// 셰이더 라이브러리를 재사용해 레이어마다 MSL을 다시 컴파일하지 않는다.
+    func makeParticleRenderer(
+        maxCount: Int, blend: ParticleBlendMode, texture: MTLTexture,
+        layerOrigin: SIMD3<Float>, sheet: ParticleSpriteSheet?
+    ) throws -> ParticleRenderer {
+        try ParticleRenderer(
+            device: device, library: library, maxCount: maxCount,
+            blend: blend, texture: texture, sampler: sampler, layerOrigin: layerOrigin,
+            sheet: sheet)
+    }
+
     /// 씬의 직교 공간 크기를 정한다.
     /// 첫 draw 전에 반드시 불러야 한다. 기본값 (1,1)로 그리면 지오메트리가
     /// 클립 공간 밖으로 밀려나 아무것도 보이지 않는다.
@@ -174,6 +190,14 @@ final class MetalCompositor {
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
                 encoder.setFragmentTexture(texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
+            case .particles(let renderer):
+                // 파티클은 자기 draw를 인코딩한다. 아래 공통 drawPrimitives까지
+                // 실행되면 파티클 위에 정체불명의 쿼드가 한 장 더 그려진다.
+                renderer.encode(into: encoder, projection: projection)
+                // 파티클 파이프라인이 정점 버퍼 결합을 바꿨을 수 있으므로
+                // 다음 쿼드 레이어를 위해 index 0을 되돌린다.
+                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                continue
             }
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }

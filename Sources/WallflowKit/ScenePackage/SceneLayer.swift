@@ -36,6 +36,18 @@ public struct Vec2: Equatable, Sendable {
     }
 }
 
+/// 파티클을 배경 위에 어떻게 합성하는지. 머티리얼의 `blending` 값이다.
+///
+/// 실물 씬을 조사한 결과 둘 다 실제로 쓰인다 — 눈·비·먼지·광선은 additive,
+/// 벚꽃(leaves5)은 translucent다. 하나로 뭉치면 안 된다. 벚꽃을 additive로 그리면
+/// 분홍 꽃잎이 밝은 배경 위에서 하얗게 날아간다.
+public enum ParticleBlendMode: Equatable, Sendable {
+    /// 색을 더한다. 빛나는 것(눈·광선·먼지)에 쓴다.
+    case additive
+    /// 알파로 섞는다. 불투명한 것(꽃잎)에 쓴다.
+    case translucent
+}
+
 /// 레이어가 무엇을 그리는지.
 public enum LayerContent: Equatable, Sendable {
     /// .pkg 또는 assets 안의 텍스처 경로.
@@ -44,6 +56,8 @@ public enum LayerContent: Equatable, Sendable {
     case video(texturePath: String)
     /// 셰이더 `flat` 기반의 단색 사각형. 텍스처가 없다.
     case solidColor(Vec3)
+    /// 파티클 시스템. 프리셋과 텍스처 경로, 그리고 합성 방식을 담는다.
+    case particle(preset: ParticlePreset, texturePath: String, blend: ParticleBlendMode)
     /// 그리지 못하는 레이어. 이유를 남겨 나중에 무엇을 만들지 알 수 있게 한다.
     case unsupported(reason: String)
 }

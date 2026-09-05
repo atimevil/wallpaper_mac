@@ -54,3 +54,46 @@ func buildTex(
     }
     return d
 }
+
+/// TEXB0001은 freeImageFormat도 LZ4 필드도 없다. 항상 원시 픽셀이다.
+func buildTexV1(format: Int32 = 0, flags: Int32 = 0,
+                size: (Int32, Int32) = (32, 32),
+                mips: [(Int32, Int32, Data)]) -> Data {
+    var d = nullTerminated("TEXV0005") + nullTerminated("TEXI0001")
+    d += le32(format) + le32(flags)
+    d += le32(size.0) + le32(size.1) + le32(size.0) + le32(size.1)
+    d += le32(0)
+    d += nullTerminated("TEXB0001")
+    d += le32(1) + le32(Int32(mips.count))
+    for (w, h, payload) in mips {
+        d += le32(w) + le32(h) + le32(Int32(payload.count)) + payload
+    }
+    return d
+}
+
+/// TEXB0002는 TEXB0003에서 freeImageFormat만 빠진 형태다.
+func buildTexV2(format: Int32 = 0, flags: Int32 = 0,
+                size: (Int32, Int32) = (32, 32),
+                mips: [(Int32, Int32, Int32, Int32, Data)]) -> Data {
+    var d = nullTerminated("TEXV0005") + nullTerminated("TEXI0001")
+    d += le32(format) + le32(flags)
+    d += le32(size.0) + le32(size.1) + le32(size.0) + le32(size.1)
+    d += le32(0)
+    d += nullTerminated("TEXB0002")
+    d += le32(1) + le32(Int32(mips.count))
+    for (w, h, lz4, decomp, payload) in mips {
+        d += le32(w) + le32(h) + le32(lz4) + le32(decomp) + le32(Int32(payload.count))
+        d += payload
+    }
+    return d
+}
+
+/// flags & 4면 밉맵 뒤에 TEXS 섹션이 붙는다.
+func spriteSheetV2(frameCount: Int32) -> Data {
+    nullTerminated("TEXS0002") + le32(frameCount) + Data(count: Int(frameCount) * 32)
+}
+
+func spriteSheetV3(frameCount: Int32, grid: (Int32, Int32)) -> Data {
+    nullTerminated("TEXS0003") + le32(frameCount) + le32(grid.0) + le32(grid.1)
+        + Data(count: Int(frameCount) * 32)
+}

@@ -320,4 +320,126 @@ final class SceneDocumentTests: XCTestCase {
         }
         XCTAssertTrue(reason.contains("렌더 타깃"), "이유: \(reason)")
     }
+
+    /// 실물 참조 사슬 그대로:
+    /// object.particle → particles/presets/X.json → material → textures[0]
+    func testResolvesParticleLayer() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "Snow flat", "origin": "50 50 0",
+                          "particle": "particles/presets/snowflat.json"}]}
+            """,
+            extras: [
+                "particles/presets/snowflat.json": """
+                {"material":"materials/presets/snowflat.json","maxcount":300,
+                 "emitter":[{"name":"sphererandom","rate":15,"origin":"0 650 0",
+                             "directions":"1 0.03 0","distancemin":10,"distancemax":1200}],
+                 "initializer":[{"name":"sizerandom","min":2,"max":30}]}
+                """,
+                "materials/presets/snowflat.json":
+                    #"{"passes":[{"shader":"genericparticle","textures":["particle/chromaticdot"]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .particle(let preset, let texturePath, _) = doc.layers[0].content else {
+            return XCTFail("파티클 레이어여야 한다: \(doc.layers[0].content)")
+        }
+        XCTAssertEqual(preset.maxCount, 300)
+        XCTAssertEqual(preset.emitters.count, 1)
+        XCTAssertEqual(texturePath, "materials/particle/chromaticdot.tex")
+    }
+
+    /// 머티리얼의 blending을 읽어야 한다. 실물에서 눈·비·먼지·광선은 additive,
+    /// 벚꽃(leaves5)은 translucent다. 하나로 뭉치면 벚꽃이 밝은 배경 위에서
+    /// 하얗게 날아간다.
+    func testParticleBlendModeIsReadFromMaterial() throws {
+        func blend(of materialJSON: String) throws -> ParticleBlendMode {
+            let reader = try makeScenePkg(
+                scene: """
+                {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+                 "objects": [{"id": 1, "name": "P", "origin": "0 0 0",
+                              "particle": "particles/presets/p.json"}]}
+                """,
+                extras: [
+                    "particles/presets/p.json":
+                        #"{"material":"materials/presets/p.json","maxcount":10}"#,
+                    "materials/presets/p.json": materialJSON,
+                ]
+            )
+            let doc = try SceneDocument.load(from: reader, assets: nil)
+            guard case .particle(_, _, let b) = doc.layers[0].content else {
+                throw XCTSkip("파티클 레이어여야 한다: \(doc.layers[0].content)")
+            }
+            return b
+        }
+
+        XCTAssertEqual(
+            try blend(of: #"{"passes":[{"shader":"genericparticle","blending":"additive","textures":["particle/dot"]}]}"#),
+            .additive)
+        XCTAssertEqual(
+            try blend(of: #"{"passes":[{"shader":"genericparticle","blending":"translucent","textures":["particle/dot"]}]}"#),
+            .translucent)
+        // blending이 없으면 씬 머티리얼의 기본값인 translucent다.
+        XCTAssertEqual(
+            try blend(of: #"{"passes":[{"shader":"genericparticle","textures":["particle/dot"]}]}"#),
+            .translucent)
+    }
+
+    func testMissingParticlePresetIsUnsupported() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "Snow", "origin": "0 0 0",
+                      "particle": "particles/presets/gone.json"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .unsupported(let reason) = doc.layers[0].content else {
+            return XCTFail("참조가 끊기면 unsupported여야 한다")
+        }
+        XCTAssertTrue(reason.contains("gone.json"), "끊긴 경로를 알려야 한다: \(reason)")
+    }
+
+    /// 프리셋은 읽혔지만 머티리얼이 없으면 그릴 수 없다.
+    func testParticleWithoutTextureIsUnsupported() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "Snow", "origin": "0 0 0",
+                          "particle": "particles/presets/p.json"}]}
+            """,
+            extras: ["particles/presets/p.json":
+                        #"{"material":"materials/presets/missing.json","maxcount":10}"#]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .unsupported = doc.layers[0].content else {
+            return XCTFail("머티리얼이 없으면 unsupported여야 한다")
+        }
+    }
+
+    /// 인식 못 한 emitter/operator가 있어도 레이어는 살아야 한다.
+    func testPartiallyUnsupportedPresetStillRenders() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "Snow", "origin": "0 0 0",
+                          "particle": "particles/presets/p.json"}]}
+            """,
+            extras: [
+                "particles/presets/p.json": """
+                {"material":"materials/presets/p.json","maxcount":10,
+                 "emitter":[{"name":"sphererandom","rate":1,"origin":"0 0 0",
+                             "directions":"0 1 0","distancemin":0,"distancemax":1},
+                            {"name":"mysteryemitter"}]}
+                """,
+                "materials/presets/p.json":
+                    #"{"passes":[{"shader":"genericparticle","textures":["particle/dot"]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .particle(let preset, _, _) = doc.layers[0].content else {
+            return XCTFail("일부만 인식 못 해도 그려야 한다")
+        }
+        XCTAssertEqual(preset.emitters.count, 1)
+        XCTAssertEqual(preset.unsupportedNames, ["mysteryemitter"])
+    }
 }

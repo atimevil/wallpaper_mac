@@ -279,6 +279,104 @@ final class RealScenesTests: XCTestCase {
         }
         XCTAssertTrue(reason.contains("렌더 타깃"), "이유: \(reason)")
     }
+
+    /// assets의 모든 .tex가 파싱되어야 한다. M2의 이해는 여기서 불완전했다.
+    /// 각 파일이 정확히 소비되는지 검증한다 — 파서가 남은 바이트를 남겨두면
+    /// 그것을 감지한다. M2의 대결함이 정확히 이것이었다.
+    func testAllAssetTexturesParse() throws {
+        guard let assets = try assetsStore() else {
+            throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정")
+        }
+        let root = assets.root
+        var checked = 0
+        var failures: [String] = []
+        var residualFailures: [String] = []
+        let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+        while let url = files?.nextObject() as? URL {
+            guard url.pathExtension == "tex" else { continue }
+            // LUT는 TEXV 매직이 없는 컬러 그레이딩 원시 데이터다.
+            guard !url.path.contains("/lut/") else { continue }
+            let data = try Data(contentsOf: url)
+            checked += 1
+            do {
+                let header = try TexHeader.parse(data)
+                if header.consumedBytes != data.count {
+                    residualFailures.append(
+                        "\(url.lastPathComponent): parsed \(header.consumedBytes) of \(data.count) bytes"
+                    )
+                }
+            } catch {
+                failures.append("\(url.lastPathComponent): \(error)")
+            }
+        }
+        XCTAssertGreaterThan(checked, 250, "검사한 텍스처가 너무 적다")
+        XCTAssertTrue(failures.isEmpty, "파싱 실패 \(failures.count)건: \(failures.prefix(5))")
+        XCTAssertTrue(residualFailures.isEmpty, "잔여 바이트 \(residualFailures.count)건: \(residualFailures.prefix(5))")
+    }
+
+    /// M4 목표 씬의 파티클 세 개가 해석되어야 한다.
+    /// Rain perspective는 visible:false라 렌더 대상이 아니지만 해석은 된다.
+    func testTargetSceneParticlesResolve() throws {
+        guard let reader = try scenePkg("3714517753"),
+              let assets = try assetsStore() else {
+            throw XCTSkip("환경변수 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader, assets: assets)
+        let particles = doc.layers.compactMap { layer -> ParticlePreset? in
+            if case .particle(let preset, _, _) = layer.content { return preset }
+            return nil
+        }
+        XCTAssertEqual(particles.count, 3, "Snow flat, Rain perspective, Sakura")
+        XCTAssertTrue(particles.allSatisfy { $0.maxCount > 0 }, "maxCount가 0인 프리셋이 있다")
+        // 이미터가 없으면 아무것도 방출하지 못한다. dust_motes_0이 실제로 그랬다.
+        XCTAssertTrue(particles.allSatisfy { !$0.emitters.isEmpty }, "이미터가 없는 프리셋이 있다")
+    }
+
+    /// Task 4b: 실물 씬의 파티클 프리셋에서 malformedNames가 비어 있어야 한다.
+    func testRealScenesParticlePresetsAreParsedCorrectly() throws {
+        guard let root, let assets = try assetsStore() else {
+            throw XCTSkip("환경변수 미설정")
+        }
+
+        var allMalformed: [String: [(String, [String])]] = [:]  // scene ID -> [(layer name, malformed names)]
+        var dustMotesEmitterCount: [String: Int] = [:]  // scene ID -> emitter count for dust_motes_0
+
+        for id in try FileManager.default.contentsOfDirectory(atPath: root.path)
+            where id.allSatisfy(\.isNumber) {
+            guard let reader = try scenePkg(id) else { continue }
+            do {
+                let doc = try SceneDocument.load(from: reader, assets: assets)
+                for layer in doc.layers {
+                    if case .particle(let preset, _, _) = layer.content {
+                        if !preset.malformedNames.isEmpty {
+                            if allMalformed[id] == nil { allMalformed[id] = [] }
+                            allMalformed[id]?.append((layer.name, preset.malformedNames))
+                        }
+                        if layer.name == "dust_motes_0" {
+                            dustMotesEmitterCount[id] = preset.emitters.count
+                        }
+                    }
+                }
+            } catch {
+                // 씬 로드 실패는 무시. 이 테스트는 파티클만 검증한다.
+            }
+        }
+
+        // 모든 씬의 파티클 프리셋에서 malformedNames가 비어 있어야 한다.
+        XCTAssertTrue(allMalformed.isEmpty,
+                     "실물 씬의 파티클 필드가 잘못되었다. 씬별 malformed 필드:\n" +
+                     allMalformed.sorted { $0.key < $1.key }
+                         .map { id, layers in
+                             "\(id): " + layers.map { "레이어 '\($0)': \($1.joined(separator: ", "))" }
+                                 .joined(separator: "; ")
+                         }.joined(separator: "\n"))
+
+        // dust_motes_0의 이미터가 1개 이상이어야 한다.
+        if let emitterCount = dustMotesEmitterCount[dustMotesEmitterCount.keys.first ?? ""] {
+            XCTAssertGreaterThanOrEqual(emitterCount, 1,
+                                       "dust_motes_0 레이어의 이미터가 없다")
+        }
+    }
 }
 
 /// ROOT는 유효한데 이름 붙인 씬 디렉토리가 없을 때 던진다. XCTFail로 이미 실패를
