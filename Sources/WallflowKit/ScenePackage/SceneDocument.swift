@@ -140,9 +140,14 @@ public struct SceneDocument: Sendable {
             return .unsupported(reason: "파티클 머티리얼의 첫 텍스처가 없다: \(preset.materialPath)")
         }
 
+        // 합성 방식. 없으면 씬 머티리얼의 기본값인 translucent다.
+        // additive만 특별 취급하는 이유는 실물에서 이 둘만 나오기 때문이다.
+        let blend: ParticleBlendMode =
+            (pass["blending"] as? String) == "additive" ? .additive : .translucent
+
         // 텍스처 경로를 만든다
         let texturePath = "materials/\(textureName).tex"
-        return .particle(preset: preset, texturePath: texturePath)
+        return .particle(preset: preset, texturePath: texturePath, blend: blend)
     }
 
     /// 머티리얼을 읽어 이 레이어가 무엇인지 판정한다.

@@ -342,12 +342,48 @@ final class SceneDocumentTests: XCTestCase {
             ]
         )
         let doc = try SceneDocument.load(from: reader, assets: nil)
-        guard case .particle(let preset, let texturePath) = doc.layers[0].content else {
+        guard case .particle(let preset, let texturePath, _) = doc.layers[0].content else {
             return XCTFail("파티클 레이어여야 한다: \(doc.layers[0].content)")
         }
         XCTAssertEqual(preset.maxCount, 300)
         XCTAssertEqual(preset.emitters.count, 1)
         XCTAssertEqual(texturePath, "materials/particle/chromaticdot.tex")
+    }
+
+    /// 머티리얼의 blending을 읽어야 한다. 실물에서 눈·비·먼지·광선은 additive,
+    /// 벚꽃(leaves5)은 translucent다. 하나로 뭉치면 벚꽃이 밝은 배경 위에서
+    /// 하얗게 날아간다.
+    func testParticleBlendModeIsReadFromMaterial() throws {
+        func blend(of materialJSON: String) throws -> ParticleBlendMode {
+            let reader = try makeScenePkg(
+                scene: """
+                {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+                 "objects": [{"id": 1, "name": "P", "origin": "0 0 0",
+                              "particle": "particles/presets/p.json"}]}
+                """,
+                extras: [
+                    "particles/presets/p.json":
+                        #"{"material":"materials/presets/p.json","maxcount":10}"#,
+                    "materials/presets/p.json": materialJSON,
+                ]
+            )
+            let doc = try SceneDocument.load(from: reader, assets: nil)
+            guard case .particle(_, _, let b) = doc.layers[0].content else {
+                throw XCTSkip("파티클 레이어여야 한다: \(doc.layers[0].content)")
+            }
+            return b
+        }
+
+        XCTAssertEqual(
+            try blend(of: #"{"passes":[{"shader":"genericparticle","blending":"additive","textures":["particle/dot"]}]}"#),
+            .additive)
+        XCTAssertEqual(
+            try blend(of: #"{"passes":[{"shader":"genericparticle","blending":"translucent","textures":["particle/dot"]}]}"#),
+            .translucent)
+        // blending이 없으면 씬 머티리얼의 기본값인 translucent다.
+        XCTAssertEqual(
+            try blend(of: #"{"passes":[{"shader":"genericparticle","textures":["particle/dot"]}]}"#),
+            .translucent)
     }
 
     func testMissingParticlePresetIsUnsupported() throws {
@@ -400,7 +436,7 @@ final class SceneDocumentTests: XCTestCase {
             ]
         )
         let doc = try SceneDocument.load(from: reader, assets: nil)
-        guard case .particle(let preset, _) = doc.layers[0].content else {
+        guard case .particle(let preset, _, _) = doc.layers[0].content else {
             return XCTFail("일부만 인식 못 해도 그려야 한다")
         }
         XCTAssertEqual(preset.emitters.count, 1)
