@@ -34,8 +34,8 @@ Wallpaper Engine 창작마당 콘텐츠(Video / Web / Scene)를 재생하는 것
 | `.pkg` 컨테이너 | 해결. `PKGV00XX` 헤더 + (이름, 오프셋, 길이) 엔트리 테이블 + 블롭. 파싱 성공 |
 | `.tex` 텍스처 | `TEXV/TEXI/TEXB` 헤더 래퍼. 내용물은 JPEG / PNG / LZ4 압축 원시 픽셀 / **MP4** (아래 참조) |
 | `scene.json` | 평범한 JSON. 2D 직교 카메라, 레이어 6~11개 |
-| 셰이더 | 진짜 GLSL. 단 레거시 문법(`varying`, `texture2D`)이고 `#if COMBO` 전처리기와 JSON 주석 어노테이션을 씀 |
-| 표준 셰이더 / `common.h` | **`.pkg`에 없음.** Wallpaper Engine 설치 폴더의 `assets/`에 존재 → 별도 반입 필요 |
+| 셰이더 | GLSL 문법 + HLSL 의미론의 자체 방언 (아래 절 참조). 레거시 문법(`varying`, `texture2D`), `#if COMBO` 전처리기, JSON 주석 어노테이션 |
+| 표준 셰이더 / `common.h` | `.pkg`에 없고 `assets/`에 있음. **2026-09-05 반입 완료** |
 
 ### `.tex` 포맷 (M1 이후 실물 전수 해독, 잔여 바이트 0으로 검증)
 
@@ -55,6 +55,32 @@ int32 imageCount, freeImageFormat, [0004는 int32 하나 더], mipmapCount
 
 보유 씬의 가장 큰 텍스처 두 개(각 226MB)가 전부 MP4였다. 즉 두 씬의 배경 레이어는
 M1에서 이미 만든 AVFoundation 하드웨어 디코딩 경로를 그대로 쓴다.
+
+### 셰이더 방언 (assets 반입 후 실물 확인, 2026-09-05)
+
+순수 GLSL이 아니다. 문법은 GLSL(`varying`, `attribute`, `uniform sampler2D`)인데
+의미론은 HLSL이다 — `mul(a, b)`, `[maxvertexcount(4)]`, `PS_INPUT`/`VS_OUTPUT`,
+`OUT.Append(...)`, `CAST3X3`.
+
+**Metal에 지오메트리 셰이더가 없는 것은 문제가 아니다.** `genericparticle`이
+`#if GS_ENABLED` / `#else // No geometry shaders` 분기를 갖고, 후자에서 정점
+셰이더가 빌보드 확장을 직접 수행한다 (`ComputeParticleTangents` +
+`ComputeParticlePosition`, 코너 좌표는 정점 속성 `a_TexCoordVec4.xy`로 받음).
+`GS_ENABLED = 0`으로 컴파일하면 그 경로가 곧 Metal 경로다.
+
+### `assets/` 반입 완료 (2026-09-05)
+
+`~/Library/Application Support/Wallflow/Assets` — 85MB, 파일 2935개.
+표준 셰이더 54쌍, include 12개, 파티클 텍스처 70개 카테고리, 폰트 19개.
+
+M2 로그의 "텍스처 참조를 따라갈 수 없다" 두 건은 서로 다른 문제였다:
+- `models/util/solidlayer.json` → 셰이더 `flat`, 텍스처 없음. **단색 레이어**, 구현이 쉽다.
+- `models/util/composelayer.json` → 텍스처가 `_rt_FullFrameBuffer`. **렌더 타깃**이라
+  FBO 이펙트 체인이 필요하다.
+
+파티클 참조 사슬 (실물 확인):
+`particles/presets/X.json` → `materials/presets/X.json` → 셰이더 `genericparticle`
++ 텍스처 `particle/chromaticdot` → `assets/materials/particle/chromaticdot.tex`
 
 ### 보유 씬 4개 구성
 
