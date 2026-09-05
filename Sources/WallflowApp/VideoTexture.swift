@@ -67,22 +67,32 @@ final class VideoTexture {
         let directory = Self.temporaryVideoDirectory()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("wallflow-video-\(UUID().uuidString).mp4")
-        do {
-            try mp4.write(to: url, options: .atomic)
-        } catch {
-            throw VideoTextureError.temporaryFileFailed("\(error)")
-        }
-        temporaryURL = url
 
-        // 재생 내내 배타적 잠금을 쥔다. sweepOrphanedFiles()가 시작 시 이 폴더를
-        // 훑을 때 이 잠금 때문에 살아 있는 파일은 건드리지 못한다.
-        let fd = open(url.path, O_RDONLY)
-        guard fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 else {
-            if fd >= 0 { close(fd) }
-            try? FileManager.default.removeItem(at: url)
-            throw VideoTextureError.temporaryFileFailed("임시 파일 잠금 실패")
+        // 파일을 "만들기+잠그기"를 하나의 syscall로 묶는다. Data.write(options:.atomic)를
+        // 쓰면 Foundation이 같은 폴더에 이름이 다른 스크래치 파일을 먼저 쓰고 나중에
+        // rename하는데, 226MB 페이로드에서 그 사이의 시간 동안 스크래치 파일도
+        // temporaryURL도 아무 잠금 없이 디렉터리에 놓여 있어 sweepOrphanedFiles()가
+        // 지울 수 있었다. O_EXLOCK은 open()이 성공하는 바로 그 순간 파일을 만들고
+        // 배타적으로 잠그는 것을 원자적으로 보장하는 BSD 확장이라 — flock()을 별도
+        // 호출로 나중에 걸 때 생기는 "만들어졌지만 아직 안 잠긴" 틈이 아예 없다.
+        // O_EXCL은 (사실상 불가능하지만) UUID 충돌 시 기존 파일을 덮어쓰지 않는다.
+        let fd = open(url.path, O_CREAT | O_EXCL | O_RDWR | O_EXLOCK | O_NONBLOCK, 0o600)
+        guard fd >= 0 else {
+            throw VideoTextureError.temporaryFileFailed("임시 파일 생성/잠금 실패 (errno \(errno))")
         }
         lockDescriptor = fd
+        temporaryURL = url
+
+        // 이제 파일은 이미 생성되고 잠긴 상태다. sweepOrphanedFiles()가 이 시점부터
+        // 쓰기가 끝날 때까지 이 파일을 보더라도 flock에 실패해 건드리지 못한다.
+        do {
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+            try handle.write(contentsOf: mp4)
+        } catch {
+            close(fd)
+            try? FileManager.default.removeItem(at: url)
+            throw VideoTextureError.temporaryFileFailed("\(error)")
+        }
 
         var created: CVMetalTextureCache?
         guard CVMetalTextureCacheCreate(nil, nil, device, nil, &created) == kCVReturnSuccess,
@@ -141,6 +151,12 @@ final class VideoTexture {
         ) else { return }
 
         for url in entries {
+            // 이 폴더가 우리가 만든 파일만 담는다는 보장이 사라질 수 있으니(예: 사용자가
+            // 직접 뭔가 떨어뜨렸거나, 미래에 다른 이름 규칙이 섞여 들어오거나) 이름
+            // 패턴부터 확인한다. VideoTexture.init이 만드는 이름과 정확히 일치하는
+            // 파일만 대상으로 삼는다.
+            guard url.lastPathComponent.hasPrefix("wallflow-video-"),
+                  url.pathExtension == "mp4" else { continue }
             let fd = open(url.path, O_RDONLY)
             guard fd >= 0 else { continue }
             defer { close(fd) }

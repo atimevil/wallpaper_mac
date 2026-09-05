@@ -28,14 +28,22 @@ public enum TexDecoder {
             // 해제 폭탄(수백 KB짜리가 10만x10만을 선언)은 CGImageSourceCreateImageAtIndex가
             // 그 치수 그대로 비트맵을 올리게 만들므로, rawPixels 분기와 같은 16384
             // 상한을 여기서도 걸지 않으면 세 분기 중 이 둘만 무방비다.
-            if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
-                as? [CFString: Any] {
-                let width = (properties[kCGImagePropertyPixelWidth] as? Int) ?? 0
-                let height = (properties[kCGImagePropertyPixelHeight] as? Int) ?? 0
-                guard width <= TexHeader.maxTextureDimension,
-                      height <= TexHeader.maxTextureDimension else {
-                    throw TexError.dimensionsOutOfRange
-                }
+            //
+            // 실패 닫힘(fail closed)으로 짠다. 이전 버전은 `if let`으로만 감싸서
+            // CGImageSourceCopyPropertiesAtIndex가 nil을 주거나 캐스팅이 실패하면
+            // 검사 자체를 건너뛰었고, 두 치수를 각각 `?? 0`으로 기본값 처리해
+            // "치수를 못 읽음"과 "치수가 0"을 구분하지 못했다(0 <= 16384라 통과).
+            // 이제는 프로퍼티를 못 읽거나, 두 키 중 하나라도 없거나 양수 Int가
+            // 아니면 그 자체를 dimensionsOutOfRange로 취급한다 — 치수를 안전하게
+            // 확인할 수 없는 이미지는 통과시키지 않는다.
+            guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any],
+                let width = properties[kCGImagePropertyPixelWidth] as? Int, width > 0,
+                let height = properties[kCGImagePropertyPixelHeight] as? Int, height > 0,
+                width <= TexHeader.maxTextureDimension,
+                height <= TexHeader.maxTextureDimension
+            else {
+                throw TexError.dimensionsOutOfRange
             }
             guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
                 throw TexError.imageDecodeFailed
