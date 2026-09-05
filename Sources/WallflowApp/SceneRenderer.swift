@@ -139,7 +139,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         guard let compositor else { return }
         for state in texts where state.layerIndex < layerList.count {
             layerList[state.layerIndex].0 = QuadInstance(
-                origin: state.origin, size: state.size)
+                origin: state.origin, size: state.size,
+                color: layerList[state.layerIndex].0.color,
+                rotation: layerList[state.layerIndex].0.rotation)
         }
         compositor.setLayers(layerList)
     }
@@ -231,7 +233,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             }
             let quad = QuadInstance(
                 origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
-                size: SIMD2(Float(layer.size.x), Float(layer.size.y)))
+                size: SIMD2(Float(layer.size.x), Float(layer.size.y)),
+                color: SIMD4(Float(layer.tint.x), Float(layer.tint.y), Float(layer.tint.z),
+                             Float(layer.alpha)),
+                rotation: Float(layer.rotation))
 
             switch layer.content {
             case .solidColor(let c):
@@ -343,8 +348,13 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 }
                 rasterize(state, compositor: compositor)
                 state.layerIndex = drawable.count
-                drawable.append((QuadInstance(origin: state.origin, size: state.size),
-                                 .dynamic { [weak state] in state?.texture }))
+                // 글자 색은 래스터화할 때 이미 칠했다. 여기서 또 곱하면 색이 제곱된다.
+                // 틴트는 흰색으로 두고 레이어 투명도만 넘긴다.
+                drawable.append((QuadInstance(
+                    origin: state.origin, size: state.size,
+                    color: SIMD4(1, 1, 1, Float(layer.alpha)),
+                    rotation: Float(layer.rotation)),
+                    .dynamic { [weak state] in state?.texture }))
 
             case .unsupported(let reason):
                 skipped.append("\(layer.name): \(reason)")

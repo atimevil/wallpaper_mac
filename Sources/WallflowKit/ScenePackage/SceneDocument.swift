@@ -3,6 +3,12 @@ import Foundation
 public enum SceneError: Error, Equatable {
     case malformedSceneJSON
     case missingField(String)
+    /// 원근 투영 씬. `orthogonalprojection`이 JSON `null`로 들어온다.
+    ///
+    /// 실물 창작마당 씬 하나("Ocarina of Time")가 이 경우다. 3D 카메라가 필요해서
+    /// 직교 투영 파이프라인으로는 그릴 수 없다. `missingField`로 뭉개면 파일이
+    /// 깨진 것처럼 보여서 원인을 찾는 데 오래 걸린다.
+    case perspectiveProjectionUnsupported
 }
 
 /// scene.json과 그것이 참조하는 models/·materials/를 따라가
@@ -32,6 +38,12 @@ public struct SceneDocument: Sendable {
         }
 
         let general = root["general"] as? [String: Any] ?? [:]
+        // 키는 있는데 값이 null이면 직교가 아니라 원근 투영 씬이다.
+        // 값이 없는 것과 형태가 다른 것을 구분해야 진단이 맞다.
+        if general.keys.contains("orthogonalprojection"),
+           !(general["orthogonalprojection"] is [String: Any]) {
+            throw SceneError.perspectiveProjectionUnsupported
+        }
         guard let ortho = general["orthogonalprojection"] as? [String: Any],
               let width = ortho["width"] as? Int,
               let height = ortho["height"] as? Int,
@@ -49,8 +61,13 @@ public struct SceneDocument: Sendable {
         // 통째로 실패해 정상 레이어까지 사라진다. 원소별로 걸러 그것을 막는다.
         let rawObjects = root["objects"] as? [Any] ?? []
         let objects = rawObjects.compactMap { $0 as? [String: Any] }
+        // 부모-자식 변환을 먼저 푼다. 자식의 origin과 scale은 부모 기준 상대값이라,
+        // 무시하면 시계가 화면 밖에 그려지고 글자 크기가 어긋난다(실물에서 확인).
+        let transforms = resolveTransforms(objects)
         let layers = objects.enumerated().map { index, object in
-            makeLayer(object, fallbackID: index, resolver: resolver)
+            let id = object["id"] as? Int ?? index
+            return makeLayer(object, fallbackID: index, resolver: resolver,
+                             transform: transforms[id] ?? .identity)
         }
 
         return SceneDocument(
@@ -60,22 +77,119 @@ public struct SceneDocument: Sendable {
         )
     }
 
+    /// 레이어 하나의 최종 배치. 부모 사슬을 이미 합쳐 놓은 값이다.
+    struct LayerTransform {
+        var origin: Vec3
+        var scale: Vec3
+        /// 화면 평면 회전(라디안). 실물에서 z 말고는 쓰이지 않는다.
+        var rotation: Double
+
+        static let identity = LayerTransform(
+            origin: Vec3(x: 0, y: 0, z: 0),
+            scale: Vec3(x: 1, y: 1, z: 1),
+            rotation: 0)
+    }
+
+    /// 오브젝트마다 부모 사슬을 따라 올라가며 변환을 합친다.
+    ///
+    /// 자식의 origin은 부모 좌표계 안의 값이다. 부모의 크기 조정과 회전을 거쳐야
+    /// 화면 좌표가 된다. 실물 씬에서 시계가 부모 그룹 안에 들어 있고 자체 origin이
+    /// `(0, -121)`인데, 부모를 무시하면 화면 왼쪽 위 밖에 그려진다.
+    ///
+    /// 부모 사슬은 파일에서 온 값이라 고리가 있을 수 있다. 깊이를 죄어 멈춘다.
+    private static func resolveTransforms(
+        _ objects: [[String: Any]]
+    ) -> [Int: LayerTransform] {
+        var byID: [Int: [String: Any]] = [:]
+        for (index, object) in objects.enumerated() {
+            byID[object["id"] as? Int ?? index] = object
+        }
+
+        func local(_ object: [String: Any]) -> LayerTransform {
+            LayerTransform(
+                origin: scalarOrScripted(object["origin"]).flatMap(Vec3.parse)
+                    ?? Vec3(x: 0, y: 0, z: 0),
+                scale: scalarOrScripted(object["scale"]).flatMap(Vec3.parse)
+                    ?? Vec3(x: 1, y: 1, z: 1),
+                rotation: scalarOrScripted(object["angles"]).flatMap(Vec3.parse)?.z ?? 0)
+        }
+
+        /// 부모 변환 안에 놓인 자식의 화면 변환.
+        func compose(parent: LayerTransform, child: LayerTransform) -> LayerTransform {
+            let scaledX = child.origin.x * parent.scale.x
+            let scaledY = child.origin.y * parent.scale.y
+            let cosR = cos(parent.rotation), sinR = sin(parent.rotation)
+            return LayerTransform(
+                origin: Vec3(
+                    x: parent.origin.x + scaledX * cosR - scaledY * sinR,
+                    y: parent.origin.y + scaledX * sinR + scaledY * cosR,
+                    z: parent.origin.z + child.origin.z * parent.scale.z),
+                scale: Vec3(
+                    x: parent.scale.x * child.scale.x,
+                    y: parent.scale.y * child.scale.y,
+                    z: parent.scale.z * child.scale.z),
+                rotation: parent.rotation + child.rotation)
+        }
+
+        var resolved: [Int: LayerTransform] = [:]
+        for (id, object) in byID {
+            // 사슬을 위로 모은 뒤 부모부터 차례로 합친다.
+            var chain: [[String: Any]] = [object]
+            var seen: Set<Int> = [id]
+            var current = object
+            // 실물의 가장 깊은 사슬이 3단이다. 32면 충분히 관대하면서도 고리를 끊는다.
+            for _ in 0..<32 {
+                guard let parentID = current["parent"] as? Int,
+                      !seen.contains(parentID),
+                      let parent = byID[parentID] else { break }
+                seen.insert(parentID)
+                chain.append(parent)
+                current = parent
+            }
+            var transform = LayerTransform.identity
+            for object in chain.reversed() {
+                transform = compose(parent: transform, child: local(object))
+            }
+            resolved[id] = transform
+        }
+        return resolved
+    }
+
     /// 레이어 하나가 해석되지 않아도 씬 전체를 버리지 않는다.
     /// 그릴 수 없는 것은 이유를 달아 unsupported로 남긴다.
     private static func makeLayer(
-        _ object: [String: Any], fallbackID: Int, resolver: ReferenceResolver
+        _ object: [String: Any], fallbackID: Int, resolver: ReferenceResolver,
+        transform: LayerTransform
     ) -> SceneLayer {
         let id = object["id"] as? Int ?? fallbackID
         let name = object["name"] as? String ?? "object\(fallbackID)"
-        let visible = object["visible"] as? Bool ?? true
+        // visible이 {"script": ..., "value": 0} 객체인 레이어가 많다. Bool 캐스트만
+        // 시도하면 실패해 기본값 true가 되고, 숨겨야 할 레이어가 화면에 남는다.
+        // 실물 "flowery"가 value 0인데 그려지고 있었다.
+        let visible = Self.boolValue(object["visible"]) ?? true
+        // alpha와 color를 무시하면 반투명하게 설계된 UI가 불투명한 검은 상자가 된다.
+        let alpha = Self.doubleValue(object["alpha"]).map { Swift.min(Swift.max($0, 0), 1) } ?? 1
+        let tint = Self.scalarOrScripted(object["color"]).flatMap(Vec3.parse)
+            ?? Vec3(x: 1, y: 1, z: 1)
+        let rotation = transform.rotation.isFinite ? transform.rotation : 0
 
         // origin/size가 문자열이 아니라 {"script": ..., "value": ...} 객체인 씬이 있다.
         // 그 객체에도 `value`가 있고 그게 편집기에서 마지막으로 정해진 좌표다.
         // 스크립트를 아직 못 돌려도 이 값으로 제자리에 그릴 수 있다 —
         // 실물 씬 하나는 origin 스크립트의 update가 통째로 주석 처리돼 있어
         // `value`가 유일한 좌표다.
-        let origin = Self.scalarOrScripted(object["origin"]).flatMap(Vec3.parse)
-        let size = Self.scalarOrScripted(object["size"]).flatMap(Vec2.parse)
+        // 부모 사슬을 합친 화면 좌표를 쓴다. 자체 origin은 부모 안의 상대값이다.
+        // 자체 좌표가 읽히지 않으면(NaN 포함) 레이어를 버린다 — 합친 값이 0이 되어
+        // 화면 한복판에 그려지면 파일이 이상한 것을 정상처럼 보이게 한다.
+        let ownOriginParsed = Self.scalarOrScripted(object["origin"]).flatMap(Vec3.parse) != nil
+        // 부모가 비유한 scale이나 회전을 갖고 있으면 합친 값도 오염된다.
+        let composedIsFinite = transform.origin.x.isFinite && transform.origin.y.isFinite
+            && transform.scale.x.isFinite && transform.scale.y.isFinite
+        let origin = ownOriginParsed && composedIsFinite ? transform.origin : nil
+        // 크기에도 scale이 곱해진다. 무시하면 실물 시계가 67% 크게 나온다.
+        let size = Self.scalarOrScripted(object["size"]).flatMap(Vec2.parse).map {
+            Vec2(x: $0.x * transform.scale.x, y: $0.y * transform.scale.y)
+        }
         // 스크립트가 붙어 있는데 우리가 못 돌리는 경우를 사용자에게 알린다.
         var unrun: [String] = []
         for key in ["origin", "size", "scale", "alpha", "color", "visible"]
@@ -88,7 +202,8 @@ public struct SceneDocument: Sendable {
                 id: id, name: name, visible: visible,
                 origin: origin ?? Vec3(x: 0, y: 0, z: 0),
                 size: size ?? Vec2(x: 0, y: 0),
-                content: .unsupported(reason: reason), unrunScripts: unrun
+                content: .unsupported(reason: reason), unrunScripts: unrun,
+                alpha: alpha, tint: tint, rotation: rotation
             )
         }
 
@@ -102,7 +217,7 @@ public struct SceneDocument: Sendable {
             return SceneLayer(
                 id: id, name: name, visible: visible,
                 origin: origin, size: particleSize,
-                content: content, unrunScripts: unrun
+                content: content, unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation
             )
         }
 
@@ -119,21 +234,44 @@ public struct SceneDocument: Sendable {
                     id: id, name: name, visible: visible,
                     origin: origin, size: size ?? Vec2(x: 0, y: 0),
                     content: .text(makeTextLayer(text, object: object)),
-                    unrunScripts: unrun)
+                    unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation)
             }
             if object["sound"] != nil { return unsupported("사운드는 M6에서 지원한다") }
             return unsupported("알 수 없는 레이어 종류")
         }
         guard let origin, let size else {
-            return unsupported("origin이나 size가 스크립트다. 스크립팅은 M5에서 지원한다")
+            // origin과 size가 아예 없고 effects만 있으면 후처리 레이어다.
+            // 실물 "Couche de post-traitement"가 이 경우인데, 스크립트 탓이라고
+            // 말하면 사용자를 엉뚱한 원인으로 보낸다.
+            if object["origin"] == nil, object["size"] == nil, object["effects"] != nil {
+                return unsupported("화면 전체에 거는 후처리 레이어라 M6의 이펙트 체인이 필요하다")
+            }
+            return unsupported("origin이나 size를 읽을 수 없다")
         }
 
         let content = resolveContent(modelPath: modelPath, object: object, resolver: resolver)
         return SceneLayer(
             id: id, name: name, visible: visible,
             origin: origin, size: size,
-            content: content, unrunScripts: unrun
+            content: content, unrunScripts: unrun, alpha: alpha, tint: tint,
+            rotation: rotation
         )
+    }
+
+    /// Bool이거나 수(0/1)이거나, `{"value": ...}` 객체면 그 값.
+    private static func boolValue(_ raw: Any?) -> Bool? {
+        let value = (raw as? [String: Any])?["value"] ?? raw
+        if let b = value as? Bool { return b }
+        if let d = value as? Double { return d != 0 }
+        return nil
+    }
+
+    /// 수이거나 `{"value": ...}` 객체면 그 값. 비유한값은 없는 것으로 본다 —
+    /// NaN 알파가 셰이더까지 흘러가면 레이어가 통째로 사라진다.
+    private static func doubleValue(_ raw: Any?) -> Double? {
+        let value = (raw as? [String: Any])?["value"] ?? raw
+        guard let d = value as? Double, d.isFinite else { return nil }
+        return d
     }
 
     /// 문자열이거나, `{"script": ..., "value": ...}` 객체면 그 `value`.

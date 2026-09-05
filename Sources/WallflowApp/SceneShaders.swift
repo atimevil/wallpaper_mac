@@ -21,6 +21,11 @@ enum SceneShaders {
         float2 size;
         // 직교 공간의 전체 크기
         float2 projection;
+        // 레이어 색과 투명도. 씬이 정한 alpha와 color다.
+        float4 color;
+        // 화면 평면 회전(라디안).
+        float rotation;
+        float _pad[3];
     };
 
     // 단위 쿼드(-0.5..0.5)를 직교 공간에 배치하고 클립 공간으로 옮긴다.
@@ -28,7 +33,11 @@ enum SceneShaders {
         VertexIn in [[stage_in]],
         constant QuadUniforms &u [[buffer(1)]]
     ) {
-        float2 world = u.origin + in.position * u.size;
+        float2 scaled = in.position * u.size;
+        // 회전이 0이면 cos=1, sin=0이라 그대로다. 분기하지 않는다.
+        float c = cos(u.rotation), s = sin(u.rotation);
+        float2 rotated = float2(scaled.x * c - scaled.y * s, scaled.x * s + scaled.y * c);
+        float2 world = u.origin + rotated;
         // 직교 공간 원점은 좌상단, Y는 아래로 증가한다.
         float2 ndc = float2(
              (world.x / u.projection.x) * 2.0 - 1.0,
@@ -37,9 +46,7 @@ enum SceneShaders {
         VertexOut out;
         out.position = float4(ndc, 0.0, 1.0);
         out.uv = in.position + 0.5;
-        // quad_fragment와 solid_fragment는 이 값을 읽지 않는다. 그래도 채운다 —
-        // 구조체에 필드를 더한 이상 비워두면 정의되지 않은 값이 흘러간다.
-        out.color = float4(1.0);
+        out.color = u.color;
         return out;
     }
 
@@ -48,7 +55,9 @@ enum SceneShaders {
         texture2d<float> tex [[texture(0)]],
         sampler samp [[sampler(0)]]
     ) {
-        return tex.sample(samp, in.uv);
+        // 레이어의 alpha와 color를 곱한다. 무시하면 반투명하게 설계된 UI가
+        // 불투명한 상자로 그려진다.
+        return tex.sample(samp, in.uv) * in.color;
     }
 
     fragment float4 solid_fragment(

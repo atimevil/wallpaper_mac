@@ -350,6 +350,43 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(texturePath, "materials/particle/chromaticdot.tex")
     }
 
+    /// 원근 투영 씬은 orthogonalprojection이 JSON null로 들어온다.
+    /// 실물 창작마당 씬 "Ocarina of Time"이 이 경우다. 값이 없는 것과
+    /// 뭉개면 파일이 깨진 것처럼 보여 원인을 찾는 데 오래 걸린다.
+    func testPerspectiveSceneIsReportedAsSuch() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null, "fov": 50}, "objects": []}
+        """)
+        XCTAssertThrowsError(try SceneDocument.load(from: reader, assets: nil)) { error in
+            XCTAssertEqual(error as? SceneError, .perspectiveProjectionUnsupported)
+        }
+    }
+
+    /// 키가 아예 없는 것은 여전히 missingField다. 원근 씬과 구분되어야 한다.
+    func testMissingProjectionIsStillMissingField() throws {
+        let reader = try makeScenePkg(scene: #"{"general": {}, "objects": []}"#)
+        XCTAssertThrowsError(try SceneDocument.load(from: reader, assets: nil)) { error in
+            XCTAssertEqual(error as? SceneError, .missingField("orthogonalprojection"))
+        }
+    }
+
+    /// origin과 size가 없고 effects만 있으면 후처리 레이어다.
+    /// 실물 "Couche de post-traitement"가 이 경우인데, 전에는 "스크립트 탓"이라고
+    /// 잘못 보고해 사용자를 엉뚱한 원인으로 보냈다.
+    func testPostProcessingLayerIsReportedAsSuch() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "Couche de post-traitement",
+                      "image": "models/x.json", "effects": [{"file": "e.json"}]}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .unsupported(let reason) = doc.layers[0].content else {
+            return XCTFail("unsupported여야 한다")
+        }
+        XCTAssertTrue(reason.contains("후처리"), reason)
+        XCTAssertFalse(reason.contains("스크립트"), "스크립트 탓으로 오해시키면 안 된다: \(reason)")
+    }
+
     /// 머티리얼의 blending을 읽어야 한다. 실물에서 눈·비·먼지·광선은 additive,
     /// 벚꽃(leaves5)은 translucent다. 하나로 뭉치면 벚꽃이 밝은 배경 위에서
     /// 하얗게 날아간다.

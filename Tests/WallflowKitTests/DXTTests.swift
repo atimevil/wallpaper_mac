@@ -26,6 +26,19 @@ final class DXTTests: XCTestCase {
         XCTAssertNil(TexPixelFormat.dxt5.byteCount(width: -1, height: 10))
     }
 
+    /// DXT1은 블록당 8바이트다. DXT5와 같은 16으로 재면 크기가 두 배로 어긋난다.
+    func testDXT1BlockByteCount() {
+        // 실물 absbg.tex: 2560x1728 → 640x432 블록 × 8바이트
+        XCTAssertEqual(TexPixelFormat.dxt1.byteCount(width: 2560, height: 1728), 2211840)
+        XCTAssertEqual(TexPixelFormat.dxt1.bytesPerRow(width: 2560), 640 * 8)
+        XCTAssertEqual(TexPixelFormat.dxt1.bytesPerBlock, 8)
+        XCTAssertEqual(TexPixelFormat.dxt5.bytesPerBlock, 16)
+        // 두 포맷이 같은 값을 내면 안 된다. 하나로 뭉개면 절반만 읽는다.
+        XCTAssertNotEqual(
+            TexPixelFormat.dxt1.byteCount(width: 256, height: 256),
+            TexPixelFormat.dxt5.byteCount(width: 256, height: 256))
+    }
+
     /// 실물 DXT5 텍스처가 디코드되어야 한다. 이전에는 통째로 떨어졌다.
     func testRealDXTTexturesDecode() throws {
         guard let path = ProcessInfo.processInfo.environment["WALLFLOW_TEST_ASSETS"] else {

@@ -20,12 +20,20 @@ struct QuadUniforms {
     var origin: SIMD2<Float>
     var size: SIMD2<Float>
     var projection: SIMD2<Float>
+    /// 레이어의 color와 alpha. MSL의 float4와 배치가 같아야 한다.
+    var color: SIMD4<Float>
+    var rotation: Float
+    var padding: (Float, Float, Float) = (0, 0, 0)
 }
 
 struct QuadInstance {
     /// 직교 공간에서의 중심.
     var origin: SIMD2<Float>
     var size: SIMD2<Float>
+    /// 씬이 정한 색과 투명도. 기본은 흰색·불투명.
+    var color: SIMD4<Float> = SIMD4(1, 1, 1, 1)
+    /// 화면 평면 회전(라디안).
+    var rotation: Float = 0
 }
 
 /// 레이어가 무엇으로 칠해지는지.
@@ -171,7 +179,8 @@ final class MetalCompositor {
 
         for (quad, source) in layers {
             var uniforms = QuadUniforms(
-                origin: quad.origin, size: quad.size, projection: projection)
+                origin: quad.origin, size: quad.size, projection: projection,
+                color: quad.color, rotation: quad.rotation)
 
             switch source {
             case .solid(var color):
@@ -236,14 +245,14 @@ final class MetalCompositor {
             case .rgba8888: pixelFormat = .rgba8Unorm
             case .r8: pixelFormat = .r8Unorm
             case .rg88: pixelFormat = .rg8Unorm
-            case .dxt5:
+            case .dxt5, .dxt1:
                 // Apple Silicon은 BC를 직접 지원한다(M1 Max에서 확인). CPU 디코더를
                 // 짤 필요가 없고, 그러면 디코더가 틀릴 위험도 없다. 지원하지 않는
                 // GPU에서는 조용히 이상하게 그리지 말고 실패시킨다.
                 guard device.supportsBCTextureCompression else {
                     throw CompositorError.textureCreationFailed
                 }
-                pixelFormat = .bc3_rgba
+                pixelFormat = format == .dxt1 ? .bc1_rgba : .bc3_rgba
             }
 
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(

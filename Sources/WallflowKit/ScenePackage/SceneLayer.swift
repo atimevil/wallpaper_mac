@@ -124,6 +124,13 @@ public struct SceneLayer: Equatable, Sendable {
     public let visible: Bool
     public let origin: Vec3
     public let size: Vec2
+    /// 0~1. 씬이 정한 레이어 투명도.
+    /// 무시하면 반투명하게 설계된 UI가 불투명한 검은 상자로 그려진다.
+    public let alpha: Double
+    /// 텍스처에 곱하는 색. 기본은 흰색(원본 그대로).
+    public let tint: Vec3
+    /// 화면 평면 회전(라디안). 부모 사슬의 회전이 이미 합쳐져 있다.
+    public let rotation: Double
     public let content: LayerContent
     /// 스크립트가 붙어 있지만 우리가 아직 돌리지 못하는 속성 이름들.
     ///
@@ -134,8 +141,13 @@ public struct SceneLayer: Equatable, Sendable {
 
     public init(
         id: Int, name: String, visible: Bool, origin: Vec3, size: Vec2,
-        content: LayerContent, unrunScripts: [String] = []
+        content: LayerContent, unrunScripts: [String] = [],
+        alpha: Double = 1, tint: Vec3 = Vec3(x: 1, y: 1, z: 1),
+        rotation: Double = 0
     ) {
+        self.alpha = alpha
+        self.tint = tint
+        self.rotation = rotation
         self.id = id
         self.name = name
         self.visible = visible

@@ -44,13 +44,25 @@ public enum TexPixelFormat: Int32, Sendable {
     /// `[끝점 a0, 끝점 a1, 3비트 인덱스 6바이트]` 구조다. BC2로 읽으면
     /// 둘 다 의미 없는 잡음이 된다. 그래서 BC3으로 확정했다.
     case dxt5 = 4
+    /// DXT1(BC1). 4x4 블록 하나가 8바이트다. 알파가 없거나 1비트다.
+    /// 실물 `absbg.tex`(2560x1728)의 선언 크기가 정확히 8바이트/블록이다.
+    case dxt1 = 7
     /// 두 채널. 실물에서 light_shafts처럼 흑백+알파 파티클 텍스처가 쓴다.
     case rg88 = 8
     /// 단일 채널. 마스크에 쓰인다.
     case r8 = 9
 
     /// 블록 압축 포맷인지. 이 경우 픽셀 단위 산술이 성립하지 않는다.
-    public var isBlockCompressed: Bool { self == .dxt5 }
+    public var isBlockCompressed: Bool { bytesPerBlock > 0 }
+
+    /// 4x4 블록 하나가 차지하는 바이트. 블록 압축이 아니면 0이다.
+    public var bytesPerBlock: Int {
+        switch self {
+        case .dxt1: return 8
+        case .dxt5: return 16
+        case .rgba8888, .rg88, .r8: return 0
+        }
+    }
 
     /// 픽셀 하나가 차지하는 바이트. 블록 압축이 아닌 포맷에만 의미가 있다.
     public var bytesPerPixel: Int {
@@ -58,7 +70,7 @@ public enum TexPixelFormat: Int32, Sendable {
         case .rgba8888: return 4
         case .rg88: return 2
         case .r8: return 1
-        case .dxt5: return 0
+        case .dxt5, .dxt1: return 0
         }
     }
 
@@ -74,7 +86,7 @@ public enum TexPixelFormat: Int32, Sendable {
             let blocksHigh = height / 4 + (height % 4 == 0 ? 0 : 1)
             let (blocks, overflow) = blocksWide.multipliedReportingOverflow(by: blocksHigh)
             guard !overflow else { return nil }
-            let (total, overflow2) = blocks.multipliedReportingOverflow(by: 16)
+            let (total, overflow2) = blocks.multipliedReportingOverflow(by: bytesPerBlock)
             return overflow2 ? nil : total
         }
         let (area, overflow) = width.multipliedReportingOverflow(by: height)
@@ -86,7 +98,7 @@ public enum TexPixelFormat: Int32, Sendable {
     /// GPU에 올릴 때 한 줄이 차지하는 바이트. 블록 압축은 블록 줄 단위다.
     public func bytesPerRow(width: Int) -> Int {
         guard isBlockCompressed else { return width * bytesPerPixel }
-        return (width / 4 + (width % 4 == 0 ? 0 : 1)) * 16
+        return (width / 4 + (width % 4 == 0 ? 0 : 1)) * bytesPerBlock
     }
 }
 
