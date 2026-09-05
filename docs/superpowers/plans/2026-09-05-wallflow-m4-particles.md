@@ -1192,6 +1192,69 @@ MSG
 
 ---
 
+### Task 4b: 실물 필드 모양에 맞춰 프리셋 파서를 교정
+
+Task 4가 붙자마자 `malformedNames`가 실물에서 대량으로 떴다. 지원하는 타입인데
+필드 해석에 실패한다는 뜻이다. 실물 씬 4개를 조사한 결과 **Task 2의 필드 명세가
+여러 타입에서 틀렸다.**
+
+**측정한 증거 (실물 씬 + WE 자체 예제 프리셋):**
+```
+Sakura        malformed=[angularmovement, rotationrandom, turbulentvelocityrandom]
+dust_motes_0  emitters=0  malformed=[boxrandom, controlpointattract, movement,
+                                     oscillatealpha, oscillateposition]
+Glass Shards  malformed=[angularmovement, colorrandom, movement,
+                         rotationrandom, turbulentvelocityrandom]
+```
+`dust_motes_0`은 이미터가 0개라 **아무것도 방출하지 못한다.**
+
+**핵심 원인: 이름 말고 모든 필드가 선택이다.** WE 자체 예제가 이걸 증명한다:
+```
+particles/examplecursoravoid.json →  {"name": "boxrandom", "rate": 200}
+particles/exampleturbolence.json →   {"name":"sphererandom","rate":15000,"distancemin":256}
+```
+`boxrandom`에 origin·directions·distance가 없고, `sphererandom`에 origin·directions·
+distancemax가 없다. 그런데 우리 파서는 `guard let ... else { return nil }`로 전부
+필수를 요구해 엔트리를 통째로 버린다. 같은 타입이라도 인스턴스마다 있는 필드가 다르다.
+
+**필드 이름 자체가 틀린 것들 (실물 값 확인):**
+
+| 타입 | 우리가 찾던 것 | 실물 | 비고 |
+|---|---|---|---|
+| `angularmovement` | `gravity` | **`force`** `"0 0 0"` | 이름이 다르다 |
+| `controlpointattract` | `radius` | **`threshold`** `32` | `origin`도 있다 |
+| `turbulentvelocityrandom` | `min`/`max` (Vec3) | **`offset` `scale` `speedmin` `speedmax`** (전부 수) | 모양이 통째로 다르다 |
+| `oscillatealpha` | `phasemin`/`phasemax` | **`scalemin`/`scalemax`** + frequency | phase는 없고 scale을 무시하고 있었다 |
+| `oscillateposition` | `mask` `scalemin` `phase*` 필수 | frequency + `scalemax`만 | 나머지는 없을 수 있다 |
+| `boxrandom` | `min`/`max` (Vec3) | **`distancemax`** `"1024 512 0"` (Vec3) | 이름과 개수가 다르다 |
+| `movement` | `gravity` 필수 | `gravity`만 있거나 `drag`만 있다 | 둘 다 선택 |
+
+**Files:**
+- Modify: `Sources/WallflowKit/Particles/ParticlePreset.swift`
+- Modify: `Sources/WallflowKit/Particles/ParticleSystem.swift` (case 모양이 바뀌므로 함께)
+- Test: `Tests/WallflowKitTests/ParticlePresetTests.swift`, `Tests/WallflowKitTests/RealScenesTests.swift`
+
+**규칙:**
+1. **`name`만 필수다.** 나머지 필드는 없으면 기본값을 쓴다. 엔트리를 버리는 건
+   필드가 **있는데 해석되지 않을 때**뿐이다(예: `"min": "쓰레기"`). 그래야
+   `malformedNames`가 "진짜 이상한 파일"만 가리킨다.
+2. `*random` 계열에서 `min`이나 `max` 한쪽만 있으면 **있는 쪽을 양쪽에 쓴다.**
+   범위가 아니라 고정값이라는 뜻이다.
+3. 기본 방출률 `defaultEmitRate = 20`. `dust_motes_0`처럼 `rate`가 없는 프리셋이
+   실재하고, 0으로 두면 레이어가 영영 안 보인다. 20은 WE 자체 예제
+   `particles/example.json`의 값이라 가장 방어 가능한 기준점이다.
+   **이건 추정이다.** Task 6에서 눈으로 보고 조정한다.
+
+**수용 조건 (이 태스크의 존재 이유):**
+실물 씬 4개를 assets와 함께 읽어 모든 `.particle` 레이어에서
+`malformedNames`가 **비어 있어야** 한다. 그리고 `dust_motes_0`의 이미터가 1개 이상이어야 한다.
+개수만 세는 테스트로는 이 결함이 안 잡혔다는 게 이번 교훈이다.
+
+**미루는 것:** 프리셋 최상위에 `controlpoint` 배열이 실재한다(id·offset·flags, 8개).
+`controlpointattract`를 실제로 구현할 데이터가 있다는 뜻이다. 다만 이걸 쓰는
+레이어("zzz")는 origin이 스크립트라 어차피 M5까지 막혀 있으므로 M4에서는 만들지 않는다.
+`unimplementedOperators` 보고는 유지한다.
+
 ### Task 5: Metal 인스턴싱 빌보드 렌더러
 
 파티클마다 정점 4개를 그린다. 지오메트리 셰이더가 필요 없다는 것은 착수 전에 확인했다.
