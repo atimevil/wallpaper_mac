@@ -44,6 +44,8 @@ public enum LayerContent: Equatable, Sendable {
     case video(texturePath: String)
     /// 셰이더 `flat` 기반의 단색 사각형. 텍스처가 없다.
     case solidColor(Vec3)
+    /// 파티클 시스템. 프리셋과 텍스처 경로를 담는다.
+    case particle(preset: ParticlePreset, texturePath: String)
     /// 그리지 못하는 레이어. 이유를 남겨 나중에 무엇을 만들지 알 수 있게 한다.
     case unsupported(reason: String)
 }

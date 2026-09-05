@@ -134,6 +134,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     skipped.append("\(layer.name): 텍스처 로드 실패 \(error)")
                 }
 
+            case .particle:
+                // Task 6에서 시뮬레이션과 렌더러를 붙인다.
+                skipped.append("\(layer.name): 파티클 렌더러는 Task 6에서 연결한다")
+
             case .unsupported(let reason):
                 skipped.append("\(layer.name): \(reason)")
             }
