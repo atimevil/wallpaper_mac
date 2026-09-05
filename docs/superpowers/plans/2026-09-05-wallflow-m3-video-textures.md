@@ -523,8 +523,10 @@ public enum LayerContent: Equatable, Sendable {
         }
 
         let textures = pass["textures"] as? [Any]
-        // 셰이더 flat은 텍스처 없이 색만 칠한다. 못 찾은 것이 아니라 원래 없다.
-        if (pass["shader"] as? String) == "flat" || textures == nil {
+        // 셰이더 flat이면서 텍스처가 없을 때만 단색이다. 실물 solidlayer가 그 모양이다.
+        // OR로 쓰면 flat + _rt_ 조합이 렌더 타깃 검사에 닿지 못하고 삼켜지고,
+        // textures가 없는 다른 셰이더도 전부 단색이 되어버린다. 반드시 AND다.
+        if (pass["shader"] as? String) == "flat", textures == nil {
             let color = (object["color"] as? String).flatMap(Vec3.parse)
                 ?? Vec3(x: 1, y: 1, z: 1)
             return .solidColor(color)
