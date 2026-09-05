@@ -55,7 +55,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             ))
         }
 
-        var drawable: [(QuadInstance, MTLTexture)] = []
+        var drawable: [(QuadInstance, LayerSource)] = []
         for layer in document.layers where layer.visible {
             guard case .image(let path) = layer.content else {
                 if case .unsupported(let reason) = layer.content {
@@ -72,7 +72,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                         origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
                         size: SIMD2(Float(layer.size.x), Float(layer.size.y))
                     ),
-                    texture
+                    .fixed(texture)
                 ))
             } catch {
                 skipped.append("\(layer.name): 텍스처 로드 실패 \(error)")

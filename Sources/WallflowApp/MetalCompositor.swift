@@ -28,6 +28,19 @@ struct QuadInstance {
     var size: SIMD2<Float>
 }
 
+/// 레이어가 무엇으로 칠해지는지.
+enum LayerSource {
+    /// 한 번 만들어 두고 바뀌지 않는 텍스처.
+    case fixed(MTLTexture)
+    /// 매 프레임 물어보는 텍스처. 비디오가 이 경우다.
+    /// VideoTexture가 @MainActor라 페이로드도 격리해야 한다. draw(in:)이 이미
+    /// @MainActor이므로 호출 측은 문제없다. nonisolated로 우회하지 마라 —
+    /// 실제 스레딩 가정을 표현하는 대신 숨기게 된다.
+    case dynamic(@MainActor () -> MTLTexture?)
+    /// 텍스처 없이 단색으로 칠한다. 셰이더 flat 레이어가 이 경우다.
+    case solid(SIMD4<Float>)
+}
+
 /// 직교 투영 공간에 텍스처 쿼드를 겹쳐 그린다.
 /// 씬의 레이어 순서가 그리는 순서다.
 @MainActor
@@ -35,11 +48,12 @@ final class MetalCompositor {
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
+    private let solidPipeline: MTLRenderPipelineState
     private let vertexBuffer: MTLBuffer
     private let sampler: MTLSamplerState
 
     private var projection = SIMD2<Float>(1, 1)
-    private var layers: [(QuadInstance, MTLTexture)] = []
+    private var layers: [(QuadInstance, LayerSource)] = []
     private var clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
 
     init(device: MTLDevice) throws {
@@ -91,6 +105,14 @@ final class MetalCompositor {
             throw CompositorError.pipelineFailed("\(error)")
         }
 
+        // 단색 레이어용 파이프라인 (같은 정점, 다른 프래그먼트)
+        descriptor.fragmentFunction = library.makeFunction(name: "solid_fragment")
+        do {
+            solidPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        } catch {
+            throw CompositorError.pipelineFailed("\(error)")
+        }
+
         let samplerDescriptor = MTLSamplerDescriptor()
         samplerDescriptor.minFilter = .linear
         samplerDescriptor.magFilter = .linear
@@ -114,7 +136,7 @@ final class MetalCompositor {
         clearColor = color
     }
 
-    func setLayers(_ layers: [(QuadInstance, MTLTexture)]) {
+    func setLayers(_ layers: [(QuadInstance, LayerSource)]) {
         self.layers = layers
     }
 
@@ -129,18 +151,30 @@ final class MetalCompositor {
         guard let encoder = commands.makeRenderCommandEncoder(descriptor: descriptor) else {
             return
         }
-        encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-        encoder.setFragmentSamplerState(sampler, index: 0)
 
-        for (quad, texture) in layers {
+        for (quad, source) in layers {
             var uniforms = QuadUniforms(
-                origin: quad.origin, size: quad.size, projection: projection
-            )
-            encoder.setVertexBytes(
-                &uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1
-            )
-            encoder.setFragmentTexture(texture, index: 0)
+                origin: quad.origin, size: quad.size, projection: projection)
+
+            switch source {
+            case .solid(var color):
+                encoder.setRenderPipelineState(solidPipeline)
+                encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+                encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+            case .fixed(let texture):
+                encoder.setRenderPipelineState(pipeline)
+                encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+                encoder.setFragmentTexture(texture, index: 0)
+                encoder.setFragmentSamplerState(sampler, index: 0)
+            case .dynamic(let provider):
+                // 프레임이 아직 없으면 이 레이어만 건너뛴다. 씬 전체를 멈추지 않는다.
+                guard let texture = provider() else { continue }
+                encoder.setRenderPipelineState(pipeline)
+                encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+                encoder.setFragmentTexture(texture, index: 0)
+                encoder.setFragmentSamplerState(sampler, index: 0)
+            }
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
 
