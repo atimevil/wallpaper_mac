@@ -316,7 +316,9 @@ public struct ParticlePreset: Equatable, Sendable {
                 if let maxVal = getDouble(dict["max"]) {
                     min = maxVal
                 } else {
-                    return nil
+                    // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
+                    // 파티클의 기본값과 같다. 수명 0은 파티클이 태어날 때 바로 죽는다.
+                    min = 1
                 }
             }
             // max 필드가 JSON에 있는가?
@@ -330,7 +332,9 @@ public struct ParticlePreset: Equatable, Sendable {
                 if let minVal = getDouble(dict["min"]) {
                     max = minVal
                 } else {
-                    return nil
+                    // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
+                    // 파티클의 기본값과 같다. 수명 0은 파티클이 태어날 때 바로 죽는다.
+                    max = 1
                 }
             }
             return .lifetimeRandom(min: min, max: max)
@@ -345,7 +349,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let maxVal = getDouble(dict["max"]) {
                 min = maxVal
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
+                // 파티클의 기본값과 같다. 크기 0은 안 보인다.
+                min = 1
             }
             if let maxVal = getDouble(dict["max"]) {
                 max = maxVal
@@ -354,7 +360,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let minVal = getDouble(dict["min"]) {
                 max = minVal
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
+                // 파티클의 기본값과 같다. 크기 0은 안 보인다.
+                max = 1
             }
             return .sizeRandom(min: min, max: max)
 
@@ -368,7 +376,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let maxVal = getDouble(dict["max"]) {
                 min = maxVal
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
+                // 파티클의 기본값과 같다. 알파 0은 투명해서 안 보인다.
+                min = 1
             }
             if let maxVal = getDouble(dict["max"]) {
                 max = maxVal
@@ -377,7 +387,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let minVal = getDouble(dict["min"]) {
                 max = minVal
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
+                // 파티클의 기본값과 같다. 알파 0은 투명해서 안 보인다.
+                max = 1
             }
             return .alphaRandom(min: min, max: max)
 
@@ -392,7 +404,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
                 minVec = mv
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
+                // (정지 상태)이다.
+                minVec = Vec3(x: 0, y: 0, z: 0)
             }
             if let maxStr = dict["max"] as? String {
                 guard let mv = Vec3.parse(maxStr) else { return nil }
@@ -402,7 +416,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
                 maxVec = mv
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
+                // (정지 상태)이다.
+                maxVec = Vec3(x: 0, y: 0, z: 0)
             }
             return .velocityRandom(min: minVec, max: maxVec)
 
@@ -417,7 +433,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
                 minVec = mv
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 흰색 (1,1,1)
+                // 이다. 색 0(검은색)은 눈에 띄는 부작용이 있다.
+                minVec = Vec3(x: 1, y: 1, z: 1)
             }
             if let maxStr = dict["max"] as? String {
                 guard let mv = Vec3.parse(maxStr) else { return nil }
@@ -427,7 +445,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
                 maxVec = mv
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 흰색 (1,1,1)
+                // 이다. 색 0(검은색)은 눈에 띄는 부작용이 있다.
+                maxVec = Vec3(x: 1, y: 1, z: 1)
             }
             return .colorRandom(min: minVec, max: maxVec)
 
@@ -442,7 +462,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
                 minVec = mv
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
+                // (회전 없음)이다.
+                minVec = Vec3(x: 0, y: 0, z: 0)
             }
             if let maxStr = dict["max"] as? String {
                 guard let mv = Vec3.parse(maxStr) else { return nil }
@@ -452,7 +474,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
                 maxVec = mv
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
+                // (회전 없음)이다.
+                maxVec = Vec3(x: 0, y: 0, z: 0)
             }
             return .rotationRandom(min: minVec, max: maxVec)
 
@@ -467,7 +491,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
                 minVec = mv
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
+                // (회전 없음)이다.
+                minVec = Vec3(x: 0, y: 0, z: 0)
             }
             if let maxStr = dict["max"] as? String {
                 guard let mv = Vec3.parse(maxStr) else { return nil }
@@ -477,7 +503,9 @@ public struct ParticlePreset: Equatable, Sendable {
             } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
                 maxVec = mv
             } else {
-                return nil
+                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
+                // (회전 없음)이다.
+                maxVec = Vec3(x: 0, y: 0, z: 0)
             }
             return .angularVelocityRandom(min: minVec, max: maxVec)
 

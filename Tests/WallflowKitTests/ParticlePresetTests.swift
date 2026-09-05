@@ -452,4 +452,118 @@ final class ParticlePresetTests: XCTestCase {
         XCTAssertTrue(p.initializers.isEmpty, "파싱되지 않는 필드는 엔트리를 버린다")
         XCTAssertTrue(p.malformedNames.contains("velocityrandom"), "있는데 해석 안 되는 것은 malformed다")
     }
+
+    /// 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
+    /// 파티클의 기본값과 같다. 크기 0은 안 보이고 알파 0은 투명하다.
+    func testInitializerWithNoFieldsUsesPropertyDefaults() throws {
+        // lifetimerandom: 기본값 1
+        let jsonLifetime = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"lifetimerandom"}]}
+        """))
+        let pLifetime = try XCTUnwrap(ParticlePreset.parse(jsonLifetime))
+        XCTAssertEqual(pLifetime.initializers.count, 1, "lifetimerandom이 필드 없이도 파싱되어야 한다")
+        guard case .lifetimeRandom(let min, let max) = pLifetime.initializers[0] else {
+            return XCTFail("lifetimerandom이어야 한다")
+        }
+        XCTAssertEqual(min, 1, "lifetimerandom의 기본값은 1이어야 한다")
+        XCTAssertEqual(max, 1, "lifetimerandom의 기본값은 1이어야 한다")
+        XCTAssertTrue(pLifetime.malformedNames.isEmpty, "필드가 없어도 malformed가 아니다")
+
+        // sizerandom: 기본값 1
+        let jsonSize = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"sizerandom"}]}
+        """))
+        let pSize = try XCTUnwrap(ParticlePreset.parse(jsonSize))
+        XCTAssertEqual(pSize.initializers.count, 1, "sizerandom이 필드 없이도 파싱되어야 한다")
+        guard case .sizeRandom(let min, let max) = pSize.initializers[0] else {
+            return XCTFail("sizerandom이어야 한다")
+        }
+        XCTAssertEqual(min, 1, "sizerandom의 기본값은 1이어야 한다")
+        XCTAssertEqual(max, 1, "sizerandom의 기본값은 1이어야 한다")
+        XCTAssertTrue(pSize.malformedNames.isEmpty, "필드가 없어도 malformed가 아니다")
+
+        // alpharandom: 기본값 1
+        let jsonAlpha = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"alpharandom"}]}
+        """))
+        let pAlpha = try XCTUnwrap(ParticlePreset.parse(jsonAlpha))
+        XCTAssertEqual(pAlpha.initializers.count, 1, "alpharandom이 필드 없이도 파싱되어야 한다")
+        guard case .alphaRandom(let min, let max) = pAlpha.initializers[0] else {
+            return XCTFail("alpharandom이어야 한다")
+        }
+        XCTAssertEqual(min, 1, "alpharandom의 기본값은 1이어야 한다")
+        XCTAssertEqual(max, 1, "alpharandom의 기본값은 1이어야 한다")
+        XCTAssertTrue(pAlpha.malformedNames.isEmpty, "필드가 없어도 malformed가 아니다")
+
+        // velocityrandom: 기본값 (0, 0, 0)
+        let jsonVelocity = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"velocityrandom"}]}
+        """))
+        let pVelocity = try XCTUnwrap(ParticlePreset.parse(jsonVelocity))
+        XCTAssertEqual(pVelocity.initializers.count, 1, "velocityrandom이 필드 없이도 파싱되어야 한다")
+        guard case .velocityRandom(let min, let max) = pVelocity.initializers[0] else {
+            return XCTFail("velocityrandom이어야 한다")
+        }
+        XCTAssertEqual(min, Vec3(x: 0, y: 0, z: 0), "velocityrandom의 기본값은 (0, 0, 0)이어야 한다")
+        XCTAssertEqual(max, Vec3(x: 0, y: 0, z: 0), "velocityrandom의 기본값은 (0, 0, 0)이어야 한다")
+        XCTAssertTrue(pVelocity.malformedNames.isEmpty, "필드가 없어도 malformed가 아니다")
+
+        // colorrandom: 기본값 (1, 1, 1)
+        let jsonColor = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"colorrandom"}]}
+        """))
+        let pColor = try XCTUnwrap(ParticlePreset.parse(jsonColor))
+        XCTAssertEqual(pColor.initializers.count, 1, "colorrandom이 필드 없이도 파싱되어야 한다")
+        guard case .colorRandom(let min, let max) = pColor.initializers[0] else {
+            return XCTFail("colorrandom이어야 한다")
+        }
+        XCTAssertEqual(min, Vec3(x: 1, y: 1, z: 1), "colorrandom의 기본값은 (1, 1, 1)이어야 한다")
+        XCTAssertEqual(max, Vec3(x: 1, y: 1, z: 1), "colorrandom의 기본값은 (1, 1, 1)이어야 한다")
+        XCTAssertTrue(pColor.malformedNames.isEmpty, "필드가 없어도 malformed가 아니다")
+
+        // rotationrandom: 기본값 (0, 0, 0)
+        let jsonRotation = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"rotationrandom"}]}
+        """))
+        let pRotation = try XCTUnwrap(ParticlePreset.parse(jsonRotation))
+        XCTAssertEqual(pRotation.initializers.count, 1, "rotationrandom이 필드 없이도 파싱되어야 한다")
+        guard case .rotationRandom(let min, let max) = pRotation.initializers[0] else {
+            return XCTFail("rotationrandom이어야 한다")
+        }
+        XCTAssertEqual(min, Vec3(x: 0, y: 0, z: 0), "rotationrandom의 기본값은 (0, 0, 0)이어야 한다")
+        XCTAssertEqual(max, Vec3(x: 0, y: 0, z: 0), "rotationrandom의 기본값은 (0, 0, 0)이어야 한다")
+        XCTAssertTrue(pRotation.malformedNames.isEmpty, "필드가 없어도 malformed가 아니다")
+
+        // angularvelocityrandom: 기본값 (0, 0, 0)
+        let jsonAngularVelocity = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"angularvelocityrandom"}]}
+        """))
+        let pAngularVelocity = try XCTUnwrap(ParticlePreset.parse(jsonAngularVelocity))
+        XCTAssertEqual(pAngularVelocity.initializers.count, 1, "angularvelocityrandom이 필드 없이도 파싱되어야 한다")
+        guard case .angularVelocityRandom(let min, let max) = pAngularVelocity.initializers[0] else {
+            return XCTFail("angularvelocityrandom이어야 한다")
+        }
+        XCTAssertEqual(min, Vec3(x: 0, y: 0, z: 0), "angularvelocityrandom의 기본값은 (0, 0, 0)이어야 한다")
+        XCTAssertEqual(max, Vec3(x: 0, y: 0, z: 0), "angularvelocityrandom의 기본값은 (0, 0, 0)이어야 한다")
+        XCTAssertTrue(pAngularVelocity.malformedNames.isEmpty, "필드가 없어도 malformed가 아니다")
+    }
+
+    /// 필드가 있는데 해석이 안 되는 경우는 지금처럼 계속 엔트리를 버려야 한다.
+    /// 이 구분을 깨지 마라. 공들여 만든 것이다.
+    func testInitializerWithUnparseableFieldIsStillMalformed() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"rotationrandom","min":"쓰레기"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertTrue(p.initializers.isEmpty, "파싱되지 않는 필드는 엔트리를 버린다")
+        XCTAssertTrue(p.malformedNames.contains("rotationrandom"), "있는데 해석 안 되는 것은 malformed다")
+    }
 }
