@@ -26,7 +26,9 @@ public enum ScriptFailure: Equatable, Sendable {
 /// (`SceneRenderer` 참고). 렌더 스레드에서 직접 부르지 마라.
 ///
 /// `JSContext`는 스레드 안전하지 않다. 인스턴스 하나를 한 스레드에서만 쓴다.
-public final class ScriptEngine {
+/// 직렬 큐 하나에 갇혀 쓰이는 것을 전제로 Sendable을 단다. `JSContext`는 스레드
+/// 안전하지 않으므로 두 스레드에서 동시에 부르면 안 된다. 이 약속은 호출자가 지킨다.
+public final class ScriptEngine: @unchecked Sendable {
     /// 돌려받는 문자열의 상한. 글자 하나하나가 텍스처가 되므로 길이가 곧 메모리다.
     /// 실물 시계는 열 글자 안쪽이다.
     public static let maxResultLength = 4096
