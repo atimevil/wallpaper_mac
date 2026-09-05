@@ -38,9 +38,13 @@ public struct Vec2: Equatable, Sendable {
 
 /// 레이어가 무엇을 그리는지.
 public enum LayerContent: Equatable, Sendable {
-    /// .pkg 안의 텍스처 경로. 예: "materials/HFRvNK5aIAA7Q24.tex"
+    /// .pkg 또는 assets 안의 텍스처 경로.
     case image(texturePath: String)
-    /// M2가 그리지 못하는 레이어. 이유를 남겨 나중에 무엇을 만들지 알 수 있게 한다.
+    /// 텍스처가 MP4인 레이어. 매 프레임 갱신된다.
+    case video(texturePath: String)
+    /// 셰이더 `flat` 기반의 단색 사각형. 텍스처가 없다.
+    case solidColor(Vec3)
+    /// 그리지 못하는 레이어. 이유를 남겨 나중에 무엇을 만들지 알 수 있게 한다.
     case unsupported(reason: String)
 }
 

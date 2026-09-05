@@ -20,6 +20,12 @@ public struct SceneDocument: Sendable {
     public let layers: [SceneLayer]
 
     public static func load(from reader: PkgReader) throws -> SceneDocument {
+        try load(from: reader, assets: nil)
+    }
+
+    public static func load(
+        from reader: PkgReader, assets: AssetsStore?
+    ) throws -> SceneDocument {
         let raw = try reader.data(for: "scene.json")
         guard let root = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] else {
             throw SceneError.malformedSceneJSON
@@ -37,12 +43,14 @@ public struct SceneDocument: Sendable {
             ?? Vec3(x: 0, y: 0, z: 0)
         let clearEnabled = general["clearenabled"] as? Bool ?? true
 
+        let resolver = ReferenceResolver(pkg: reader, assets: assets)
+
         // 배열 조건부 캐스트는 전부-아니면-전무다. 원소 하나가 딕셔너리가 아니면
         // 통째로 실패해 정상 레이어까지 사라진다. 원소별로 걸러 그것을 막는다.
         let rawObjects = root["objects"] as? [Any] ?? []
         let objects = rawObjects.compactMap { $0 as? [String: Any] }
         let layers = objects.enumerated().map { index, object in
-            makeLayer(object, fallbackID: index, reader: reader)
+            makeLayer(object, fallbackID: index, resolver: resolver)
         }
 
         return SceneDocument(
@@ -55,7 +63,7 @@ public struct SceneDocument: Sendable {
     /// 레이어 하나가 해석되지 않아도 씬 전체를 버리지 않는다.
     /// 그릴 수 없는 것은 이유를 달아 unsupported로 남긴다.
     private static func makeLayer(
-        _ object: [String: Any], fallbackID: Int, reader: PkgReader
+        _ object: [String: Any], fallbackID: Int, resolver: ReferenceResolver
     ) -> SceneLayer {
         let id = object["id"] as? Int ?? fallbackID
         let name = object["name"] as? String ?? "object\(fallbackID)"
@@ -83,29 +91,41 @@ public struct SceneDocument: Sendable {
         guard let origin, let size else {
             return unsupported("origin이나 size가 스크립트다. 스크립팅은 M4에서 지원한다")
         }
-        guard let texturePath = resolveTexture(modelPath: modelPath, reader: reader) else {
-            return unsupported("텍스처 참조를 따라갈 수 없다: \(modelPath)")
-        }
 
+        let content = resolveContent(modelPath: modelPath, object: object, resolver: resolver)
         return SceneLayer(
             id: id, name: name, visible: visible,
             origin: origin, size: size,
-            content: .image(texturePath: texturePath)
+            content: content
         )
     }
 
-    private static func resolveTexture(modelPath: String, reader: PkgReader) -> String? {
-        guard let modelData = try? reader.data(for: modelPath),
-              let model = (try? JSONSerialization.jsonObject(with: modelData)) as? [String: Any],
+    /// 머티리얼을 읽어 이 레이어가 무엇인지 판정한다.
+    private static func resolveContent(
+        modelPath: String, object: [String: Any], resolver: ReferenceResolver
+    ) -> LayerContent {
+        guard let model = resolver.json(for: modelPath),
               let materialPath = model["material"] as? String,
-              let materialData = try? reader.data(for: materialPath),
-              let material = (try? JSONSerialization.jsonObject(with: materialData)) as? [String: Any],
+              let material = resolver.json(for: materialPath),
               let passes = material["passes"] as? [[String: Any]],
-              let textures = passes.first?["textures"] as? [Any],
-              // 첫 항목이 null인 머티리얼이 실제로 있다 (waterripple).
-              let name = textures.first as? String
-        else { return nil }
+              let pass = passes.first else {
+            return .unsupported(reason: "참조를 따라갈 수 없다: \(modelPath)")
+        }
 
-        return "materials/\(name).tex"
+        let textures = pass["textures"] as? [Any]
+        // 셰이더 flat은 텍스처 없이 색만 칠한다. 못 찾은 것이 아니라 원래 없다.
+        if (pass["shader"] as? String) == "flat" || textures == nil {
+            let color = (object["color"] as? String).flatMap(Vec3.parse)
+                ?? Vec3(x: 1, y: 1, z: 1)
+            return .solidColor(color)
+        }
+        guard let name = textures?.first as? String else {
+            return .unsupported(reason: "머티리얼의 첫 텍스처가 없다: \(materialPath)")
+        }
+        // _rt_ 접두는 파일이 아니라 렌더 타깃이다. FBO 체인이 필요하다.
+        if name.hasPrefix("_rt_") {
+            return .unsupported(reason: "렌더 타깃 참조라 M6의 이펙트 체인이 필요하다: \(name)")
+        }
+        return .image(texturePath: "materials/\(name).tex")
     }
 }
