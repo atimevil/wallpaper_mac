@@ -63,7 +63,7 @@ final class TextRasterizerTests: XCTestCase {
         guard let assetsPath = ProcessInfo.processInfo.environment["WALLFLOW_TEST_ASSETS"] else {
             throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정")
         }
-        let assets = try AssetsStore(root: URL(fileURLWithPath: assetsPath))
+        let assets = AssetsStore(root: URL(fileURLWithPath: assetsPath))
         let data = try assets.data(for: "fonts/Monofur-PK7og.ttf")
         let image = try TextRasterizer.rasterize(
             text: "12:34", fontData: data, pointSize: 64, color: white)
