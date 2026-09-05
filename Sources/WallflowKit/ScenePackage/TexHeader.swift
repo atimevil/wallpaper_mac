@@ -15,6 +15,16 @@ public enum TexError: Error, Equatable {
     case dimensionsOutOfRange
 }
 
+/// flags & 4인 텍스처의 밉맵 뒤에 붙는 프레임 표.
+/// M4는 프레임 내용을 쓰지 않는다 — 존재를 알아야 잔여 바이트가 남지 않고,
+/// 파티클이 스프라이트 시트를 요구할 때 건너뛸 근거가 된다.
+public struct TexSpriteSheet: Equatable, Sendable {
+    public let frameCount: Int
+    /// TEXS0003에만 있다.
+    public let gridWidth: Int?
+    public let gridHeight: Int?
+}
+
 /// .tex 안에 실제로 무엇이 들어 있는지.
 public enum TexPayloadKind: Equatable, Sendable {
     case jpeg
@@ -58,6 +68,8 @@ public struct TexMipmap: Equatable, Sendable {
 public struct TexHeader: Equatable, Sendable {
     /// flags의 이 비트가 서면 데이터가 MP4다.
     static let videoFlag: Int32 = 32
+    /// flags의 이 비트가 서면 밉맵 뒤에 TEXS 스프라이트 시트가 붙는다.
+    static let spriteSheetFlag: Int32 = 4
 
     /// 애플 실리콘의 Metal maxTexture2DDimension. WallflowKit은 Metal을 import하지
     /// 않으므로 이 값을 여기서 물어볼 수 없어 상수로 못박는다 — 이보다 큰 차원은
@@ -66,6 +78,9 @@ public struct TexHeader: Equatable, Sendable {
     /// "16384를 넘지 않는다"가 실제로 전역 불변조건이 된다 — 한 분기만 지켜서는
     /// 나머지 분기로 들어오는 압축 폭탄을 막지 못한다.
     public static let maxTextureDimension = 16384
+
+    /// 프레임 하나는 32바이트다(실물에서 확인, 잔여 0).
+    private static let bytesPerFrame = 32
 
     public let version: String
     public let format: Int32
@@ -76,6 +91,7 @@ public struct TexHeader: Equatable, Sendable {
     public let imageHeight: Int
     public let freeImageFormat: Int32
     public let mipmaps: [TexMipmap]
+    public let spriteSheet: TexSpriteSheet?
 
     public var isVideo: Bool { flags & Self.videoFlag != 0 }
 
@@ -107,22 +123,34 @@ public struct TexHeader: Equatable, Sendable {
         _ = try cursor.readInt32()          // color. 쓰이지 않는다.
 
         let container = try cursor.readCString()
-        let extraField: Bool
+        let hasFreeImageFormat: Bool
+        let hasExtraField: Bool
+        let hasCompressionFields: Bool
         switch container {
-        case "TEXB0004": extraField = true
-        case "TEXB0003": extraField = false
-        default: throw TexError.unsupportedContainer(container)
+        case "TEXB0001":
+            // 가장 오래된 형태. freeImageFormat도 LZ4 필드도 없고 항상 원시 픽셀이다.
+            hasFreeImageFormat = false; hasExtraField = false; hasCompressionFields = false
+        case "TEXB0002":
+            hasFreeImageFormat = false; hasExtraField = false; hasCompressionFields = true
+        case "TEXB0003":
+            hasFreeImageFormat = true;  hasExtraField = false; hasCompressionFields = true
+        case "TEXB0004":
+            hasFreeImageFormat = true;  hasExtraField = true;  hasCompressionFields = true
+        default:
+            throw TexError.unsupportedContainer(container)
         }
 
         _ = try cursor.readInt32()          // imageCount. 실물은 항상 1이었다.
-        let freeImageFormat = try cursor.readInt32()
-        if extraField { _ = try cursor.readInt32() }
+        let freeImageFormat = hasFreeImageFormat ? try cursor.readInt32() : -1
+        if hasExtraField { _ = try cursor.readInt32() }
         let mipCount = try cursor.readInt32()
         guard mipCount > 0 else { throw TexError.noMipmaps }
 
-        // Bound mipCount: each mipmap is at least 20 bytes (5 int32s: w, h, lz4, decompressed, size)
+        // Bound mipCount: each mipmap is at least 12 bytes if no compression fields (w, h, size),
+        // or 20 bytes with compression fields (w, h, lz4, decompressed, size)
+        let bytesPerMip = hasCompressionFields ? 20 : 12
         let remainingBytes = data.count - cursor.offset
-        let maxMipmaps = remainingBytes / 20
+        let maxMipmaps = remainingBytes / bytesPerMip
         guard Int(mipCount) <= maxMipmaps else { throw TexError.truncated }
 
         var mipmaps: [TexMipmap] = []
@@ -130,8 +158,15 @@ public struct TexHeader: Equatable, Sendable {
         for _ in 0..<mipCount {
             let w = Int(try cursor.readInt32())
             let h = Int(try cursor.readInt32())
-            let lz4 = try cursor.readInt32()
-            let decompressed = Int(try cursor.readInt32())
+            let lz4: Int32
+            let decompressed: Int
+            if hasCompressionFields {
+                lz4 = try cursor.readInt32()
+                decompressed = Int(try cursor.readInt32())
+            } else {
+                lz4 = 0
+                decompressed = 0
+            }
             let size = Int(try cursor.readInt32())
             guard size >= 0, cursor.offset + size <= data.count else {
                 throw TexError.truncated
@@ -144,12 +179,46 @@ public struct TexHeader: Equatable, Sendable {
             ))
         }
 
+        /// flags 비트 4가 서면 밉맵 뒤에 TEXS 섹션이 붙는다.
+        /// 이 섹션을 못 읽어도 텍스처 자체는 쓸 수 있으므로 실패시키지 않는다 —
+        /// 단, 프레임 수는 파일에서 온 값이라 남은 바이트로 상한을 검사한다.
+        var spriteSheet: TexSpriteSheet?
+        if flags & spriteSheetFlag != 0 {
+            spriteSheet = try? parseSpriteSheet(&cursor, in: data)
+        }
+
         return TexHeader(
             version: version, format: format, flags: flags,
             textureWidth: texW, textureHeight: texH,
             imageWidth: imgW, imageHeight: imgH,
-            freeImageFormat: freeImageFormat, mipmaps: mipmaps
+            freeImageFormat: freeImageFormat, mipmaps: mipmaps,
+            spriteSheet: spriteSheet
         )
+    }
+
+    private static func parseSpriteSheet(
+        _ cursor: inout Cursor, in data: Data
+    ) throws -> TexSpriteSheet {
+        let magic = try cursor.readCString()
+        let grid: (Int, Int)?
+        switch magic {
+        case "TEXS0002": grid = nil
+        case "TEXS0003": grid = (0, 0)          // 아래에서 실제 값을 읽는다
+        default: throw TexError.unsupportedContainer(magic)
+        }
+        let frameCount = Int(try cursor.readInt32())
+        var width: Int?
+        var height: Int?
+        if grid != nil {
+            width = Int(try cursor.readInt32())
+            height = Int(try cursor.readInt32())
+        }
+        // frameCount는 파일에서 온 값이다. 남은 바이트로 상한이 정해진다.
+        let remaining = data.count - cursor.offset
+        guard frameCount >= 0, frameCount <= remaining / bytesPerFrame else {
+            throw TexError.truncated
+        }
+        return TexSpriteSheet(frameCount: frameCount, gridWidth: width, gridHeight: height)
     }
 }
 

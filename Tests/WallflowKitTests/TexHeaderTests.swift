@@ -130,4 +130,84 @@ final class TexHeaderTests: XCTestCase {
             XCTAssertEqual(error as? TexError, .noMipmaps)
         }
     }
+
+    /// TEXB0001은 원시 픽셀 전용이고 freeImageFormat 필드가 아예 없다.
+    /// 그 필드를 읽으려 들면 이후 전부가 어긋난다.
+    func testParsesTEXB0001() throws {
+        let pixels = Data(repeating: 0xFF, count: 32 * 32 * 4)
+        let tex = buildTexV1(size: (32, 32), mips: [(32, 32, pixels)])
+        let header = try TexHeader.parse(tex)
+        XCTAssertEqual(header.kind, .rawPixels)
+        XCTAssertEqual(header.mipmaps.count, 1)
+        XCTAssertEqual(header.mipmaps[0].width, 32)
+        XCTAssertFalse(header.mipmaps[0].isLZ4, "0001에는 LZ4 필드가 없다")
+        XCTAssertNil(header.spriteSheet)
+    }
+
+    func testTEXB0001MipmapChain() throws {
+        let mips: [(Int32, Int32, Data)] = [
+            (32, 32, Data(repeating: 1, count: 32 * 32 * 4)),
+            (16, 16, Data(repeating: 2, count: 16 * 16 * 4)),
+        ]
+        let header = try TexHeader.parse(buildTexV1(mips: mips))
+        XCTAssertEqual(header.mipmaps.map(\.width), [32, 16])
+    }
+
+    func testParsesTEXB0002WithLZ4Fields() throws {
+        let tex = buildTexV2(size: (16, 16),
+                             mips: [(16, 16, 1, 16 * 16 * 4, Data(repeating: 7, count: 40))])
+        let header = try TexHeader.parse(tex)
+        XCTAssertEqual(header.kind, .rawPixels)
+        XCTAssertTrue(header.mipmaps[0].isLZ4)
+        XCTAssertEqual(header.mipmaps[0].decompressedSize, 16 * 16 * 4)
+        XCTAssertNil(header.spriteSheet)
+    }
+
+    /// flags & 4면 밉맵 뒤에 스프라이트 시트가 붙는다. M2는 이것을 몰라서
+    /// 잔여 바이트를 남긴 채 파싱했다.
+    func testDetectsSpriteSheetSectionV2() throws {
+        var tex = buildTexV2(flags: 4, size: (64, 64),
+                             mips: [(64, 64, 0, 0, Data(repeating: 3, count: 100))])
+        tex += spriteSheetV2(frameCount: 64)
+        let sheet = try XCTUnwrap(try TexHeader.parse(tex).spriteSheet)
+        XCTAssertEqual(sheet.frameCount, 64)
+        XCTAssertNil(sheet.gridWidth, "TEXS0002에는 격자 정보가 없다")
+    }
+
+    func testDetectsSpriteSheetSectionV3WithGrid() throws {
+        var tex = buildTex(flags: 4, freeImageFormat: -1, size: (128, 128),
+                           mips: [(128, 128, 0, 0, Data(repeating: 5, count: 60))])
+        tex += spriteSheetV3(frameCount: 16, grid: (128, 128))
+        let sheet = try XCTUnwrap(try TexHeader.parse(tex).spriteSheet)
+        XCTAssertEqual(sheet.frameCount, 16)
+        XCTAssertEqual(sheet.gridWidth, 128)
+        XCTAssertEqual(sheet.gridHeight, 128)
+    }
+
+    /// flags & 4가 없으면 뒤를 읽으려 하지 않는다.
+    func testNoSpriteSheetWhenFlagAbsent() throws {
+        let tex = buildTex(flags: 2, mips: [(8, 8, 0, 0, Data(repeating: 0, count: 20))])
+        XCTAssertNil(try TexHeader.parse(tex).spriteSheet)
+    }
+
+    /// 프레임 수도 파일에서 온 값이다. 검증 전에 믿고 할당하면 죽는다.
+    /// 파일에서 온 값이 검증을 통과하지 못하면 spriteSheet는 nil이 되지만
+    /// 텍스처 자체는 여전히 쓸 수 있다.
+    func testAbsurdFrameCountThrowsInsteadOfAllocating() throws {
+        var tex = buildTex(flags: 4, mips: [(8, 8, 0, 0, Data(repeating: 0, count: 20))])
+        tex += nullTerminated("TEXS0002") + le32(Int32.max)
+        let header = try TexHeader.parse(tex)
+        XCTAssertNil(header.spriteSheet, "frameCount 검증 실패시 spriteSheet는 nil")
+        XCTAssertEqual(header.mipmaps.count, 1, "밉맵은 여전히 유효해야 한다")
+    }
+
+    /// 스프라이트 시트를 못 읽는다고 텍스처 전체를 버리지는 않는다.
+    /// 잘린 TEXS 섹션은 spriteSheet == nil 로 떨어지고 밉맵은 살아 있어야 한다.
+    func testTruncatedSpriteSheetLeavesMipmapsUsable() throws {
+        var tex = buildTex(flags: 4, mips: [(8, 8, 0, 0, Data(repeating: 0, count: 20))])
+        tex += nullTerminated("TEXS0002")   // frameCount가 없다
+        let header = try TexHeader.parse(tex)
+        XCTAssertNil(header.spriteSheet)
+        XCTAssertEqual(header.mipmaps.count, 1)
+    }
 }

@@ -279,6 +279,28 @@ final class RealScenesTests: XCTestCase {
         }
         XCTAssertTrue(reason.contains("렌더 타깃"), "이유: \(reason)")
     }
+
+    /// assets의 모든 .tex가 파싱되어야 한다. M2의 이해는 여기서 불완전했다.
+    func testAllAssetTexturesParse() throws {
+        guard let assets = try assetsStore() else {
+            throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정")
+        }
+        let root = assets.root
+        var checked = 0
+        var failures: [String] = []
+        let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+        while let url = files?.nextObject() as? URL {
+            guard url.pathExtension == "tex" else { continue }
+            // LUT는 TEXV 매직이 없는 컬러 그레이딩 원시 데이터다.
+            guard !url.path.contains("/lut/") else { continue }
+            let data = try Data(contentsOf: url)
+            checked += 1
+            do { _ = try TexHeader.parse(data) }
+            catch { failures.append("\(url.lastPathComponent): \(error)") }
+        }
+        XCTAssertGreaterThan(checked, 250, "검사한 텍스처가 너무 적다")
+        XCTAssertTrue(failures.isEmpty, "파싱 실패 \(failures.count)건: \(failures.prefix(5))")
+    }
 }
 
 /// ROOT는 유효한데 이름 붙인 씬 디렉토리가 없을 때 던진다. XCTFail로 이미 실패를
