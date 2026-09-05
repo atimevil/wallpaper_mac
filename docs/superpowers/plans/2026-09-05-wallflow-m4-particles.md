@@ -15,7 +15,14 @@
 - 최소 지원 macOS 14.0, Apple Silicon. 외부 SwiftPM 의존성 0개.
 - `WallflowKit`은 Metal·MetalKit·AppKit·AVFoundation을 import하지 않는다. M1~M3에서 지켜온 경계이고 M4도 유지한다.
 - 클린 빌드 경고 0건.
-- **파일에서 온 값은 전부 적대적으로 다룬다.** 할당을 결정하게 하지 말고, 무검사 변환이나 맨 산술을 쓰지 말고, 강제 언랩하지 마라. M2에서 이 부류로 Critical 8건, M3에서 5건이 나왔다.
+- **파일에서 온 값은 전부 적대적으로 다룬다.** 할당을 결정하게 하지 말고, 무검사 변환이나 맨 산술을 쓰지 말고, 강제 언랩하지 마라. M2에서 이 부류로 Critical 8건, M3에서 5건, M4 Task 2에서 1건이 나왔다.
+  - 구체적으로 `Int(someDouble)`을 쓰지 마라. Swift는 포화시키지 않고 **트랩해서 프로세스를 죽인다**.
+    측정값: JSON `"maxcount": 1e20`은 지수 표기라 `as? Int`를 통과하지 못하고 `as? Double`로 내려간 뒤
+    `Int(1e20)`에서 `Fatal error: Double value cannot be converted to Int`로 SIGTRAP(exit 133).
+    버려도 되면 `Int(exactly: d.rounded(.towardZero))`, 클램프할 거면 양 끝으로 포화시켜라.
+    NaN은 어떤 비교도 false라 반드시 `isNaN`으로 먼저 쳐내야 한다.
+  - 테스트 입력에 평범한 정수만 쓰면 이 경로를 안 밟는다. Task 2의 `2000000000`이 그랬다.
+    숫자 필드를 적대적으로 시험할 땐 지수 표기·NaN·음수 거대값을 반드시 넣어라.
 - 실물 검증: `WALLFLOW_TEST_SCENES=~/Downloads/431960 WALLFLOW_TEST_ASSETS=~/Library/Application\ Support/Wallflow/Assets swift test`. 미설정 시 건너뛰고, 설정됐는데 경로가 없으면 실패한다.
 - M3의 118개 테스트는 계속 통과해야 한다.
 - 커밋 메시지는 한국어, 본문 끝에 다음 두 줄:
@@ -430,8 +437,10 @@ MSG
   - `enum ParticleEmitter: Equatable, Sendable` — `sphereRandom(rate:origin:directions:distanceMin:distanceMax:)`, `boxRandom(rate:origin:directions:min:max:)`
   - `enum ParticleInitializer: Equatable, Sendable` — 8종
   - `enum ParticleOperator: Equatable, Sendable` — 6종
-  - `struct ParticlePreset: Equatable, Sendable` — `maxCount: Int`, `startTime: Double`, `materialPath: String`, `emitters: [ParticleEmitter]`, `initializers: [ParticleInitializer]`, `operators: [ParticleOperator]`; `static func parse(_ json: [String: Any]) -> ParticlePreset?`
-  - `enum ParticleUnsupported` — 인식하지 못한 이름을 담아 이유를 남긴다
+  - `struct ParticlePreset: Equatable, Sendable` — `maxCount: Int`, `startTime: Double`, `materialPath: String`, `emitters: [ParticleEmitter]`, `initializers: [ParticleInitializer]`, `operators: [ParticleOperator]`, `unsupportedNames: [String]`, `malformedNames: [String]`; `static func parse(_ json: [String: Any]) -> ParticlePreset?`
+  - 진단 필드가 둘로 나뉜다: `unsupportedNames`는 switch에 없는 이름, `malformedNames`는
+    이름은 아는데 필드가 깨져 버린 엔트리. 하나로 합치면 지원하는 타입을
+    "지원하지 않는다"고 잘못 보고해 사용자를 엉뚱한 원인으로 보낸다.
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
@@ -731,7 +740,7 @@ final class ParticleSystemTests: XCTestCase {
     ) -> ParticlePreset {
         ParticlePreset(maxCount: maxCount, startTime: 0, materialPath: "m.json",
                        emitters: emitters, initializers: initializers,
-                       operators: operators, unsupportedNames: [])
+                       operators: operators, unsupportedNames: [], malformedNames: [])
     }
 
     func testStartsEmpty() {
@@ -1269,16 +1278,21 @@ M2·M3에서 같은 실수를 두 번 했다.
             throw XCTSkip("환경변수 미설정")
         }
         var missing: Set<String> = []
+        var broken: Set<String> = []
         for id in try FileManager.default.contentsOfDirectory(atPath: root.path)
             where id.allSatisfy(\.isNumber) {
             guard let reader = try scenePkg(id) else { continue }
             for layer in try SceneDocument.load(from: reader, assets: assets).layers {
                 if case .particle(let preset, _) = layer.content {
                     missing.formUnion(preset.unsupportedNames)
+                    broken.formUnion(preset.malformedNames)
                 }
             }
         }
         XCTAssertTrue(missing.isEmpty, "인식 못 한 파티클 타입: \(missing.sorted())")
+        // 이름은 아는데 필드 해석에 실패한 것. 실물에서 이게 나오면 파서가 틀린 것이므로
+        // 지원 누락보다 급하다.
+        XCTAssertTrue(broken.isEmpty, "필드 해석에 실패한 파티클 타입: \(broken.sorted())")
     }
 ```
 
