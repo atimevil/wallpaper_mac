@@ -236,7 +236,16 @@ public struct SceneDocument: Sendable {
                     content: .text(makeTextLayer(text, object: object)),
                     unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation)
             }
-            if object["sound"] != nil { return unsupported("사운드는 M6에서 지원한다") }
+            if let sound = makeSoundLayer(object) {
+                // 소리는 화면을 차지하지 않는다. origin이 없어도 상관없다.
+                return SceneLayer(
+                    id: id, name: name, visible: visible,
+                    origin: origin ?? Vec3(x: 0, y: 0, z: 0),
+                    size: size ?? Vec2(x: 0, y: 0),
+                    content: .sound(sound), unrunScripts: unrun,
+                    alpha: alpha, tint: tint, rotation: rotation)
+            }
+            if object["sound"] != nil { return unsupported("소리 파일 목록을 읽지 못했다") }
             return unsupported("알 수 없는 레이어 종류")
         }
         guard let origin, let size else {
@@ -278,6 +287,28 @@ public struct SceneDocument: Sendable {
     private static func scalarOrScripted(_ raw: Any?) -> String? {
         if let text = raw as? String { return text }
         return (raw as? [String: Any])?["value"] as? String
+    }
+
+    /// 소리 레이어를 읽는다. `sound`는 경로 배열이다.
+    private static func makeSoundLayer(_ object: [String: Any]) -> SoundLayer? {
+        let raw = object["sound"]
+        let paths: [String]
+        if let list = raw as? [Any] {
+            paths = list.compactMap { $0 as? String }
+        } else if let single = raw as? String {
+            paths = [single]
+        } else {
+            return nil
+        }
+        guard !paths.isEmpty else { return nil }
+        // volume도 {"script": ..., "value": ...} 객체로 올 수 있다.
+        let volume = doubleValue(object["volume"]).map { Swift.min(Swift.max($0, 0), 1) } ?? 1
+        return SoundLayer(
+            paths: paths,
+            volume: volume,
+            // 실물에 loop와 single이 있다. 모르는 값은 반복하지 않는 쪽이 안전하다.
+            loops: (object["playbackmode"] as? String) == "loop",
+            startsSilent: boolValue(object["startsilent"]) ?? false)
     }
 
     /// 텍스트 레이어를 읽는다.

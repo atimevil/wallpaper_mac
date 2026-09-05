@@ -50,6 +50,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             onSelect: { [weak self] item in self?.select(item) },
             onRefresh: { [weak self] in self?.refreshLibrary() },
             onBrowseWorkshop: { [weak self] in self?.showWorkshop() },
+            onToggleSound: { [weak self] _ in self?.displays.applySoundSetting() },
             onQuit: { NSApp.terminate(nil) }
         )
         refreshLibrary()

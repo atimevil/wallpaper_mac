@@ -101,6 +101,25 @@ public struct TextLayer: Equatable, Sendable {
     }
 }
 
+/// 소리만 내는 레이어. 그림은 없다.
+public struct SoundLayer: Equatable, Sendable {
+    /// `.pkg`나 assets 안의 소리 파일 경로들. 여러 개면 첫 번째로 재생 가능한 것을 쓴다.
+    public let paths: [String]
+    /// 0~1.
+    public let volume: Double
+    /// 끝나면 처음부터 다시 트는지.
+    public let loops: Bool
+    /// 씬을 켤 때 소리 없이 시작하는지.
+    public let startsSilent: Bool
+
+    public init(paths: [String], volume: Double, loops: Bool, startsSilent: Bool) {
+        self.paths = paths
+        self.volume = volume
+        self.loops = loops
+        self.startsSilent = startsSilent
+    }
+}
+
 /// 레이어가 무엇을 그리는지.
 public enum LayerContent: Equatable, Sendable {
     /// .pkg 또는 assets 안의 텍스처 경로.
@@ -113,6 +132,8 @@ public enum LayerContent: Equatable, Sendable {
     case particle(preset: ParticlePreset, texturePath: String, blend: ParticleBlendMode)
     /// 글자. 스크립트가 값을 만들 수 있다.
     case text(TextLayer)
+    /// 소리. 그리지 않는다.
+    case sound(SoundLayer)
     /// 그리지 못하는 레이어. 이유를 남겨 나중에 무엇을 만들지 알 수 있게 한다.
     case unsupported(reason: String)
 }

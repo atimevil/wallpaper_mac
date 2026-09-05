@@ -8,6 +8,7 @@ final class MenuBarController {
     private let onSelect: (WallpaperItem) -> Void
     private let onRefresh: () -> Void
     private let onBrowseWorkshop: () -> Void
+    private let onToggleSound: (Bool) -> Void
     private let onQuit: () -> Void
     private var items: [WallpaperItem] = []
 
@@ -15,8 +16,10 @@ final class MenuBarController {
         onSelect: @escaping (WallpaperItem) -> Void,
         onRefresh: @escaping () -> Void,
         onBrowseWorkshop: @escaping () -> Void,
+        onToggleSound: @escaping (Bool) -> Void,
         onQuit: @escaping () -> Void
     ) {
+        self.onToggleSound = onToggleSound
         self.onSelect = onSelect
         self.onRefresh = onRefresh
         self.onBrowseWorkshop = onBrowseWorkshop
@@ -58,6 +61,13 @@ final class MenuBarController {
         }
 
         menu.addItem(.separator())
+        let sound = NSMenuItem(
+            title: "씬 소리", action: #selector(toggleSound), keyEquivalent: "s")
+        sound.target = self
+        // 배경화면이 로그인할 때마다 소리를 내면 곤란하므로 기본은 꺼짐이다.
+        sound.state = UserDefaults.standard.bool(forKey: Self.soundKey) ? .on : .off
+        menu.addItem(sound)
+
         let browse = NSMenuItem(
             title: "창작마당 둘러보기…", action: #selector(browseWorkshop), keyEquivalent: "w")
         browse.target = self
@@ -72,6 +82,15 @@ final class MenuBarController {
         menu.addItem(quit)
 
         statusItem.menu = menu
+    }
+
+    static let soundKey = "wallflow.soundEnabled"
+
+    @objc private func toggleSound(_ sender: NSMenuItem) {
+        let enabled = sender.state != .on
+        UserDefaults.standard.set(enabled, forKey: Self.soundKey)
+        sender.state = enabled ? .on : .off
+        onToggleSound(enabled)
     }
 
     @objc private func browseWorkshop() { onBrowseWorkshop() }

@@ -1,3 +1,4 @@
+import AVFoundation
 import AppKit
 import Metal
 import QuartzCore
@@ -31,6 +32,18 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var lastScriptTime: CFTimeInterval?
     /// 스크립트를 다시 돌리는 주기.
     private static let scriptInterval: CFTimeInterval = 1.0
+    /// 이 씬의 소리들. 사용자가 켤 때만 실제로 난다.
+    private var sounds: [AVAudioPlayer] = []
+    /// 전력 정책이 재생을 멈췄는지.
+    ///
+    /// `MTKView.isPaused`로 판단하면 안 된다. 정적인 씬은 그릴 것이 없어 뷰가 늘
+    /// 정지 상태인데, 소리는 그리기와 무관하게 나야 한다.
+    private var playbackPaused = false
+    /// 씬 소리를 낼지. 배경화면이 로그인할 때마다 소리를 내면 곤란하므로 기본은 끔이다.
+    /// 메뉴에서 켜면 UserDefaults에 남는다.
+    static var soundEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "wallflow.soundEnabled")
+    }
     /// 컴포지터에 준 레이어 목록. 글자 크기가 바뀌면 다시 줘야 해서 들고 있는다.
     private var layerList: [(QuadInstance, LayerSource)] = []
 
@@ -85,6 +98,49 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     init(item: WallpaperItem) {
         self.item = item
         super.init()
+    }
+
+    /// 소리 파일을 찾아 재생기를 만든다.
+    ///
+    /// 파일을 임시 디스크에 풀지 않는다. `AVAudioPlayer(data:)`가 메모리에서 바로 읽는다.
+    /// macOS는 mp3와 wav를 네이티브로 읽고 ogg는 못 읽는다 — 보유한 씬에서
+    /// 140개 중 138개가 mp3/wav다. 못 읽는 것은 이유를 남긴다.
+    private static func makePlayer(
+        _ sound: SoundLayer, resolver: ReferenceResolver
+    ) -> AVAudioPlayer? {
+        for path in sound.paths {
+            guard let data = resolver.data(for: path),
+                  let player = try? AVAudioPlayer(data: data) else { continue }
+            player.volume = Float(sound.volume)
+            // -1이면 무한 반복이다.
+            player.numberOfLoops = sound.loops ? -1 : 0
+            player.prepareToPlay()
+            return player
+        }
+        return nil
+    }
+
+    /// 소리 설정과 재생 상태를 맞춘다.
+    func applySoundSetting() {
+        let on = Self.soundEnabled && !playbackPaused
+        var failed = 0
+        for player in sounds {
+            if on, !player.isPlaying {
+                if !player.play() { failed += 1 }
+            } else if !on, player.isPlaying {
+                player.pause()
+            }
+        }
+        guard !sounds.isEmpty else { return }
+        let playing = sounds.filter(\.isPlaying).count
+        // 소리가 안 난다는 신고를 받았을 때 어디까지 갔는지 알 수 있어야 한다.
+        // 시작한 개수가 아니라 지금 나는 개수를 남긴다 — 이미 나던 것도 세야
+        // "안 난다"와 "이미 나고 있다"를 구별할 수 있다.
+        var line = "씬 \(item.title)의 소리 \(sounds.count)개 중 \(playing)개 재생 중"
+        line += " (설정 \(Self.soundEnabled ? "켬" : "끔")"
+        line += playbackPaused ? ", 전력 정책이 멈춤)" : ")"
+        if failed > 0 { line += " — \(failed)개는 재생을 시작하지 못했다" }
+        FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 
     /// 글자를 굽고 텍스처와 쿼드 크기를 갱신한다.
@@ -222,6 +278,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var particles: [(system: ParticleSystem, renderer: ParticleRenderer,
                          textureRatio: Float)] = []
         var texts: [TextState] = []
+        var sounds: [AVAudioPlayer] = []
         var drawable: [(QuadInstance, LayerSource)] = []
 
         for layer in document.layers where layer.visible {
@@ -316,6 +373,22 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     skipped.append("\(layer.name): 파티클 텍스처 로드 실패 \(error)")
                 }
 
+            case .sound(let sound):
+                // 그리지 않는다. 소리만 준비해 둔다.
+                guard let player = Self.makePlayer(sound, resolver: resolver) else {
+                    skipped.append(
+                        "\(layer.name): 재생할 수 없는 소리 형식이다 "
+                            + "(\(sound.paths.map { ($0 as NSString).pathExtension }.joined(separator: ", ")))")
+                    continue
+                }
+                // startsilent인 소리는 스크립트가 켜기 전까지 나지 않는다.
+                // 스크립트를 아직 돌리지 않으므로 준비만 하고 재생 목록에는 넣지 않는다.
+                if sound.startsSilent {
+                    degraded.append("\(layer.name): 시작할 때 조용한 소리라 스크립트 없이는 나지 않는다")
+                } else {
+                    sounds.append(player)
+                }
+
             case .text(let text):
                 // 폰트가 없어도 그린다 — 시스템 폰트로 대체된다. 글자가 아예
                 // 안 나오는 것보다 다른 폰트로라도 나오는 게 낫다.
@@ -363,6 +436,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         self.videos = videos
         self.particles = particles
         self.texts = texts
+        self.sounds = sounds
 
         // 건너뛴 이유는 drawable이 비어 폴백하는 경우에 사용자가 가장 필요로 한다.
         // isEmpty 가드보다 먼저 써야 그 경로에서도 진단이 버려지지 않는다.
@@ -402,6 +476,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         }
 
         view.needsDisplay = true
+        // 뷰의 재생 상태가 정해진 뒤에 소리를 맞춘다. 먼저 부르면 아직 정지
+        // 상태로 보여 아무것도 재생되지 않는다.
+        applySoundSetting()
     }
 
     func apply(_ directive: PlaybackDirective) {
@@ -409,15 +486,19 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         case .paused:
             // 뷰를 숨기지 않는다. 마지막 프레임이 남아야 검은 화면이 되지 않는다.
             // 정적 씬은 애초에 그릴 것이 없어 이 분기가 아무 일도 하지 않는다.
+            playbackPaused = true
             for video in videos { video.pause() }
+            applySoundSetting()
             view?.isPaused = true
             // 다시 재생할 때 멈춰 있던 시간이 통째로 적분되지 않게 한다.
             // 시뮬레이션이 스스로 죄지만, 여기서 끊어야 파티클이 튀지 않는다.
             lastFrameTime = nil
         case .playing(let fps):
+            playbackPaused = false
             view?.isHidden = false
             // VideoRenderer.apply와 맞춘다: 이미 재생 중이면 다시 부르지 않는다.
             for video in videos where !video.isPlaying { video.play() }
+            applySoundSetting()
             if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty {
                 view?.isPaused = false
                 view?.preferredFramesPerSecond = fps
@@ -429,6 +510,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     func stop() {
         for video in videos { video.stop() }
         videos.removeAll()
+        for player in sounds { player.stop() }
+        sounds.removeAll()
         particles.removeAll()
         texts.removeAll()
         lastFrameTime = nil
