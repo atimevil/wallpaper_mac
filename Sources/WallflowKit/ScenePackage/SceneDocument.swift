@@ -84,7 +84,7 @@ public struct SceneDocument: Sendable {
 
         if let particlePresetPath = object["particle"] as? String {
             guard let origin else {
-                return unsupported("origin이 스크립트다. 스크립팅은 M4에서 지원한다")
+                return unsupported("파티클 레이어지만 origin이 스크립트다. 스크립팅은 M5에서 지원한다")
             }
             let particleSize = (object["size"] as? String).flatMap(Vec2.parse)
                 ?? Vec2(x: 0, y: 0)
@@ -97,12 +97,12 @@ public struct SceneDocument: Sendable {
         }
 
         guard let modelPath = object["image"] as? String else {
-            if object["text"] != nil { return unsupported("텍스트는 M3에서 지원한다") }
-            if object["sound"] != nil { return unsupported("사운드는 M4에서 지원한다") }
+            if object["text"] != nil { return unsupported("텍스트는 M5에서 지원한다") }
+            if object["sound"] != nil { return unsupported("사운드는 M6에서 지원한다") }
             return unsupported("알 수 없는 레이어 종류")
         }
         guard let origin, let size else {
-            return unsupported("origin이나 size가 스크립트다. 스크립팅은 M4에서 지원한다")
+            return unsupported("origin이나 size가 스크립트다. 스크립팅은 M5에서 지원한다")
         }
 
         let content = resolveContent(modelPath: modelPath, object: object, resolver: resolver)
