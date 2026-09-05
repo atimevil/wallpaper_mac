@@ -224,24 +224,36 @@ final class MetalCompositor {
             // TexDecoder의 세 디코드 분기 모두 16384 상한(TexHeader.maxTextureDimension)을
             // 지키므로 width/height 자체는 막힌다고 봐도 되지만, 그 보장이 이 코드에까지
             // 닿는다고 그냥 믿지 않는다.
-            let bytesPerPixel = format == .rgba8888 ? 4 : 1
             guard width > 0, height > 0 else { throw CompositorError.textureCreationFailed }
-            let (area, areaOverflow) = width.multipliedReportingOverflow(by: height)
-            guard !areaOverflow else { throw CompositorError.textureCreationFailed }
-            let (expectedTotal, sizeOverflow) = area.multipliedReportingOverflow(by: bytesPerPixel)
-            guard !sizeOverflow, bytes.count == expectedTotal else {
+            // 크기 산술은 포맷이 안다. 블록 압축은 4x4 단위라 픽셀 곱셈이 성립하지 않는다.
+            guard let expectedTotal = format.byteCount(width: width, height: height),
+                  bytes.count == expectedTotal else {
                 throw CompositorError.textureCreationFailed
             }
 
+            let pixelFormat: MTLPixelFormat
+            switch format {
+            case .rgba8888: pixelFormat = .rgba8Unorm
+            case .r8: pixelFormat = .r8Unorm
+            case .rg88: pixelFormat = .rg8Unorm
+            case .dxt5:
+                // Apple Silicon은 BC를 직접 지원한다(M1 Max에서 확인). CPU 디코더를
+                // 짤 필요가 없고, 그러면 디코더가 틀릴 위험도 없다. 지원하지 않는
+                // GPU에서는 조용히 이상하게 그리지 말고 실패시킨다.
+                guard device.supportsBCTextureCompression else {
+                    throw CompositorError.textureCreationFailed
+                }
+                pixelFormat = .bc3_rgba
+            }
+
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: format == .rgba8888 ? .rgba8Unorm : .r8Unorm,
-                width: width, height: height, mipmapped: false
+                pixelFormat: pixelFormat, width: width, height: height, mipmapped: false
             )
             descriptor.usage = .shaderRead
             guard let texture = device.makeTexture(descriptor: descriptor) else {
                 throw CompositorError.textureCreationFailed
             }
-            let bytesPerRow = width * bytesPerPixel
+            let bytesPerRow = format.bytesPerRow(width: width)
             var replaceFailed = false
             bytes.withUnsafeBytes { raw in
                 guard let base = raw.baseAddress else {

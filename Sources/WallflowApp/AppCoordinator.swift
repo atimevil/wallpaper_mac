@@ -9,6 +9,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var power: PowerMonitor?
     private let library: LibraryStore
 
+    /// 마지막으로 고른 배경화면의 id. 배경화면 앱이 켤 때마다 빈 화면으로
+    /// 시작하면 매번 메뉴에서 다시 골라야 한다.
+    private static let lastSelectionKey = "wallflow.lastSelectedID"
+
     override init() {
         let root = FileManager.default
             .homeDirectoryForCurrentUser
@@ -40,6 +44,18 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             onQuit: { NSApp.terminate(nil) }
         )
         refreshLibrary()
+        restoreLastSelection()
+    }
+
+    /// 지난번에 쓰던 배경화면을 다시 건다.
+    ///
+    /// 라이브러리에서 사라졌으면 조용히 넘어간다 — 사용자가 지웠거나 옮긴 것이고,
+    /// 그 경우 오류를 띄우는 건 도움이 안 된다.
+    private func restoreLastSelection() {
+        guard let saved = UserDefaults.standard.string(forKey: Self.lastSelectionKey),
+              let item = ((try? library.scan()) ?? []).first(where: { $0.id == saved })
+        else { return }
+        select(item, remember: false)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -52,9 +68,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar?.setItems(items)
     }
 
-    private func select(_ item: WallpaperItem) {
+    /// - Parameter remember: 복원 중에는 저장하지 않는다. 저장된 값을 그대로
+    ///   다시 쓰는 것이라 의미가 없고, 실패해도 선택을 지우지 않아야 한다.
+    private func select(_ item: WallpaperItem, remember: Bool = true) {
         do {
             try displays.assign(item, toDisplay: nil)
+            if remember {
+                UserDefaults.standard.set(item.id, forKey: Self.lastSelectionKey)
+            }
         } catch {
             // 배경화면은 항상 켜져 있어야 한다. 실패해도 앱을 죽이지 않는다.
             FileHandle.standardError.write(Data("배경화면 적용 실패: \(error)\n".utf8))

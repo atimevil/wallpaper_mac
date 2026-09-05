@@ -36,18 +36,57 @@ public enum TexPayloadKind: Equatable, Sendable {
 
 public enum TexPixelFormat: Int32, Sendable {
     case rgba8888 = 0
+    /// DXT5(BC3). 4x4 블록 하나가 16바이트다.
+    ///
+    /// DXT3(BC2)도 블록 크기가 같아 바이트 수로는 구분되지 않는다. 실물
+    /// `flatnormal.tex`의 알파 블록이 `[127, 132, 0,0,0,0,0,0]`이고
+    /// `sphere.tex`가 `[0, 255, 73,146,36,...]`인데, 이건 BC3의
+    /// `[끝점 a0, 끝점 a1, 3비트 인덱스 6바이트]` 구조다. BC2로 읽으면
+    /// 둘 다 의미 없는 잡음이 된다. 그래서 BC3으로 확정했다.
+    case dxt5 = 4
     /// 두 채널. 실물에서 light_shafts처럼 흑백+알파 파티클 텍스처가 쓴다.
     case rg88 = 8
     /// 단일 채널. 마스크에 쓰인다.
     case r8 = 9
 
-    /// 픽셀 하나가 차지하는 바이트. 디코더가 크기를 검증할 때 쓴다.
+    /// 블록 압축 포맷인지. 이 경우 픽셀 단위 산술이 성립하지 않는다.
+    public var isBlockCompressed: Bool { self == .dxt5 }
+
+    /// 픽셀 하나가 차지하는 바이트. 블록 압축이 아닌 포맷에만 의미가 있다.
     public var bytesPerPixel: Int {
         switch self {
         case .rgba8888: return 4
         case .rg88: return 2
         case .r8: return 1
+        case .dxt5: return 0
         }
+    }
+
+    /// 이 치수의 이미지 한 장이 차지하는 바이트.
+    /// 블록 압축은 4x4 블록 단위라 픽셀 곱셈으로는 못 구한다.
+    /// 파일에서 온 치수를 곱하므로 오버플로우를 트랩이 아니라 nil로 돌려준다.
+    public func byteCount(width: Int, height: Int) -> Int? {
+        guard width > 0, height > 0 else { return nil }
+        if isBlockCompressed {
+            // (width + 3)이 Int.max 근처에서 트랩한다. 치수는 파일에서 오므로
+            // 더하기 전에 막는다. 나눈 뒤 올림하면 덧셈 자체가 필요 없다.
+            let blocksWide = width / 4 + (width % 4 == 0 ? 0 : 1)
+            let blocksHigh = height / 4 + (height % 4 == 0 ? 0 : 1)
+            let (blocks, overflow) = blocksWide.multipliedReportingOverflow(by: blocksHigh)
+            guard !overflow else { return nil }
+            let (total, overflow2) = blocks.multipliedReportingOverflow(by: 16)
+            return overflow2 ? nil : total
+        }
+        let (area, overflow) = width.multipliedReportingOverflow(by: height)
+        guard !overflow else { return nil }
+        let (total, overflow2) = area.multipliedReportingOverflow(by: bytesPerPixel)
+        return overflow2 ? nil : total
+    }
+
+    /// GPU에 올릴 때 한 줄이 차지하는 바이트. 블록 압축은 블록 줄 단위다.
+    public func bytesPerRow(width: Int) -> Int {
+        guard isBlockCompressed else { return width * bytesPerPixel }
+        return (width / 4 + (width % 4 == 0 ? 0 : 1)) * 16
     }
 }
 
