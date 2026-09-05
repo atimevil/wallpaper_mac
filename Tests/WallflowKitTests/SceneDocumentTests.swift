@@ -239,4 +239,85 @@ final class SceneDocumentTests: XCTestCase {
         }
         XCTAssertEqual(doc.layers[1].content, .image(texturePath: "materials/t.tex"))
     }
+
+    /// solidlayer는 텍스처가 없는 단색 레이어다. 못 찾은 것이 아니라 원래 없다.
+    func testSolidLayerBecomesSolidColor() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "Second", "image": "models/util/solidlayer.json",
+                          "origin": "50 50 0", "size": "10 10",
+                          "color": "1.00000 0.50000 0.25000"}]}
+            """,
+            extras: [
+                "models/util/solidlayer.json":
+                    #"{"material":"materials/util/solidlayer.json","solidlayer":true}"#,
+                "materials/util/solidlayer.json":
+                    #"{"passes":[{"shader":"flat","cullmode":"nocull"}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        XCTAssertEqual(doc.layers[0].content, .solidColor(Vec3(x: 1.0, y: 0.5, z: 0.25)))
+    }
+
+    /// composelayer는 렌더 타깃을 참조한다. M6의 몫이고, 이유가 구분되어야 한다.
+    func testComposeLayerIsUnsupportedForRenderTargetReason() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "Green", "image": "models/util/composelayer.json",
+                          "origin": "50 50 0", "size": "10 10"}]}
+            """,
+            extras: [
+                "models/util/composelayer.json":
+                    #"{"material":"materials/util/composelayer.json","passthrough":true}"#,
+                "materials/util/composelayer.json":
+                    #"{"passes":[{"shader":"composelayer","textures":["_rt_FullFrameBuffer"]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .unsupported(let reason) = doc.layers[0].content else {
+            return XCTFail("렌더 타깃 참조는 unsupported여야 한다")
+        }
+        XCTAssertTrue(reason.contains("렌더 타깃"),
+                      "텍스처를 못 찾은 것과 구분되는 이유여야 한다: \(reason)")
+    }
+
+    func testSolidColorDefaultsToWhiteWhenColorMissing() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "S", "image": "models/util/solidlayer.json",
+                          "origin": "50 50 0", "size": "10 10"}]}
+            """,
+            extras: [
+                "models/util/solidlayer.json": #"{"material":"materials/util/solidlayer.json"}"#,
+                "materials/util/solidlayer.json": #"{"passes":[{"shader":"flat"}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        XCTAssertEqual(doc.layers[0].content, .solidColor(Vec3(x: 1, y: 1, z: 1)))
+    }
+
+    /// flat 셰이더라도 텍스처가 있으면 단색이 아니다.
+    /// _rt_ 참조가 렌더 타깃 검사에 도달해야 한다. OR 조건이면 여기서 삼켜진다.
+    func testFlatShaderWithRenderTargetReachesRenderTargetCheck() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "F", "image": "models/m.json",
+                          "origin": "50 50 0", "size": "10 10"}]}
+            """,
+            extras: [
+                "models/m.json": #"{"material":"materials/m.json"}"#,
+                "materials/m.json":
+                    #"{"passes":[{"shader":"flat","textures":["_rt_FullFrameBuffer"]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .unsupported(let reason) = doc.layers[0].content else {
+            return XCTFail("flat + _rt_ 는 단색이 아니라 렌더 타깃이어야 한다")
+        }
+        XCTAssertTrue(reason.contains("렌더 타깃"), "이유: \(reason)")
+    }
 }

@@ -44,5 +44,12 @@ enum SceneShaders {
     ) {
         return tex.sample(samp, in.uv);
     }
+
+    fragment float4 solid_fragment(
+        VertexOut in [[stage_in]],
+        constant float4 &color [[buffer(0)]]
+    ) {
+        return color;
+    }
     """
 }
