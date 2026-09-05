@@ -198,6 +198,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     skipped.append("\(layer.name): 파티클 텍스처 로드 실패 \(error)")
                 }
 
+            case .text:
+                // Task 4에서 래스터화와 스크립트를 붙인다.
+                skipped.append("\(layer.name): 텍스트 렌더러는 M5 Task 4에서 연결한다")
+
             case .unsupported(let reason):
                 skipped.append("\(layer.name): \(reason)")
             }

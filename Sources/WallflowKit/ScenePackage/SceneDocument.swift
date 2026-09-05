@@ -97,7 +97,15 @@ public struct SceneDocument: Sendable {
         }
 
         guard let modelPath = object["image"] as? String else {
-            if object["text"] != nil { return unsupported("텍스트는 M5에서 지원한다") }
+            if let text = object["text"] as? [String: Any] {
+                guard let origin else {
+                    return unsupported("텍스트 레이어지만 origin이 스크립트다. 스크립팅은 M5에서 지원한다")
+                }
+                return SceneLayer(
+                    id: id, name: name, visible: visible,
+                    origin: origin, size: size ?? Vec2(x: 0, y: 0),
+                    content: .text(makeTextLayer(text, object: object)))
+            }
             if object["sound"] != nil { return unsupported("사운드는 M6에서 지원한다") }
             return unsupported("알 수 없는 레이어 종류")
         }
@@ -111,6 +119,33 @@ public struct SceneDocument: Sendable {
             origin: origin, size: size,
             content: content
         )
+    }
+
+    /// 텍스트 레이어를 읽는다.
+    ///
+    /// 실패시킬 이유가 거의 없다 — 폰트가 없거나 글자가 비어도 나중에 래스터화가
+    /// 판단한다. 여기서 unsupported로 떨구면 사용자는 "왜 시계가 없지"만 알 뿐
+    /// 무엇이 없는지 모른다.
+    private static func makeTextLayer(
+        _ text: [String: Any], object: [String: Any]
+    ) -> TextLayer {
+        // scriptproperties의 값은 실물에서 전부 수다(체크박스는 0/1, 구분자는 문자열).
+        // 문자열도 스크립트가 그대로 쓰므로 따로 담는다.
+        var numbers: [String: Double] = [:]
+        if let props = text["scriptproperties"] as? [String: Any] {
+            for (key, value) in props {
+                if let d = value as? Double { numbers[key] = d }
+                else if let i = value as? Int { numbers[key] = Double(i) }
+                else if let b = value as? Bool { numbers[key] = b ? 1 : 0 }
+            }
+        }
+        return TextLayer(
+            value: text["value"] as? String ?? "",
+            fontPath: object["font"] as? String ?? "systemfont",
+            // 실물 텍스트의 color는 이미 0~1이다. 파티클(0~255)과 다르니 나누지 마라.
+            color: (object["color"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 1, y: 1, z: 1),
+            script: text["script"] as? String,
+            scriptProperties: numbers)
     }
 
     /// 파티클 프리셋을 따라가 레이어 내용을 판정한다.

@@ -48,6 +48,37 @@ public enum ParticleBlendMode: Equatable, Sendable {
     case translucent
 }
 
+/// 글자를 그리는 레이어.
+///
+/// 보유한 실물 씬의 텍스트 13개 중 12개가 `value` 대신 스크립트로 글자를 만든다.
+/// 시계·날짜·요일이 그렇다. 그래서 스크립트가 이 레이어의 본체다.
+public struct TextLayer: Equatable, Sendable {
+    /// 스크립트가 없을 때 그대로 그리는 글자. 스크립트가 있으면 첫 입력값이 된다.
+    public let value: String
+    /// `.pkg`나 assets 안의 폰트 경로. `systemfont_*`는 파일이 아니라 시스템 폰트 이름이다.
+    public let fontPath: String
+    /// 0~1 실수 셋. 파티클의 색과 달리 여기는 이미 0~1이다(실물 확인).
+    public let color: Vec3
+    /// 레이어 스크립트 본문. 없으면 nil.
+    public let script: String?
+    /// 스크립트에 넘길 사용자 설정값. 스크립트 안의 빌더를 이긴다.
+    public let scriptProperties: [String: Double]
+
+    /// 폰트가 파일이 아니라 시스템 폰트 이름인지.
+    public var usesSystemFont: Bool { fontPath.hasPrefix("systemfont") }
+
+    public init(
+        value: String, fontPath: String, color: Vec3,
+        script: String?, scriptProperties: [String: Double]
+    ) {
+        self.value = value
+        self.fontPath = fontPath
+        self.color = color
+        self.script = script
+        self.scriptProperties = scriptProperties
+    }
+}
+
 /// 레이어가 무엇을 그리는지.
 public enum LayerContent: Equatable, Sendable {
     /// .pkg 또는 assets 안의 텍스처 경로.
@@ -58,6 +89,8 @@ public enum LayerContent: Equatable, Sendable {
     case solidColor(Vec3)
     /// 파티클 시스템. 프리셋과 텍스처 경로, 그리고 합성 방식을 담는다.
     case particle(preset: ParticlePreset, texturePath: String, blend: ParticleBlendMode)
+    /// 글자. 스크립트가 값을 만들 수 있다.
+    case text(TextLayer)
     /// 그리지 못하는 레이어. 이유를 남겨 나중에 무엇을 만들지 알 수 있게 한다.
     case unsupported(reason: String)
 }
