@@ -207,11 +207,17 @@ public struct AssetsStore: Sendable {
     }
 
     /// 참조 이름을 루트 안의 실제 경로로 바꾼다. 밖으로 나가면 nil.
+    ///
+    /// standardizedFileURL은 ../만 접고 심볼릭 링크는 해석하지 않는다.
+    /// 에셋 폴더 안에 밖을 가리키는 링크가 있으면 그것만으로는 통과하므로,
+    /// 양쪽을 resolvingSymlinksInPath()로 해석한 뒤 비교한다.
     private func resolve(_ name: String) -> URL? {
         guard !name.isEmpty, !name.hasPrefix("/") else { return nil }
-        let candidate = root.appendingPathComponent(name).standardizedFileURL
-        // standardized가 ../를 접은 뒤에도 루트 밑에 있어야 한다.
-        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        let candidate = root.appendingPathComponent(name)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        let resolvedRoot = root.resolvingSymlinksInPath()
+        let rootPath = resolvedRoot.path.hasSuffix("/")
+            ? resolvedRoot.path : resolvedRoot.path + "/"
         guard candidate.path.hasPrefix(rootPath) else { return nil }
         return candidate
     }
@@ -233,7 +239,11 @@ public struct AssetsStore: Sendable {
             throw AssetsError.notFound(name)
         }
         do {
-            return try Data(contentsOf: url, options: .mappedIfSafe)
+            // mmap을 쓰지 않는다. 매핑 후 파일이 잘리면 SIGBUS로 죽는데 그것은
+            // Swift 오류가 아니라 프로세스 종료라 잡을 수 없다. 에셋 파일은
+            // 2935개에 85MB, 평균 29KB라 mmap이 얻는 것도 없다.
+            // 226MB scene.pkg를 읽는 PkgReader는 사정이 달라 그대로 둔다.
+            return try Data(contentsOf: url)
         } catch {
             throw AssetsError.unreadable(name)
         }
