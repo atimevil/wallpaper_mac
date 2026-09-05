@@ -19,6 +19,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 강제 종료·SIGKILL·패닉으로 남은 임시 비디오 파일을 정리한다. 씬을
+        // 아직 아무것도 열지 않은 시점이라 이 프로세스는 어떤 파일도 잠그고
+        // 있지 않으므로, rebuildWindows보다 먼저 불러도 스스로의 파일을 지울
+        // 위험이 없다.
+        VideoTexture.sweepOrphanedFiles()
+
         displays.rebuildWindows()
 
         let power = PowerMonitor(

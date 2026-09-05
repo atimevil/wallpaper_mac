@@ -54,7 +54,7 @@ final class RealScenesTests: XCTestCase {
             XCTFail("WALLFLOW_TEST_SCENES는 설정되었지만 씬을 찾을 수 없음: \(url.path)")
             throw MissingSceneError(path: url.path)
         }
-        return try PkgReader(data: try Data(contentsOf: url, options: .mappedIfSafe))
+        return try PkgReader(data: try Data(contentsOf: url))
     }
 
     /// M2의 목표 씬. 커스텀 셰이더가 없는 유일한 씬이다.

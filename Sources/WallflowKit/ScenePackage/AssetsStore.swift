@@ -55,7 +55,10 @@ public struct AssetsStore: Sendable {
             // mmap을 쓰지 않는다. 매핑 후 파일이 잘리면 SIGBUS로 죽는데 그것은
             // Swift 오류가 아니라 프로세스 종료라 잡을 수 없다. 에셋 파일은
             // 2935개에 85MB, 평균 29KB라 mmap이 얻는 것도 없다.
-            // 226MB scene.pkg를 읽는 PkgReader는 사정이 달라 그대로 둔다.
+            // scene.pkg(최대 226MB)도 이제 예외가 아니다 — SteamCmdClient가 쓰는
+            // 사용자 관리 파일이라 로딩 중 업데이트가 덮어쓸 수 있고, PkgReader가
+            // 어차피 subdata로 항목을 통째로 복사하므로 매핑이 얻는 이득도 없다
+            // (SceneRenderer.start() 참고).
             return try Data(contentsOf: url)
         } catch {
             throw AssetsError.unreadable(name)

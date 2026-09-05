@@ -197,8 +197,9 @@ final class MetalCompositor {
             // TextureData.pixels는 public case라 누구나 만들 수 있다. TexDecoder가
             // 보장하는 "0이 아닌 정확한 크기의 버퍼"라는 불변조건은 이 타깃에서는
             // 검증된 적이 없으므로, 여기서 실제로 필요한 조건을 직접 확인한다.
-            // C1(TexDecoder의 16384 상한)이 width/height 자체는 막아주지만, 그 보장이
-            // 이 코드에까지 닿는다고 그냥 믿지 않는다.
+            // TexDecoder의 세 디코드 분기 모두 16384 상한(TexHeader.maxTextureDimension)을
+            // 지키므로 width/height 자체는 막힌다고 봐도 되지만, 그 보장이 이 코드에까지
+            // 닿는다고 그냥 믿지 않는다.
             let bytesPerPixel = format == .rgba8888 ? 4 : 1
             guard width > 0, height > 0 else { throw CompositorError.textureCreationFailed }
             let (area, areaOverflow) = width.multipliedReportingOverflow(by: height)

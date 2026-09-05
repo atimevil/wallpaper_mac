@@ -59,6 +59,14 @@ public struct TexHeader: Equatable, Sendable {
     /// flags의 이 비트가 서면 데이터가 MP4다.
     static let videoFlag: Int32 = 32
 
+    /// 애플 실리콘의 Metal maxTexture2DDimension. WallflowKit은 Metal을 import하지
+    /// 않으므로 이 값을 여기서 물어볼 수 없어 상수로 못박는다 — 이보다 큰 차원은
+    /// 어차피 Metal 텍스처가 될 수 없다.
+    /// TexDecoder의 세 디코드 분기(rawPixels, jpeg/png) 모두 이 상한을 적용해야
+    /// "16384를 넘지 않는다"가 실제로 전역 불변조건이 된다 — 한 분기만 지켜서는
+    /// 나머지 분기로 들어오는 압축 폭탄을 막지 못한다.
+    public static let maxTextureDimension = 16384
+
     public let version: String
     public let format: Int32
     public let flags: Int32

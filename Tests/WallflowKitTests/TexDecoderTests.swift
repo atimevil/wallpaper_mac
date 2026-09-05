@@ -168,6 +168,46 @@ final class TexDecoderTests: XCTestCase {
         }
     }
 
+    /// PNG는 rawPixels와 달리 헤더 스캔이 아니라 CGImageSource에 그대로 맡겨진다.
+    ///
+    /// 처음에는 IHDR의 폭/높이 필드만 손으로 부풀린 조작된 PNG로 이 경로를
+    /// 검증하려 했다. 실측 결과 ImageIO는 선언된 치수가 실제 압축 데이터 길이와
+    /// 크게 어긋나면(수백 바이트짜리 데이터로 1000x1000을 선언하는 정도로도
+    /// 이미) CGImageSourceCopyPropertiesAtIndex 단계에서 빈 딕셔너리를 돌려주고
+    /// 조용히 거부한다 — 즉 그런 식으로 조작한 PNG는 우리 코드에 닿기도 전에
+    /// ImageIO가 먼저 걸러버려 dimensionsOutOfRange 경로를 실제로 타지 못한다.
+    ///
+    /// 대신 폭이 정말로 16384를 넘는 진짜(조작하지 않은) PNG를 싸게 만든다:
+    /// 높이 1짜리 단색 줄무늬는 16385x1이어도 압축 후 수백 바이트에 불과하다.
+    /// 조작이 아니라 진짜 헤더이므로 ImageIO가 순순히 폭/높이를 읽어주고, 우리
+    /// 쪽 가드가 CGImageSourceCreateImageAtIndex(실제 픽셀 디코딩) 전에 먼저
+    /// dimensionsOutOfRange로 끊는지를 그대로 검증할 수 있다.
+    func testOversizedPNGWidthThrowsDimensionsOutOfRangeInsteadOfDecoding() throws {
+        let png = try realPNG(width: 16385, height: 1)
+        let tex = buildTex(freeImageFormat: 13, size: (16385, 1), mips: [(16385, 1, 0, 0, png)])
+        XCTAssertThrowsError(try TexDecoder.decode(tex)) { error in
+            XCTAssertEqual(error as? TexError, .dimensionsOutOfRange)
+        }
+    }
+
+    /// 실제 PNG 바이트를 만들어야 IHDR을 조작할 대상이 생긴다.
+    private func realPNG(width: Int, height: Int) throws -> Data {
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let ctx = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: 0, space: cs,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        )!
+        ctx.setFillColor(CGColor(red: 0.2, green: 0.6, blue: 0.9, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = ctx.makeImage()!
+        let out = NSMutableData()
+        let dest = CGImageDestinationCreateWithData(out, "public.png" as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, image, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
+        return out as Data
+    }
+
     func testR8DimensionsAtInt32MaxThrowDimensionsOutOfRangeInsteadOfCrashing() throws {
         // format=9(r8, bytesPerPixel=1)이면 width×height가 오버플로우 없이 거대해질 수
         // 있다. width=height=Int32.max일 때 area는 약 4.6e18로, 오버플로우 검사 두
@@ -189,6 +229,7 @@ final class TexDecoderTests: XCTestCase {
 extension Data {
     var count32: Int32 { Int32(count) }
 }
+
 
 /// 테스트 픽스처용 LZ4 압축. 구현부의 압축 해제와 짝을 이룬다.
 func lz4RawCompress(_ input: Data) -> Data? {

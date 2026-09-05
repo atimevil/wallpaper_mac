@@ -17,6 +17,16 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 이 씬이 재생 중인 비디오 텍스처들. 렌더러가 소유한다.
     private var videos: [VideoTexture] = []
 
+    /// 씬 하나가 동시에 열 수 있는 비디오 레이어 수. 보유한 실물 씬 넷은 각각
+    /// 최대 1개뿐이라 4는 정상 콘텐츠에 넉넉하다. 상한이 없으면 악의적인
+    /// .pkg가 레이어 수십 개마다 AVPlayer+텍스처 캐시를 띄워 메모리와 디코더를
+    /// 소진할 수 있다 — DisplayManager는 디스플레이마다 별도 SceneRenderer를
+    /// 만들어 아무것도 공유하지 않으므로 모니터 수만큼 곱해진다.
+    private static let maxConcurrentVideoLayers = 4
+    /// 비디오 페이로드 하나의 상한. 실물에서 가장 큰 것이 226MB였다. 256MB는
+    /// 그보다 위이면서도 디스크 쓰기 한 번의 크기를 계속 작게 묶어 둔다.
+    private static let maxVideoPayloadBytes = 256 * 1024 * 1024
+
     init(item: WallpaperItem) {
         self.item = item
         super.init()
@@ -52,9 +62,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         }
 
         // project.json의 file은 scene.json을 가리키지만 실제 데이터는 scene.pkg에 있다.
+        // mmap을 쓰지 않는다. 이 파일은 SteamCmdClient가 관리하는 워크숍 콘텐츠라
+        // 로딩 도중 업데이트가 덮어써 잘리면 매핑이 SIGBUS로 죽는다 — Swift 오류가
+        // 아니라 프로세스 종료라 잡을 수 없다. AssetsStore.data(for:)의 판단과 같다.
         let raw = try Data(
-            contentsOf: item.directory.appendingPathComponent("scene.pkg"),
-            options: .mappedIfSafe
+            contentsOf: item.directory.appendingPathComponent("scene.pkg")
         )
         let reader = try PkgReader(data: raw)
         let assets = Self.defaultAssetsStore()
@@ -91,7 +103,26 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 do {
                     let decoded = try TexDecoder.decode(raw)
                     if case .video(let mp4) = decoded {
+                        guard mp4.count <= Self.maxVideoPayloadBytes else {
+                            skipped.append(
+                                "\(layer.name): 비디오 페이로드가 상한(\(Self.maxVideoPayloadBytes) bytes)을 "
+                                    + "넘는다 (\(mp4.count) bytes)")
+                            continue
+                        }
+                        guard videos.count < Self.maxConcurrentVideoLayers else {
+                            skipped.append(
+                                "\(layer.name): 씬당 비디오 레이어 상한(\(Self.maxConcurrentVideoLayers)개)을 "
+                                    + "넘어 건너뛴다")
+                            continue
+                        }
                         let video = try VideoTexture(mp4: mp4, device: device)
+                        // status는 init 직후 대개 .unknown이라 이 검사는 이미 동기적으로
+                        // 실패가 확정된 드문 경우만 잡는다. 나머지는 VideoTexture.currentTexture()가
+                        // 매 프레임 다시 확인해 stderr에 알린다 (VideoTexture 참고).
+                        guard !video.hasFailed else {
+                            skipped.append("\(layer.name): 비디오를 재생할 수 없다")
+                            continue
+                        }
                         video.play()
                         videos.append(video)
                         drawable.append((quad, .dynamic { [weak video] in video?.currentTexture() }))
@@ -149,7 +180,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             view?.isPaused = true
         case .playing(let fps):
             view?.isHidden = false
-            for video in videos { video.play() }
+            // VideoRenderer.apply와 맞춘다: 이미 재생 중이면 다시 부르지 않는다.
+            for video in videos where !video.isPlaying { video.play() }
             if !videos.isEmpty {
                 view?.isPaused = false
                 view?.preferredFramesPerSecond = fps

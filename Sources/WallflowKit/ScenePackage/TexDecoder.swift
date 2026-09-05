@@ -21,8 +21,23 @@ public enum TexDecoder {
             return .video(payload)
 
         case .jpeg, .png:
-            guard let source = CGImageSourceCreateWithData(payload as CFData, nil),
-                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            guard let source = CGImageSourceCreateWithData(payload as CFData, nil) else {
+                throw TexError.imageDecodeFailed
+            }
+            // 실제로 픽셀을 만들기 전에 헤더가 선언한 치수부터 확인한다. 압축
+            // 해제 폭탄(수백 KB짜리가 10만x10만을 선언)은 CGImageSourceCreateImageAtIndex가
+            // 그 치수 그대로 비트맵을 올리게 만들므로, rawPixels 분기와 같은 16384
+            // 상한을 여기서도 걸지 않으면 세 분기 중 이 둘만 무방비다.
+            if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any] {
+                let width = (properties[kCGImagePropertyPixelWidth] as? Int) ?? 0
+                let height = (properties[kCGImagePropertyPixelHeight] as? Int) ?? 0
+                guard width <= TexHeader.maxTextureDimension,
+                      height <= TexHeader.maxTextureDimension else {
+                    throw TexError.dimensionsOutOfRange
+                }
+            }
+            guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
                 throw TexError.imageDecodeFailed
             }
             return .image(image)
@@ -39,11 +54,9 @@ public enum TexDecoder {
             // 부족하다 — format=9(r8, bytesPerPixel=1)에서 width=height=Int32.max이면
             // area가 약 4.6e18로 Int 오버플로우 없이 거대해지고, 그 결과가 그대로
             // Data(count:) 할당으로 흘러가 malloc 실패로 트랩한다.
-            // 16384는 애플 실리콘의 maxTexture2DDimension이다. WallflowKit은 Metal을
-            // import하지 않으므로 이 값을 여기서 물어볼 수 없어 상수로 못박는다 —
-            // 이보다 큰 차원은 어차피 Metal 텍스처가 될 수 없다.
-            let maxTextureDimension = 16384
-            guard mip.width <= maxTextureDimension, mip.height <= maxTextureDimension else {
+            // 16384는 애플 실리콘의 maxTexture2DDimension이다 (TexHeader 참고).
+            guard mip.width <= TexHeader.maxTextureDimension,
+                  mip.height <= TexHeader.maxTextureDimension else {
                 throw TexError.dimensionsOutOfRange
             }
             let (area, areaOverflow) = mip.width.multipliedReportingOverflow(by: mip.height)
