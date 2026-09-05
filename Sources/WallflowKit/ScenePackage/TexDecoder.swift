@@ -67,10 +67,9 @@ public enum TexDecoder {
                   mip.height <= TexHeader.maxTextureDimension else {
                 throw TexError.dimensionsOutOfRange
             }
-            let (area, areaOverflow) = mip.width.multipliedReportingOverflow(by: mip.height)
-            guard !areaOverflow else { throw TexError.lz4Failed }
-            let (expectedSize, sizeOverflow) = area.multipliedReportingOverflow(by: format.bytesPerPixel)
-            guard !sizeOverflow, expectedSize > 0 else { throw TexError.lz4Failed }
+            // 블록 압축은 4x4 블록 단위라 픽셀 곱셈으로 크기를 구할 수 없다.
+            guard let expectedSize = format.byteCount(width: mip.width, height: mip.height),
+                  expectedSize > 0 else { throw TexError.lz4Failed }
 
             let bytes = mip.isLZ4
                 ? try decompressLZ4(payload, expecting: expectedSize)
