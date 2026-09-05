@@ -242,34 +242,25 @@ final class ParticleSystemTests: XCTestCase {
         XCTAssertLessThanOrEqual(system.aliveCount, 100, "maxCount를 넘어서면 안 된다")
     }
 
-    /// 슬롯이 없어 못 내보낸 몫이 프레임마다 쌓여, 파티클이 한꺼번에 죽는
-    /// 순간 밀린 물량이 폭발적으로 방출되었다.
-    /// "눈이 잠깐 멈췄다가 갑자기 쏟아지는" 증상이었다.
-    /// 지나간 방출 기회는 버려야 한다.
+    /// 슬롯이 없어 못 내보낸 몫이 프레임마다 쌓이면, 슬롯이 한꺼번에 비는 순간
+    /// 밀린 물량이 터진다. "눈이 잠깐 멈췄다가 갑자기 쏟아지는" 증상이다.
+    ///
+    /// 이건 aliveCount로 관찰할 수 없다 — 슬롯 수가 구조적 상한이라
+    /// 크레딧이 아무리 쌓여도 aliveCount는 늘 maxCount 이하다.
+    /// 그래서 크레딧 값을 직접 본다.
     func testSaturatedEmitterDoesNotBankCredit() {
+        // rate 1000 x lifetime 0.5 = 500개가 정상 상태인데 슬롯은 5개뿐이라
+        // 매 프레임 방출 기회가 크게 남는다. 여기서 적체가 생긴다.
         let system = ParticleSystem(
             preset: preset(maxCount: 5, emitters: [emitter(rate: 1000)],
-                           initializers: [.lifetimeRandom(min: 0.01, max: 0.01)]),
+                           initializers: [.lifetimeRandom(min: 0.5, max: 0.5)]),
             random: FixedRandom([0.5]))
-        // 슬롯을 꽉 채운다
-        advance(system, seconds: 0.1)
+        advance(system, seconds: 2.0)
         XCTAssertEqual(system.aliveCount, 5, "슬롯이 가득 차야 한다")
-
-        // 이제 emissionCredits는 크지만, 방출할 슬롯이 없다.
-        // 여러 프레임을 더 돌아도 deadSlots가 비어있으므로 새 파티클이 나오지 않는다.
-        // 그 동안 emissionCredits는 계속 쌓인다.
-        // 모든 파티클이 죽는 순간 (lifetime=0.01), deadSlots가 가득 찬다.
-        // 수정된 코드: emissionCredits는 1.0 이하로 죽으므로 폭발하지 않는다.
-
-        // 여러 프레임 동안 모든 파티클이 죽을 때까지 기다린다
-        for _ in 0..<100 {
-            system.update(deltaTime: Self.step)
+        for (i, credit) in system.emissionCredits.enumerated() {
+            XCTAssertLessThanOrEqual(credit, 1.0,
+                "이미터 \(i)의 크레딧이 \(credit)까지 쌓였다. 못 내보낸 몫은 버려야 한다")
         }
-
-        // 이 시점에서 emissionCredits는 1.0 이하이고, deadSlots는 가득 차 있다.
-        // 다음 프레임에서 방출되는 파티클이 maxCount를 넘지 않는지 확인한다.
-        system.update(deltaTime: Self.step)
-        XCTAssertLessThanOrEqual(system.aliveCount, 5, "크레딧이 폭발해서 maxCount를 넘었다")
     }
 
     /// controlpointattract를 조용히 무시하던 것을 unimplementedOperators로

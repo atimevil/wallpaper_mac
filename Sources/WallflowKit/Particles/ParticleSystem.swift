@@ -35,8 +35,9 @@ public final class ParticleSystem {
     private var numAlive: Int = 0
     /// Indices of dead slots available for reuse.
     private var deadSlots: [Int] = []
-    /// Accumulated fractional emission for each emitter.
-    private var emissionCredits: [Double] = []
+    /// 이미터별 방출 크레딧. 못 내보낸 몫이 쌓이지 않는지는 aliveCount로 관찰할 수 없어서
+    /// (슬롯 수가 구조적 상한이라 항상 통과한다) 테스트가 이 값을 직접 본다.
+    var emissionCredits: [Double] = []
 
     /// 프리셋에 있지만 이 시뮬레이션이 아직 처리하지 않는 연산자 이름들.
     /// 조용히 무시하면 사용자가 레이어가 안 움직이는 이유를 알 수 없고,
