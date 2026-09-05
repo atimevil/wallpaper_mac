@@ -66,7 +66,14 @@ final class AssetsStoreTests: XCTestCase {
 
     func testAbsolutePathIsRejected() throws {
         let store = AssetsStore(root: root)
+        // Leading slash is caught early by the guard.
         XCTAssertThrowsError(try store.data(for: "/etc/passwd")) { error in
+            guard case AssetsError.escapesRoot = error else {
+                return XCTFail("expected escapesRoot, got \(error)")
+            }
+        }
+        // Paths that normalize to absolute reach the prefix check.
+        XCTAssertThrowsError(try store.data(for: "foo/bar/../../../../../../etc/passwd")) { error in
             guard case AssetsError.escapesRoot = error else {
                 return XCTFail("expected escapesRoot, got \(error)")
             }
@@ -75,7 +82,9 @@ final class AssetsStoreTests: XCTestCase {
 
     func testEmptyNameIsRejected() throws {
         let store = AssetsStore(root: root)
-        XCTAssertThrowsError(try store.data(for: ""))
+        XCTAssertThrowsError(try store.data(for: "")) { error in
+            XCTAssertEqual(error as? AssetsError, .escapesRoot(""))
+        }
     }
 
     /// 디렉터리를 파일처럼 읽으려 하면 오류여야 한다.
@@ -83,11 +92,32 @@ final class AssetsStoreTests: XCTestCase {
         try write("models/util/x.json", "{}")
         let store = AssetsStore(root: root)
         XCTAssertFalse(store.contains("models/util"))
+        XCTAssertThrowsError(try store.data(for: "models/util")) { error in
+            XCTAssertEqual(error as? AssetsError, .notFound("models/util"))
+        }
     }
 
     func testMissingRootYieldsNotFoundRatherThanCrash() throws {
         let store = AssetsStore(root: root.appendingPathComponent("does-not-exist"))
         XCTAssertFalse(store.contains("anything.json"))
         XCTAssertThrowsError(try store.data(for: "anything.json"))
+    }
+
+    /// standardizedFileURL은 심볼릭 링크를 해석하지 않는다.
+    /// 에셋 폴더 안의 링크가 밖을 가리키면 접두사 검사만으로는 막지 못한다.
+    func testSymlinkPointingOutsideRootIsRejected() throws {
+        let outside = root.deletingLastPathComponent()
+            .appendingPathComponent("outside-\(UUID().uuidString).txt")
+        try Data("루트 밖의 내용".utf8).write(to: outside)
+        defer { try? FileManager.default.removeItem(at: outside) }
+
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("leak"), withDestinationURL: outside)
+
+        let store = AssetsStore(root: root)
+        XCTAssertFalse(store.contains("leak"), "심링크가 루트 밖을 가리키면 없는 것으로 봐야 한다")
+        XCTAssertThrowsError(try store.data(for: "leak")) { error in
+            XCTAssertEqual(error as? AssetsError, .escapesRoot("leak"))
+        }
     }
 }
