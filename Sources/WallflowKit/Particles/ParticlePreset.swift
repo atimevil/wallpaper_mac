@@ -42,6 +42,8 @@ public struct ParticlePreset: Equatable, Sendable {
     public let operators: [ParticleOperator]
     /// 인식하지 못한 이름들. 무엇이 빠졌는지 사용자에게 말할 수 있게 남긴다.
     public let unsupportedNames: [String]
+    /// 이름은 아는데 필드가 깨져서 버린 엔트리들. 지원하지 않는 것과 구분한다.
+    public let malformedNames: [String]
 
     /// public struct의 memberwise 이니셜라이저는 internal이라 테스트 타깃에서
     /// 쓸 수 없다. Task 3의 시뮬레이션 테스트가 프리셋을 직접 만들어야 하므로
@@ -49,7 +51,7 @@ public struct ParticlePreset: Equatable, Sendable {
     public init(
         maxCount: Int, startTime: Double, materialPath: String,
         emitters: [ParticleEmitter], initializers: [ParticleInitializer],
-        operators: [ParticleOperator], unsupportedNames: [String]
+        operators: [ParticleOperator], unsupportedNames: [String], malformedNames: [String] = []
     ) {
         self.maxCount = maxCount
         self.startTime = startTime
@@ -58,6 +60,7 @@ public struct ParticlePreset: Equatable, Sendable {
         self.initializers = initializers
         self.operators = operators
         self.unsupportedNames = unsupportedNames
+        self.malformedNames = malformedNames
     }
 
     public static func parse(_ json: [String: Any]) -> ParticlePreset? {
@@ -66,12 +69,27 @@ public struct ParticlePreset: Equatable, Sendable {
             return nil
         }
 
+        // Known names by category
+        let knownEmitterNames = Set<String>(["sphererandom", "boxrandom"])
+        let knownInitializerNames = Set<String>([
+            "lifetimerandom", "sizerandom", "alpharandom", "velocityrandom",
+            "colorrandom", "rotationrandom", "angularvelocityrandom", "turbulentvelocityrandom"
+        ])
+        let knownOperatorNames = Set<String>([
+            "movement", "angularmovement", "alphafade", "oscillateposition",
+            "oscillatealpha", "controlpointattract"
+        ])
+
         // Parse maxCount with clamping
         let rawMaxCount: Int
         if let intVal = json["maxcount"] as? Int {
             rawMaxCount = intVal
         } else if let doubleVal = json["maxcount"] as? Double {
-            rawMaxCount = Int(doubleVal)
+            if let saturated = saturatingInt(doubleVal) {
+                rawMaxCount = saturated
+            } else {
+                rawMaxCount = 0
+            }
         } else {
             rawMaxCount = 0
         }
@@ -90,12 +108,17 @@ public struct ParticlePreset: Equatable, Sendable {
         // Parse emitters
         var emitters: [ParticleEmitter] = []
         var unsupportedNames = Set<String>()
+        var malformedNames = Set<String>()
         if let emitterArray = json["emitter"] as? [[String: Any]] {
             for emitterDict in emitterArray {
                 if let emitter = parseEmitter(emitterDict) {
                     emitters.append(emitter)
                 } else if let name = emitterDict["name"] as? String {
-                    unsupportedNames.insert(name)
+                    if knownEmitterNames.contains(name) {
+                        malformedNames.insert(name)
+                    } else {
+                        unsupportedNames.insert(name)
+                    }
                 }
             }
         }
@@ -107,7 +130,11 @@ public struct ParticlePreset: Equatable, Sendable {
                 if let initializer = parseInitializer(initDict) {
                     initializers.append(initializer)
                 } else if let name = initDict["name"] as? String {
-                    unsupportedNames.insert(name)
+                    if knownInitializerNames.contains(name) {
+                        malformedNames.insert(name)
+                    } else {
+                        unsupportedNames.insert(name)
+                    }
                 }
             }
         }
@@ -119,7 +146,11 @@ public struct ParticlePreset: Equatable, Sendable {
                 if let op = parseOperator(opDict) {
                     operators.append(op)
                 } else if let name = opDict["name"] as? String {
-                    unsupportedNames.insert(name)
+                    if knownOperatorNames.contains(name) {
+                        malformedNames.insert(name)
+                    } else {
+                        unsupportedNames.insert(name)
+                    }
                 }
             }
         }
@@ -131,8 +162,21 @@ public struct ParticlePreset: Equatable, Sendable {
             emitters: emitters,
             initializers: initializers,
             operators: operators,
-            unsupportedNames: Array(unsupportedNames).sorted()
+            unsupportedNames: Array(unsupportedNames).sorted(),
+            malformedNames: Array(malformedNames).sorted()
         )
+    }
+
+    /// 파일에서 온 Double을 트랩 없이 Int로 좁힌다.
+    /// Swift의 Int(Double)은 범위 밖이거나 NaN이면 트랩해서 프로세스를 죽인다.
+    /// 창작마당 .pkg의 JSON은 임의의 제3자 입력이라 절대 트랩시킬 수 없다.
+    /// 범위를 벗어난 값은 양 끝으로 포화시켜 기존 클램프가 처리하게 하고,
+    /// NaN만 "값 없음"으로 돌린다.
+    private static func saturatingInt(_ d: Double) -> Int? {
+        if d.isNaN { return nil }
+        if d >= Double(Int.max) { return Int.max }
+        if d <= Double(Int.min) { return Int.min }
+        return Int(d)
     }
 
     private static func getDouble(_ value: Any?) -> Double? {
@@ -148,7 +192,10 @@ public struct ParticlePreset: Equatable, Sendable {
         if let intVal = value as? Int {
             return intVal
         } else if let doubleVal = value as? Double {
-            return Int(doubleVal)
+            // Int(Double)은 범위 밖/NaN에서 트랩한다. Int(exactly:)는 nil을 돌린다.
+            // .towardZero 반올림으로 기존 Int(Double)의 절삭 의미를 유지한다.
+            guard doubleVal.isFinite else { return nil }
+            return Int(exactly: doubleVal.rounded(.towardZero))
         }
         return nil
     }
