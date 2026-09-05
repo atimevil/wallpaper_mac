@@ -68,4 +68,16 @@ final class ReferenceResolverTests: XCTestCase {
         XCTAssertNotNil(resolver.data(for: "models/bad.json"), "바이트는 있다")
         XCTAssertNil(resolver.json(for: "models/bad.json"), "JSON으로는 못 읽는다")
     }
+
+    /// .pkg가 우선이므로, 이 둘에 같은 이름이 있되 .pkg는 깨진 JSON이고 assets는 정상이어도,
+    /// json()은 nil을 반환해야 한다. 배경화면 작가의 오류가 표준 에셋을 가리지 않게 하려는 것이다.
+    func testPkgWinsEvenWhenMalformed() throws {
+        let pkg = try PkgReader(data: buildPkg(version: "PKGV0023", entries: [
+            ("models/x.json", Data("not json".utf8)),
+        ]))
+        try writeAsset("models/x.json", #"{"from":"assets"}"#)
+        let resolver = ReferenceResolver(pkg: pkg, assets: AssetsStore(root: assetsRoot))
+        XCTAssertNotNil(resolver.data(for: "models/x.json"), ".pkg 바이트는 존재한다")
+        XCTAssertNil(resolver.json(for: "models/x.json"), ".pkg 깨진 JSON이므로 nil")
+    }
 }

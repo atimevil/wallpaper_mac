@@ -298,4 +298,26 @@ final class SceneDocumentTests: XCTestCase {
         let doc = try SceneDocument.load(from: reader, assets: nil)
         XCTAssertEqual(doc.layers[0].content, .solidColor(Vec3(x: 1, y: 1, z: 1)))
     }
+
+    /// flat 셰이더라도 텍스처가 있으면 단색이 아니다.
+    /// _rt_ 참조가 렌더 타깃 검사에 도달해야 한다. OR 조건이면 여기서 삼켜진다.
+    func testFlatShaderWithRenderTargetReachesRenderTargetCheck() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "F", "image": "models/m.json",
+                          "origin": "50 50 0", "size": "10 10"}]}
+            """,
+            extras: [
+                "models/m.json": #"{"material":"materials/m.json"}"#,
+                "materials/m.json":
+                    #"{"passes":[{"shader":"flat","textures":["_rt_FullFrameBuffer"]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .unsupported(let reason) = doc.layers[0].content else {
+            return XCTFail("flat + _rt_ 는 단색이 아니라 렌더 타깃이어야 한다")
+        }
+        XCTAssertTrue(reason.contains("렌더 타깃"), "이유: \(reason)")
+    }
 }
