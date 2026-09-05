@@ -125,4 +125,23 @@ public struct SceneLayer: Equatable, Sendable {
     public let origin: Vec3
     public let size: Vec2
     public let content: LayerContent
+    /// 스크립트가 붙어 있지만 우리가 아직 돌리지 못하는 속성 이름들.
+    ///
+    /// 조용히 무시하면 사용자는 레이어가 왜 안 움직이는지 알 수 없다. 실물에서
+    /// `cursor` 레이어의 origin은 `input.cursorWorldPosition`을, `Audio bar`는
+    /// 오디오를 요구한다 — 둘 다 M6다. 그동안은 편집기에 저장된 좌표로 그린다.
+    public let unrunScripts: [String]
+
+    public init(
+        id: Int, name: String, visible: Bool, origin: Vec3, size: Vec2,
+        content: LayerContent, unrunScripts: [String] = []
+    ) {
+        self.id = id
+        self.name = name
+        self.visible = visible
+        self.origin = origin
+        self.size = size
+        self.content = content
+        self.unrunScripts = unrunScripts
+    }
 }

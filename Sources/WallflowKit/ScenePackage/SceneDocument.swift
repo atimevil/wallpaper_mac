@@ -69,16 +69,26 @@ public struct SceneDocument: Sendable {
         let name = object["name"] as? String ?? "object\(fallbackID)"
         let visible = object["visible"] as? Bool ?? true
 
-        // origin/scale이 문자열이 아니라 {"script": ...} 객체인 씬이 실제로 있다.
-        let origin = (object["origin"] as? String).flatMap(Vec3.parse)
-        let size = (object["size"] as? String).flatMap(Vec2.parse)
+        // origin/size가 문자열이 아니라 {"script": ..., "value": ...} 객체인 씬이 있다.
+        // 그 객체에도 `value`가 있고 그게 편집기에서 마지막으로 정해진 좌표다.
+        // 스크립트를 아직 못 돌려도 이 값으로 제자리에 그릴 수 있다 —
+        // 실물 씬 하나는 origin 스크립트의 update가 통째로 주석 처리돼 있어
+        // `value`가 유일한 좌표다.
+        let origin = Self.scalarOrScripted(object["origin"]).flatMap(Vec3.parse)
+        let size = Self.scalarOrScripted(object["size"]).flatMap(Vec2.parse)
+        // 스크립트가 붙어 있는데 우리가 못 돌리는 경우를 사용자에게 알린다.
+        var unrun: [String] = []
+        for key in ["origin", "size", "scale", "alpha", "color", "visible"]
+        where (object[key] as? [String: Any])?["script"] != nil {
+            unrun.append(key)
+        }
 
         func unsupported(_ reason: String) -> SceneLayer {
             SceneLayer(
                 id: id, name: name, visible: visible,
                 origin: origin ?? Vec3(x: 0, y: 0, z: 0),
                 size: size ?? Vec2(x: 0, y: 0),
-                content: .unsupported(reason: reason)
+                content: .unsupported(reason: reason), unrunScripts: unrun
             )
         }
 
@@ -92,19 +102,24 @@ public struct SceneDocument: Sendable {
             return SceneLayer(
                 id: id, name: name, visible: visible,
                 origin: origin, size: particleSize,
-                content: content
+                content: content, unrunScripts: unrun
             )
         }
 
         guard let modelPath = object["image"] as? String else {
-            if let text = object["text"] as? [String: Any] {
+            // text가 객체가 아니라 그냥 문자열인 레이어가 있다(실물 "Audio visualizer").
+            // 스크립트 없이 고정 글자만 그리는 경우다.
+            let textObject: [String: Any]? = (object["text"] as? [String: Any])
+                ?? (object["text"] as? String).map { ["value": $0] }
+            if let text = textObject {
                 guard let origin else {
-                    return unsupported("텍스트 레이어지만 origin이 스크립트다. 스크립팅은 M5에서 지원한다")
+                    return unsupported("텍스트 레이어의 origin에 좌표가 없다")
                 }
                 return SceneLayer(
                     id: id, name: name, visible: visible,
                     origin: origin, size: size ?? Vec2(x: 0, y: 0),
-                    content: .text(makeTextLayer(text, object: object)))
+                    content: .text(makeTextLayer(text, object: object)),
+                    unrunScripts: unrun)
             }
             if object["sound"] != nil { return unsupported("사운드는 M6에서 지원한다") }
             return unsupported("알 수 없는 레이어 종류")
@@ -117,8 +132,14 @@ public struct SceneDocument: Sendable {
         return SceneLayer(
             id: id, name: name, visible: visible,
             origin: origin, size: size,
-            content: content
+            content: content, unrunScripts: unrun
         )
+    }
+
+    /// 문자열이거나, `{"script": ..., "value": ...}` 객체면 그 `value`.
+    private static func scalarOrScripted(_ raw: Any?) -> String? {
+        if let text = raw as? String { return text }
+        return (raw as? [String: Any])?["value"] as? String
     }
 
     /// 텍스트 레이어를 읽는다.

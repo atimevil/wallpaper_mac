@@ -74,6 +74,41 @@ final class TextRasterizerTests: XCTestCase {
         XCTAssertNotEqual(image.width, system.width, "폰트 바이트가 무시되고 있다")
     }
 
+    /// 상자에 맞춰 줄일 때 비율이 유지되어야 한다. 안 그러면 글자가 늘어난다.
+    func testFitPreservesAspect() {
+        let r = TextRasterizer.fit(imageWidth: 600, imageHeight: 200,
+                                   boxWidth: 300, boxHeight: 300)
+        XCTAssertEqual(r.width, 300, accuracy: 0.01)
+        XCTAssertEqual(r.height, 100, accuracy: 0.01, "비율이 깨졌다")
+    }
+
+    /// 높이가 먼저 막히는 경우.
+    func testFitLimitedByHeight() {
+        let r = TextRasterizer.fit(imageWidth: 400, imageHeight: 400,
+                                   boxWidth: 800, boxHeight: 200)
+        XCTAssertEqual(r.width, 200, accuracy: 0.01)
+        XCTAssertEqual(r.height, 200, accuracy: 0.01)
+    }
+
+    /// 상자가 이미지보다 크면 키운다. 실물 Hiyuki의 시계가 이 경우다.
+    func testFitEnlargesToBox() {
+        let r = TextRasterizer.fit(imageWidth: 100, imageHeight: 50,
+                                   boxWidth: 500, boxHeight: 204)
+        XCTAssertEqual(r.width, 408, accuracy: 1)
+        XCTAssertEqual(r.height, 204, accuracy: 1)
+    }
+
+    /// 상자 값은 씬 파일에서 온다. 0이나 비정상이면 원래 크기를 쓴다.
+    func testFitWithBadBoxKeepsOriginalSize() {
+        for (w, h) in [(0.0, 100.0), (100.0, 0.0), (Double.nan, 100.0),
+                       (100.0, Double.infinity), (-5.0, 100.0)] {
+            let r = TextRasterizer.fit(imageWidth: 300, imageHeight: 100,
+                                       boxWidth: w, boxHeight: h)
+            XCTAssertEqual(r.width, 300, accuracy: 0.01, "상자 (\(w), \(h))")
+            XCTAssertEqual(r.height, 100, accuracy: 0.01, "상자 (\(w), \(h))")
+        }
+    }
+
     func testColorIsApplied() throws {
         let image = try TextRasterizer.rasterize(
             text: "8", fontData: nil, pointSize: 96, color: Vec3(x: 1, y: 0, z: 0))

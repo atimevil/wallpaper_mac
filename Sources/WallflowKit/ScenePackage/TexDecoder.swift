@@ -77,8 +77,37 @@ public enum TexDecoder {
                 : payload
 
             guard bytes.count == expectedSize else { throw TexError.lz4Failed }
+            if format == .rg88 {
+                // RG88을 RGBA8888로 편다. 아래 경로(Metal 업로드, 셰이더)가 그대로 쓰인다.
+                // 실물 light_shafts_0.tex를 재보니 R은 전 픽셀 255로 고정이고 G만
+                // 0~228로 변한다 — 흑백 밝기와 알파다. 그래서 RGB에 R을, A에 G를 넣는다.
+                // rg8Unorm으로 그냥 올리면 파랑이 0이고 알파가 1이라 색이 틀린다.
+                return .pixels(
+                    bytes: expandRG88(bytes), width: mip.width, height: mip.height,
+                    format: .rgba8888)
+            }
             return .pixels(bytes: bytes, width: mip.width, height: mip.height, format: format)
         }
+    }
+
+    /// RG88 두 채널을 RGBA8888로 편다. R은 밝기, G는 알파다.
+    private static func expandRG88(_ bytes: Data) -> Data {
+        var out = Data(count: bytes.count * 2)
+        bytes.withUnsafeBytes { src in
+            out.withUnsafeMutableBytes { dst in
+                guard let s = src.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                      let d = dst.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                for i in 0..<(bytes.count / 2) {
+                    let luminance = s[i * 2]
+                    let alpha = s[i * 2 + 1]
+                    d[i * 4] = luminance
+                    d[i * 4 + 1] = luminance
+                    d[i * 4 + 2] = luminance
+                    d[i * 4 + 3] = alpha
+                }
+            }
+        }
+        return out
     }
 
     /// macOS Compression 프레임워크의 LZ4_RAW를 쓴다. 외부 의존성이 필요 없다.

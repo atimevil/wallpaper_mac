@@ -80,6 +80,21 @@ final class TextLayerTests: XCTestCase {
         XCTAssertTrue(t.usesSystemFont, "systemfont_*는 파일이 아니라 이름이다")
     }
 
+    /// text가 객체가 아니라 그냥 문자열인 레이어가 있다(실물 "Audio visualizer").
+    func testPlainStringTextIsAccepted() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "V", "origin": "0 0 0", "size": "10 10",
+                      "font": "systemfont_arial", "text": "______"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .text(let t) = doc.layers[0].content else {
+            return XCTFail("텍스트여야 한다: \(doc.layers[0].content)")
+        }
+        XCTAssertEqual(t.value, "______")
+        XCTAssertNil(t.script)
+    }
+
     private func makeScenePkg(scene: String) throws -> PkgReader {
         try PkgReader(data: buildPkg(version: "PKGV0023", entries: [("scene.json", Data(scene.utf8))]))
     }

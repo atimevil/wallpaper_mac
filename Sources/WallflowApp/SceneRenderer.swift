@@ -15,6 +15,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var view: MTKView?
     private var compositor: MetalCompositor?
     private var skipped: [String] = []
+    /// 그리기는 하는데 온전하지 않은 레이어. 건너뛴 것과 섞으면 사용자가
+    /// "안 그려진 것"과 "덜 그려진 것"을 구별하지 못한다.
+    private var degraded: [String] = []
     /// 이 씬이 재생 중인 비디오 텍스처들. 렌더러가 소유한다.
     private var videos: [VideoTexture] = []
     /// 파티클 레이어마다 시뮬레이션과 렌더러 한 쌍. 매 프레임 전진시킨다.
@@ -42,6 +45,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let text: TextLayer
         let fontData: Data?
         let pointSize: Double
+        /// 씬이 정한 글자 상자(직교 공간). 구운 글자를 여기 맞춰 넣는다.
+        let box: SIMD2<Float>
         let origin: SIMD2<Float>
         let queue: DispatchQueue
         let engine: ScriptEngine?
@@ -55,10 +60,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var layerIndex = 0
 
         init(text: TextLayer, fontData: Data?, pointSize: Double, origin: SIMD2<Float>,
-             engine: ScriptEngine?, name: String) {
+             box: SIMD2<Float>, engine: ScriptEngine?, name: String) {
             self.text = text
             self.fontData = fontData
             self.pointSize = pointSize
+            self.box = box
             self.origin = origin
             self.engine = engine
             self.value = text.value
@@ -94,7 +100,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             return
         }
         state.texture = try? compositor.makeTexture(from: .image(image))
-        state.size = SIMD2(Float(image.width), Float(image.height))
+        // 구운 글자를 씬이 정한 상자에 비율 그대로 맞춰 넣는다. 상자를 무시하면
+        // 글자가 상자를 넘어 화면 밖으로 밀려난다.
+        let fitted = TextRasterizer.fit(
+            imageWidth: image.width, imageHeight: image.height,
+            boxWidth: Double(state.box.x), boxHeight: Double(state.box.y))
+        state.size = SIMD2(Float(fitted.width), Float(fitted.height))
     }
 
     /// 스크립트를 돌려 값이 바뀌었으면 다시 굽는다.
@@ -212,6 +223,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var drawable: [(QuadInstance, LayerSource)] = []
 
         for layer in document.layers where layer.visible {
+            if !layer.unrunScripts.isEmpty {
+                // 조용히 무시하면 사용자가 레이어가 왜 안 움직이는지 알 수 없다.
+                degraded.append(
+                    "\(layer.name): \(layer.unrunScripts.joined(separator: ", "))의 스크립트를 "
+                        + "아직 돌리지 못해 저장된 값으로 그린다")
+            }
             let quad = QuadInstance(
                 origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
                 size: SIMD2(Float(layer.size.x), Float(layer.size.y)))
@@ -281,7 +298,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                         let system = ParticleSystem(
                             preset: preset, random: SeededRandom(seed: UInt64(bitPattern: Int64(layer.id))))
                         if !system.unimplementedOperators.isEmpty {
-                            skipped.append(
+                            degraded.append(
                                 "\(layer.name): 아직 처리하지 않는 연산자 "
                                     + system.unimplementedOperators.joined(separator: ", "))
                         }
@@ -299,10 +316,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 // 안 나오는 것보다 다른 폰트로라도 나오는 게 낫다.
                 let fontData = text.usesSystemFont ? nil : resolver.data(for: text.fontPath)
                 if fontData == nil && !text.usesSystemFont {
-                    skipped.append("\(layer.name): 폰트를 찾을 수 없어 시스템 폰트로 그린다: \(text.fontPath)")
+                    degraded.append("\(layer.name): 폰트를 찾을 수 없어 시스템 폰트로 그린다: \(text.fontPath)")
                 }
-                // 오브젝트의 size는 글자 상자의 직교 공간 크기다. 높이를 점 크기로 쓴다.
-                let pointSize = min(max(Double(layer.size.y), 1), 512)
+                // 오브젝트의 size는 글자 크기가 아니라 **상자**다. 실물에서 411x5300짜리도
+                // 있어서 그대로 점 크기로 쓰면 글자가 화면 밖으로 밀려난다. 대신 고정
+                // 크기로 굽고 상자에 맞춰 줄인다. 256은 레티나에서 흐리지 않을 만큼 크다.
+                let pointSize = 256.0
                 let engine = text.script.map {
                     ScriptEngine(
                         source: $0,
@@ -314,6 +333,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 let state = TextState(
                     text: text, fontData: fontData, pointSize: pointSize,
                     origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
+                    box: SIMD2(Float(layer.size.x), Float(layer.size.y)),
                     engine: engine?.failure == nil ? engine : nil, name: layer.name)
                 texts.append(state)
                 // 첫 값을 바로 구워 둔다. 스크립트가 처음 도는 1초 동안 비어 보이면
@@ -338,8 +358,15 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         // isEmpty 가드보다 먼저 써야 그 경로에서도 진단이 버려지지 않는다.
         if !skipped.isEmpty {
             FileHandle.standardError.write(Data(
-                "씬 \(item.title)에서 건너뛴 레이어 \(skipped.count)개:\n  "
+                "씬 \(item.title)에서 그리지 못한 레이어 \(skipped.count)개:\n  "
                     .appending(skipped.joined(separator: "\n  "))
+                    .appending("\n").utf8
+            ))
+        }
+        if !degraded.isEmpty {
+            FileHandle.standardError.write(Data(
+                "씬 \(item.title)에서 온전하지 않게 그린 레이어 \(degraded.count)개:\n  "
+                    .appending(degraded.joined(separator: "\n  "))
                     .appending("\n").utf8
             ))
         }

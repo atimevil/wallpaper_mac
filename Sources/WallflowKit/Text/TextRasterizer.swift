@@ -81,6 +81,24 @@ public enum TextRasterizer {
         return image
     }
 
+    /// 구운 글자를 씬이 정한 상자에 비율 그대로 맞춘다.
+    ///
+    /// 오브젝트의 `size`는 글자 크기가 아니라 **상자**다. 실물에 411x5300짜리도 있어서
+    /// 그대로 점 크기로 쓰면 글자가 화면 밖으로 밀려난다. 상자가 없거나(0) 이미지가
+    /// 비었으면 원래 크기를 그대로 쓴다.
+    public static func fit(
+        imageWidth: Int, imageHeight: Int, boxWidth: Double, boxHeight: Double
+    ) -> (width: Double, height: Double) {
+        let w = Double(imageWidth), h = Double(imageHeight)
+        guard w > 0, h > 0 else { return (0, 0) }
+        guard boxWidth > 0, boxHeight > 0, boxWidth.isFinite, boxHeight.isFinite else {
+            return (w, h)
+        }
+        let scale = Swift.min(boxWidth / w, boxHeight / h)
+        guard scale.isFinite, scale > 0 else { return (w, h) }
+        return (w * scale, h * scale)
+    }
+
     /// 폰트 바이트에서 폰트를 만든다. 실패하면 시스템 폰트로 대체한다 —
     /// 글자가 아예 안 나오는 것보다 다른 폰트로라도 나오는 게 낫다.
     /// 실물 씬 하나가 `systemfont_arial`처럼 파일이 아닌 이름을 쓰기도 한다.

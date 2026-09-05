@@ -36,6 +36,8 @@ public enum TexPayloadKind: Equatable, Sendable {
 
 public enum TexPixelFormat: Int32, Sendable {
     case rgba8888 = 0
+    /// 두 채널. 실물에서 light_shafts처럼 흑백+알파 파티클 텍스처가 쓴다.
+    case rg88 = 8
     /// 단일 채널. 마스크에 쓰인다.
     case r8 = 9
 
@@ -43,6 +45,7 @@ public enum TexPixelFormat: Int32, Sendable {
     public var bytesPerPixel: Int {
         switch self {
         case .rgba8888: return 4
+        case .rg88: return 2
         case .r8: return 1
         }
     }
