@@ -132,11 +132,13 @@ final class MetalCompositor {
     /// 파티클 레이어 하나에 붙일 렌더러를 만든다.
     /// 셰이더 라이브러리를 재사용해 레이어마다 MSL을 다시 컴파일하지 않는다.
     func makeParticleRenderer(
-        maxCount: Int, blend: ParticleBlendMode, texture: MTLTexture
+        maxCount: Int, blend: ParticleBlendMode, texture: MTLTexture,
+        layerOrigin: SIMD3<Float>, sheet: ParticleSpriteSheet?
     ) throws -> ParticleRenderer {
         try ParticleRenderer(
             device: device, library: library, maxCount: maxCount,
-            blend: blend, texture: texture, sampler: sampler)
+            blend: blend, texture: texture, sampler: sampler, layerOrigin: layerOrigin,
+            sheet: sheet)
     }
 
     /// 씬의 직교 공간 크기를 정한다.

@@ -314,6 +314,24 @@ final class RealScenesTests: XCTestCase {
         XCTAssertTrue(residualFailures.isEmpty, "잔여 바이트 \(residualFailures.count)건: \(residualFailures.prefix(5))")
     }
 
+    /// M4 목표 씬의 파티클 세 개가 해석되어야 한다.
+    /// Rain perspective는 visible:false라 렌더 대상이 아니지만 해석은 된다.
+    func testTargetSceneParticlesResolve() throws {
+        guard let reader = try scenePkg("3714517753"),
+              let assets = try assetsStore() else {
+            throw XCTSkip("환경변수 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader, assets: assets)
+        let particles = doc.layers.compactMap { layer -> ParticlePreset? in
+            if case .particle(let preset, _, _) = layer.content { return preset }
+            return nil
+        }
+        XCTAssertEqual(particles.count, 3, "Snow flat, Rain perspective, Sakura")
+        XCTAssertTrue(particles.allSatisfy { $0.maxCount > 0 }, "maxCount가 0인 프리셋이 있다")
+        // 이미터가 없으면 아무것도 방출하지 못한다. dust_motes_0이 실제로 그랬다.
+        XCTAssertTrue(particles.allSatisfy { !$0.emitters.isEmpty }, "이미터가 없는 프리셋이 있다")
+    }
+
     /// Task 4b: 실물 씬의 파티클 프리셋에서 malformedNames가 비어 있어야 한다.
     func testRealScenesParticlePresetsAreParsedCorrectly() throws {
         guard let root, let assets = try assetsStore() else {

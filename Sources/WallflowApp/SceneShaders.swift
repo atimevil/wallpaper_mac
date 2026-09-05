@@ -64,14 +64,18 @@ enum SceneShaders {
         packed_float3 position;
         float size;
         packed_float3 rotation;
-        float _pad;
+        // 스프라이트 시트의 프레임 번호. 시트가 아니면 0이다.
+        float frame;
         float4 color;
     };
 
     struct ParticleUniforms {
         float2 projection;
+        // 프레임 한 장이 시트에서 차지하는 비율. 시트가 아니면 (1,1)이다.
+        float2 frameScale;
         float textureRatio;
-        float _pad;
+        float framesPerRow;
+        float2 _pad;
     };
 
     // common_particles.h의 ComputeParticleTangents를 옮긴 것.
@@ -109,9 +113,14 @@ enum SceneShaders {
 
         float2 ndc = float2((world.x / u.projection.x) * 2.0 - 1.0,
                             1.0 - (world.y / u.projection.y) * 2.0);
+        // 스프라이트 시트면 코너를 그 프레임의 칸으로 옮긴다. 안 그러면 파티클
+        // 하나가 시트 전체(꽃잎 5장)를 한 칸에 뭉개 그린다.
+        float col = fmod(p.frame, u.framesPerRow);
+        float row = floor(p.frame / u.framesPerRow);
+
         VertexOut out;
         out.position = float4(ndc, 0.0, 1.0);
-        out.uv = corner;
+        out.uv = (corner + float2(col, row)) * u.frameScale;
         out.color = p.color;
         return out;
     }

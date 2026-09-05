@@ -231,291 +231,114 @@ public struct ParticlePreset: Equatable, Sendable {
     private static func parseEmitter(_ dict: [String: Any]) -> ParticleEmitter? {
         guard let name = dict["name"] as? String else { return nil }
 
-        // rate는 선택. 기본값은 defaultEmitRate.
-        let rate = getDouble(dict["rate"]) ?? defaultEmitRate
-
-        // origin은 선택. 기본값은 (0, 0, 0).
-        let origin: Vec3
-        if let originStr = dict["origin"] as? String, let originVec = Vec3.parse(originStr) {
-            origin = originVec
-        } else {
-            origin = Vec3(x: 0, y: 0, z: 0)
-        }
-
-        // directions는 선택. 기본값은 (1, 1, 0) (2D 배경화면).
-        let directions: Vec3
-        if let dirStr = dict["directions"] as? String, let dirVec = Vec3.parse(dirStr) {
-            directions = dirVec
-        } else {
-            directions = Vec3(x: 1, y: 1, z: 0)
-        }
+        let zero = Vec3(x: 0, y: 0, z: 0)
+        // 이름 말고는 전부 선택이다. WE 자체 예제도 `{"name":"boxrandom","rate":200}`처럼
+        // 대부분을 생략한다.
+        guard let rate = num(dict, "rate", defaultEmitRate),
+              let origin = vec(dict, "origin", zero),
+              // 2D 배경화면의 기본 방향. WE 예제 example.json이 쓰는 값이다.
+              let directions = vec(dict, "directions", Vec3(x: 1, y: 1, z: 0))
+        else { return nil }
 
         switch name {
         case "sphererandom":
-            // distancemin과 distancemax는 Double이고 선택. 한쪽만 있으면 양쪽에 쓴다.
-            let distanceMin: Double
-            let distanceMax: Double
-            if let minVal = getDouble(dict["distancemin"]) {
-                distanceMin = minVal
-            } else if let maxVal = getDouble(dict["distancemax"]) {
-                distanceMin = maxVal
-            } else {
-                distanceMin = 0
-            }
-            if let maxVal = getDouble(dict["distancemax"]) {
-                distanceMax = maxVal
-            } else if let minVal = getDouble(dict["distancemin"]) {
-                distanceMax = minVal
-            } else {
-                distanceMax = 0
-            }
+            guard let lo = num(dict, "distancemin", 0), let hi = num(dict, "distancemax", 0)
+            else { return nil }
             return .sphereRandom(rate: rate, origin: origin, directions: directions,
-                                distanceMin: distanceMin, distanceMax: distanceMax)
+                                 distanceMin: lo, distanceMax: hi)
 
         case "boxrandom":
-            // distancemin과 distancemax는 Vec3이고 선택. 한쪽만 있으면 양쪽에 쓴다.
-            let distanceMin: Vec3
-            let distanceMax: Vec3
-            if let minStr = dict["distancemin"] as? String, let minVec = Vec3.parse(minStr) {
-                distanceMin = minVec
-            } else if let maxStr = dict["distancemax"] as? String, let maxVec = Vec3.parse(maxStr) {
-                distanceMin = maxVec
-            } else {
-                distanceMin = Vec3(x: 0, y: 0, z: 0)
-            }
-            if let maxStr = dict["distancemax"] as? String, let maxVec = Vec3.parse(maxStr) {
-                distanceMax = maxVec
-            } else if let minStr = dict["distancemin"] as? String, let minVec = Vec3.parse(minStr) {
-                distanceMax = minVec
-            } else {
-                distanceMax = Vec3(x: 0, y: 0, z: 0)
-            }
+            // 상자는 distancemin~distancemax 사이를 채운다. distancemin이 없으면 0이다 —
+            // 복사하면 상자 표면에만 생겨 먼지가 한 겹으로 몰린다.
+            guard let lo = vec(dict, "distancemin", zero),
+                  let hi = vec(dict, "distancemax", zero)
+            else { return nil }
             return .boxRandom(rate: rate, origin: origin, directions: directions,
-                             distanceMin: distanceMin, distanceMax: distanceMax)
+                              distanceMin: lo, distanceMax: hi)
 
         default:
             return nil
         }
     }
 
+    /// 벡터 필드 하나를 읽는다.
+    /// - 없으면 `fallback`. 실물 프리셋은 기본값인 필드를 아예 적지 않는다.
+    /// - 있는데 해석이 안 되면 nil. 호출자가 엔트리를 버리고 malformed로 남긴다.
+    private static func vec(
+        _ dict: [String: Any], _ key: String, _ fallback: Vec3
+    ) -> Vec3? {
+        guard let raw = dict[key] else { return fallback }
+        guard let text = raw as? String, let parsed = Vec3.parse(text) else { return nil }
+        return parsed
+    }
+
+    /// 수 필드 하나. 규칙은 `vec`과 같다.
+    private static func num(
+        _ dict: [String: Any], _ key: String, _ fallback: Double
+    ) -> Double? {
+        guard let raw = dict[key] else { return fallback }
+        guard let parsed = getDouble(raw) else { return nil }
+        return parsed
+    }
+
+    /// 색 필드. 실물 프리셋의 색은 0~255다 — WE 자체 예제도 흰색을
+    /// `"255 255 255"`로 적는다. 셰이더는 텍스처에 색을 곱하므로 그대로 넘기면
+    /// 255배가 되어 전부 흰색으로 포화된다. 눈은 원래 흰색이라 티가 안 나지만
+    /// 벚꽃은 분홍이 날아간다. 여기서 0~1로 바꿔 모델은 항상 0~1을 담는다.
+    private static func color(
+        _ dict: [String: Any], _ key: String
+    ) -> Vec3? {
+        guard let raw = dict[key] else { return Vec3(x: 1, y: 1, z: 1) }
+        guard let text = raw as? String, let parsed = Vec3.parse(text) else { return nil }
+        return Vec3(x: parsed.x / 255, y: parsed.y / 255, z: parsed.z / 255)
+    }
+
     private static func parseInitializer(_ dict: [String: Any]) -> ParticleInitializer? {
         guard let name = dict["name"] as? String else { return nil }
 
+        // 한쪽 경계가 없으면 그 속성의 기본값을 쓴다. "있는 쪽을 양쪽에 복사"가
+        // **아니다.** 실물 leaves5.json의 rotationrandom이 `{"max": "6.283 6.283 6.283"}`만
+        // 담고 있는데, 6.283은 2π라 꽃잎마다 0~2π 무작위 각도를 뜻한다. 복사하면
+        // 200장이 전부 같은 각도로 굳어 회전이 사라진다.
+        // 기본값은 속성마다 다르다 — 크기와 알파는 1이어야 하고(0이면 안 보인다),
+        // 색은 흰색이어야 하며(검은색은 눈에 띄는 부작용이다), 회전과 속도는 0이다.
+        let zero = Vec3(x: 0, y: 0, z: 0)
+
         switch name {
         case "lifetimerandom":
-            let min: Double
-            let max: Double
-            // min 필드가 JSON에 있는가?
-            if let minVal = getDouble(dict["min"]) {
-                min = minVal
-            } else if dict["min"] != nil {
-                // min이 있지만 파싱 불가
-                return nil
-            } else {
-                // min이 없음. max가 있는가?
-                if let maxVal = getDouble(dict["max"]) {
-                    min = maxVal
-                } else {
-                    // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
-                    // 파티클의 기본값과 같다. 수명 0은 파티클이 태어날 때 바로 죽는다.
-                    min = 1
-                }
-            }
-            // max 필드가 JSON에 있는가?
-            if let maxVal = getDouble(dict["max"]) {
-                max = maxVal
-            } else if dict["max"] != nil {
-                // max가 있지만 파싱 불가
-                return nil
-            } else {
-                // max가 없음. min이 있는가? (이미 위에서 확인했으므로)
-                if let minVal = getDouble(dict["min"]) {
-                    max = minVal
-                } else {
-                    // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
-                    // 파티클의 기본값과 같다. 수명 0은 파티클이 태어날 때 바로 죽는다.
-                    max = 1
-                }
-            }
-            return .lifetimeRandom(min: min, max: max)
+            guard let lo = num(dict, "min", 1), let hi = num(dict, "max", 1) else { return nil }
+            return .lifetimeRandom(min: lo, max: hi)
 
         case "sizerandom":
-            let min: Double
-            let max: Double
-            if let minVal = getDouble(dict["min"]) {
-                min = minVal
-            } else if dict["min"] != nil {
-                return nil
-            } else if let maxVal = getDouble(dict["max"]) {
-                min = maxVal
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
-                // 파티클의 기본값과 같다. 크기 0은 안 보인다.
-                min = 1
-            }
-            if let maxVal = getDouble(dict["max"]) {
-                max = maxVal
-            } else if dict["max"] != nil {
-                return nil
-            } else if let minVal = getDouble(dict["min"]) {
-                max = minVal
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
-                // 파티클의 기본값과 같다. 크기 0은 안 보인다.
-                max = 1
-            }
-            return .sizeRandom(min: min, max: max)
+            guard let lo = num(dict, "min", 1), let hi = num(dict, "max", 1) else { return nil }
+            return .sizeRandom(min: lo, max: hi)
 
         case "alpharandom":
-            let min: Double
-            let max: Double
-            if let minVal = getDouble(dict["min"]) {
-                min = minVal
-            } else if dict["min"] != nil {
-                return nil
-            } else if let maxVal = getDouble(dict["max"]) {
-                min = maxVal
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
-                // 파티클의 기본값과 같다. 알파 0은 투명해서 안 보인다.
-                min = 1
-            }
-            if let maxVal = getDouble(dict["max"]) {
-                max = maxVal
-            } else if dict["max"] != nil {
-                return nil
-            } else if let minVal = getDouble(dict["min"]) {
-                max = minVal
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0이 아니라
-                // 파티클의 기본값과 같다. 알파 0은 투명해서 안 보인다.
-                max = 1
-            }
-            return .alphaRandom(min: min, max: max)
+            guard let lo = num(dict, "min", 1), let hi = num(dict, "max", 1) else { return nil }
+            return .alphaRandom(min: lo, max: hi)
 
         case "velocityrandom":
-            let minVec: Vec3
-            let maxVec: Vec3
-            if let minStr = dict["min"] as? String {
-                guard let mv = Vec3.parse(minStr) else { return nil }
-                minVec = mv
-            } else if dict["min"] != nil {
-                return nil
-            } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
-                minVec = mv
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
-                // (정지 상태)이다.
-                minVec = Vec3(x: 0, y: 0, z: 0)
-            }
-            if let maxStr = dict["max"] as? String {
-                guard let mv = Vec3.parse(maxStr) else { return nil }
-                maxVec = mv
-            } else if dict["max"] != nil {
-                return nil
-            } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
-                maxVec = mv
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
-                // (정지 상태)이다.
-                maxVec = Vec3(x: 0, y: 0, z: 0)
-            }
-            return .velocityRandom(min: minVec, max: maxVec)
+            guard let lo = vec(dict, "min", zero), let hi = vec(dict, "max", zero) else { return nil }
+            return .velocityRandom(min: lo, max: hi)
 
         case "colorrandom":
-            let minVec: Vec3
-            let maxVec: Vec3
-            if let minStr = dict["min"] as? String {
-                guard let mv = Vec3.parse(minStr) else { return nil }
-                minVec = mv
-            } else if dict["min"] != nil {
-                return nil
-            } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
-                minVec = mv
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 흰색 (1,1,1)
-                // 이다. 색 0(검은색)은 눈에 띄는 부작용이 있다.
-                minVec = Vec3(x: 1, y: 1, z: 1)
-            }
-            if let maxStr = dict["max"] as? String {
-                guard let mv = Vec3.parse(maxStr) else { return nil }
-                maxVec = mv
-            } else if dict["max"] != nil {
-                return nil
-            } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
-                maxVec = mv
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 흰색 (1,1,1)
-                // 이다. 색 0(검은색)은 눈에 띄는 부작용이 있다.
-                maxVec = Vec3(x: 1, y: 1, z: 1)
-            }
-            return .colorRandom(min: minVec, max: maxVec)
+            guard let lo = color(dict, "min"), let hi = color(dict, "max") else { return nil }
+            return .colorRandom(min: lo, max: hi)
 
         case "rotationrandom":
-            let minVec: Vec3
-            let maxVec: Vec3
-            if let minStr = dict["min"] as? String {
-                guard let mv = Vec3.parse(minStr) else { return nil }
-                minVec = mv
-            } else if dict["min"] != nil {
-                return nil
-            } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
-                minVec = mv
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
-                // (회전 없음)이다.
-                minVec = Vec3(x: 0, y: 0, z: 0)
-            }
-            if let maxStr = dict["max"] as? String {
-                guard let mv = Vec3.parse(maxStr) else { return nil }
-                maxVec = mv
-            } else if dict["max"] != nil {
-                return nil
-            } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
-                maxVec = mv
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
-                // (회전 없음)이다.
-                maxVec = Vec3(x: 0, y: 0, z: 0)
-            }
-            return .rotationRandom(min: minVec, max: maxVec)
+            guard let lo = vec(dict, "min", zero), let hi = vec(dict, "max", zero) else { return nil }
+            return .rotationRandom(min: lo, max: hi)
 
         case "angularvelocityrandom":
-            let minVec: Vec3
-            let maxVec: Vec3
-            if let minStr = dict["min"] as? String {
-                guard let mv = Vec3.parse(minStr) else { return nil }
-                minVec = mv
-            } else if dict["min"] != nil {
-                return nil
-            } else if let maxStr = dict["max"] as? String, let mv = Vec3.parse(maxStr) {
-                minVec = mv
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
-                // (회전 없음)이다.
-                minVec = Vec3(x: 0, y: 0, z: 0)
-            }
-            if let maxStr = dict["max"] as? String {
-                guard let mv = Vec3.parse(maxStr) else { return nil }
-                maxVec = mv
-            } else if dict["max"] != nil {
-                return nil
-            } else if let minStr = dict["min"] as? String, let mv = Vec3.parse(minStr) {
-                maxVec = mv
-            } else {
-                // 필드가 없는 초기화자는 아무 효과도 내면 안 된다. 그래서 기본값은 0 벡터
-                // (회전 없음)이다.
-                maxVec = Vec3(x: 0, y: 0, z: 0)
-            }
-            return .angularVelocityRandom(min: minVec, max: maxVec)
+            guard let lo = vec(dict, "min", zero), let hi = vec(dict, "max", zero) else { return nil }
+            return .angularVelocityRandom(min: lo, max: hi)
 
         case "turbulentvelocityrandom":
-            // 필드: offset, scale, speedmin, speedmax (모두 Double)
-            let offset = getDouble(dict["offset"]) ?? 0
-            let scale = getDouble(dict["scale"]) ?? 0
-            let speedMin = getDouble(dict["speedmin"]) ?? 0
-            let speedMax = getDouble(dict["speedmax"]) ?? 0
-            return .turbulentVelocityRandom(offset: offset, scale: scale, speedMin: speedMin, speedMax: speedMax)
+            guard let offset = num(dict, "offset", 0), let scale = num(dict, "scale", 0),
+                  let speedMin = num(dict, "speedmin", 0), let speedMax = num(dict, "speedmax", 0)
+            else { return nil }
+            return .turbulentVelocityRandom(
+                offset: offset, scale: scale, speedMin: speedMin, speedMax: speedMax)
 
         default:
             return nil

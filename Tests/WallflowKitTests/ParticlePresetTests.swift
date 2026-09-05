@@ -429,17 +429,58 @@ final class ParticlePresetTests: XCTestCase {
     }
 
     /// 7. `{"name":"velocityrandom","min":"1 2 3"}` — max가 없으면 min과 같아진다.
-    func testVelocityRandomWithMinOnly() throws {
+    /// 한쪽 경계가 없으면 **그 속성의 기본값**을 쓴다. 있는 쪽을 복사하지 않는다.
+    ///
+    /// 처음엔 복사하도록 만들었는데 실물이 그걸 반박했다. Sakura의 leaves5.json에
+    /// `{"name":"rotationrandom","max":"6.283 6.283 6.283"}`가 있고 6.283은 2π다.
+    /// 즉 꽃잎마다 0~2π 무작위 각도를 뜻하는데, 복사하면 200장이 전부 같은 각도로
+    /// 굳어 회전이 사라진다. boxrandom의 distancemin도 마찬가지로 0이어야
+    /// 상자 안이 채워진다 — 복사하면 표면 한 겹에만 생긴다.
+    func testMissingBoundUsesPropertyDefaultNotTheOtherBound() throws {
         let json = try XCTUnwrap(preset("""
         {"material":"m.json","maxcount":10,
-         "initializer":[{"name":"velocityrandom","min":"1 2 3"}]}
+         "initializer":[{"name":"velocityrandom","min":"1 2 3"},
+                        {"name":"rotationrandom","max":"6.283 6.283 6.283"},
+                        {"name":"sizerandom","max":30}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        guard case .velocityRandom(let min, let max) = p.initializers[0] else {
+        XCTAssertTrue(p.malformedNames.isEmpty, "malformed: \(p.malformedNames)")
+
+        guard case .velocityRandom(let vMin, let vMax) = p.initializers[0] else {
             return XCTFail("velocityrandom이어야 한다")
         }
-        XCTAssertEqual(min, Vec3(x: 1, y: 2, z: 3))
-        XCTAssertEqual(max, Vec3(x: 1, y: 2, z: 3), "max가 없으면 min과 같아진다")
+        XCTAssertEqual(vMin, Vec3(x: 1, y: 2, z: 3))
+        XCTAssertEqual(vMax, Vec3(x: 0, y: 0, z: 0), "속도의 기본값은 0이다")
+
+        guard case .rotationRandom(let rMin, let rMax) = p.initializers[1] else {
+            return XCTFail("rotationrandom이어야 한다")
+        }
+        XCTAssertEqual(rMin, Vec3(x: 0, y: 0, z: 0), "회전의 기본값은 0이라 0~2π가 된다")
+        XCTAssertEqual(rMax, Vec3(x: 6.283, y: 6.283, z: 6.283))
+
+        guard case .sizeRandom(let sMin, let sMax) = p.initializers[2] else {
+            return XCTFail("sizerandom이어야 한다")
+        }
+        XCTAssertEqual(sMin, 1, "크기의 기본값은 1이다. 0이면 안 보인다")
+        XCTAssertEqual(sMax, 30)
+    }
+
+    /// 색은 실물에서 0~255다. WE 자체 예제도 흰색을 "255 255 255"로 적는다.
+    /// 셰이더가 텍스처에 곱하므로 그대로 넘기면 전부 흰색으로 포화된다 —
+    /// 눈은 원래 희어서 티가 안 나지만 벚꽃은 분홍이 날아간다.
+    func testColorIsNormalizedTo01() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"name":"colorrandom","min":"255 255 255","max":"255 192 248"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        guard case .colorRandom(let lo, let hi) = p.initializers[0] else {
+            return XCTFail("colorrandom이어야 한다")
+        }
+        XCTAssertEqual(lo.x, 1, accuracy: 0.001)
+        XCTAssertEqual(hi.x, 1, accuracy: 0.001)
+        XCTAssertEqual(hi.y, 192.0 / 255.0, accuracy: 0.001)
+        XCTAssertEqual(hi.z, 248.0 / 255.0, accuracy: 0.001)
     }
 
     /// 8. `{"name":"velocityrandom","min":"쓰레기"}` — 여전히 malformed다.

@@ -1,5 +1,6 @@
 import AppKit
 import Metal
+import QuartzCore
 import MetalKit
 import WallflowKit
 
@@ -16,6 +17,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var skipped: [String] = []
     /// 이 씬이 재생 중인 비디오 텍스처들. 렌더러가 소유한다.
     private var videos: [VideoTexture] = []
+    /// 파티클 레이어마다 시뮬레이션과 렌더러 한 쌍. 매 프레임 전진시킨다.
+    private var particles: [(system: ParticleSystem, renderer: ParticleRenderer,
+                             textureRatio: Float)] = []
+    /// 직전 프레임 시각. 첫 프레임에는 없다.
+    private var lastFrameTime: CFTimeInterval?
 
     /// 씬 하나가 동시에 열 수 있는 비디오 레이어 수. 보유한 실물 씬 넷은 각각
     /// 최대 1개뿐이라 4는 정상 콘텐츠에 넉넉하다. 상한이 없으면 악의적인
@@ -30,6 +36,27 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     init(item: WallpaperItem) {
         self.item = item
         super.init()
+    }
+
+    /// 파티클 텍스처가 스프라이트 시트면 그 배치를 읽는다.
+    /// `rosepetals.tex`가 512x128에 102x128 프레임 5장이다. 시트인 줄 모르고
+    /// uv 0..1로 샘플링하면 꽃잎 하나가 다섯 장을 뭉개 그린다.
+    private static func spriteSheet(of raw: Data) -> ParticleSpriteSheet? {
+        guard let header = try? TexHeader.parse(raw), let sheet = header.spriteSheet,
+              sheet.frameCount > 1,
+              let gridWidth = sheet.gridWidth, let gridHeight = sheet.gridHeight,
+              gridWidth > 0, gridHeight > 0,
+              header.textureWidth > 0, header.textureHeight > 0
+        else { return nil }
+        // 한 줄에 몇 칸이 들어가는지. 폭이 딱 나누어떨어지지 않는 시트가 있어
+        // 내림으로 센다(rosepetals는 5칸 510px에 2px가 남는다).
+        let perRow = max(1, header.textureWidth / gridWidth)
+        return ParticleSpriteSheet(
+            frameCount: sheet.frameCount,
+            framesPerRow: perRow,
+            frameScale: SIMD2(Float(gridWidth) / Float(header.textureWidth),
+                              Float(gridHeight) / Float(header.textureHeight)),
+            frameRatio: Float(gridHeight) / Float(gridWidth))
     }
 
     /// Wallpaper Engine의 표준 에셋. 사용자가 윈도우 설치 폴더에서 반입한다.
@@ -84,6 +111,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let resolver = ReferenceResolver(pkg: reader, assets: assets)
 
         var videos: [VideoTexture] = []
+        var particles: [(system: ParticleSystem, renderer: ParticleRenderer,
+                         textureRatio: Float)] = []
         var drawable: [(QuadInstance, LayerSource)] = []
 
         for layer in document.layers where layer.visible {
@@ -134,15 +163,47 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     skipped.append("\(layer.name): 텍스처 로드 실패 \(error)")
                 }
 
-            case .particle:
-                // Task 6에서 시뮬레이션과 렌더러를 붙인다.
-                skipped.append("\(layer.name): 파티클 렌더러는 Task 6에서 연결한다")
+            case .particle(let preset, let texturePath, let blend):
+                guard let raw = resolver.data(for: texturePath) else {
+                    skipped.append("\(layer.name): 파티클 텍스처를 찾을 수 없다: \(texturePath)")
+                    continue
+                }
+                do {
+                    let decoded = try TexDecoder.decode(raw)
+                    guard case .video = decoded else {
+                        let texture = try compositor.makeTexture(from: decoded)
+                        // 빌보드가 찌그러지지 않게 세로를 보정한다.
+                        let ratio = texture.width > 0
+                            ? Float(texture.height) / Float(texture.width) : 1
+                        let renderer = try compositor.makeParticleRenderer(
+                            maxCount: preset.maxCount, blend: blend, texture: texture,
+                            layerOrigin: SIMD3(Float(layer.origin.x), Float(layer.origin.y),
+                                               Float(layer.origin.z)),
+                            sheet: Self.spriteSheet(of: raw))
+                        // 시드를 레이어 id로 나눠 레이어마다 다른 수열을 쓴다.
+                        // 같은 시드를 공유하면 눈과 벚꽃이 똑같이 움직인다.
+                        let system = ParticleSystem(
+                            preset: preset, random: SeededRandom(seed: UInt64(bitPattern: Int64(layer.id))))
+                        if !system.unimplementedOperators.isEmpty {
+                            skipped.append(
+                                "\(layer.name): 아직 처리하지 않는 연산자 "
+                                    + system.unimplementedOperators.joined(separator: ", "))
+                        }
+                        particles.append((system, renderer, ratio))
+                        drawable.append((quad, .particles(renderer)))
+                        break
+                    }
+                    skipped.append("\(layer.name): 파티클 텍스처가 비디오다: \(texturePath)")
+                } catch {
+                    skipped.append("\(layer.name): 파티클 텍스처 로드 실패 \(error)")
+                }
 
             case .unsupported(let reason):
                 skipped.append("\(layer.name): \(reason)")
             }
         }
         self.videos = videos
+        self.particles = particles
 
         // 건너뛴 이유는 drawable이 비어 폴백하는 경우에 사용자가 가장 필요로 한다.
         // isEmpty 가드보다 먼저 써야 그 경로에서도 진단이 버려지지 않는다.
@@ -165,7 +226,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         compositor.setLayers(drawable)
         self.compositor = compositor
 
-        if !videos.isEmpty {
+        // 비디오와 파티클은 둘 다 매 프레임 갱신이 필요하다.
+        if !videos.isEmpty || !particles.isEmpty {
             view.isPaused = false
             view.enableSetNeedsDisplay = false
             // 전력 정책이 30fps를 지시한다. 60fps 소스라도 그 이상 그리지 않는다.
@@ -182,11 +244,14 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             // 정적 씬은 애초에 그릴 것이 없어 이 분기가 아무 일도 하지 않는다.
             for video in videos { video.pause() }
             view?.isPaused = true
+            // 다시 재생할 때 멈춰 있던 시간이 통째로 적분되지 않게 한다.
+            // 시뮬레이션이 스스로 죄지만, 여기서 끊어야 파티클이 튀지 않는다.
+            lastFrameTime = nil
         case .playing(let fps):
             view?.isHidden = false
             // VideoRenderer.apply와 맞춘다: 이미 재생 중이면 다시 부르지 않는다.
             for video in videos where !video.isPlaying { video.play() }
-            if !videos.isEmpty {
+            if !videos.isEmpty || !particles.isEmpty {
                 view?.isPaused = false
                 view?.preferredFramesPerSecond = fps
             }
@@ -197,6 +262,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     func stop() {
         for video in videos { video.stop() }
         videos.removeAll()
+        particles.removeAll()
+        lastFrameTime = nil
         compositor = nil
         view?.delegate = nil
     }
@@ -208,6 +275,16 @@ extension SceneRenderer: MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        if !particles.isEmpty {
+            let now = CACurrentMediaTime()
+            // 첫 프레임에는 직전 시각이 없다. 0을 넘기면 시뮬레이션이 그냥 넘어간다.
+            let dt = lastFrameTime.map { now - $0 } ?? 0
+            lastFrameTime = now
+            for entry in particles {
+                entry.system.update(deltaTime: dt)
+                entry.renderer.update(from: entry.system, textureRatio: entry.textureRatio)
+            }
+        }
         compositor?.draw(in: view)
     }
 }
