@@ -106,6 +106,22 @@ public enum ShaderPrelude {
             * (1.0 / d);
     }
 
+    // HLSL의 `%`는 실수에도 쓰인다(`frequency % RESOLUTION`). C++에서는
+    // 실수에 `%`를 못 쓰고, 내장 타입끼리는 연산자 오버로드도 안 된다.
+    // 그래서 번역기가 `a % b`를 `wfMod(a, b)` 호출로 바꾸고 여기서 받는다.
+    inline int wfMod(int a, int b) { return b == 0 ? 0 : a % b; }
+    inline uint wfMod(uint a, uint b) { return b == 0u ? 0u : a % b; }
+    inline uint wfMod(uint a, int b) { return b == 0 ? 0u : a % uint(b); }
+    inline float wfMod(float a, float b) { return fmod(a, b); }
+    inline float wfMod(float a, int b) { return fmod(a, float(b)); }
+    inline float wfMod(int a, float b) { return fmod(float(a), b); }
+    inline float2 wfMod(float2 a, float2 b) { return fmod(a, b); }
+    inline float2 wfMod(float2 a, float b) { return fmod(a, float2(b)); }
+    inline float3 wfMod(float3 a, float3 b) { return fmod(a, b); }
+    inline float3 wfMod(float3 a, float b) { return fmod(a, float3(b)); }
+    inline float4 wfMod(float4 a, float4 b) { return fmod(a, b); }
+    inline float4 wfMod(float4 a, float b) { return fmod(a, float4(b)); }
+
     inline float greyscale(float3 color) {
         return dot(color, float3(0.11, 0.59, 0.3));
     }

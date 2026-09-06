@@ -42,6 +42,8 @@ public enum GLSLTranslator {
         public let materialKey: String?
         /// 주석의 `default`. 씬이 값을 안 주면 이걸 쓴다.
         public let defaultValue: String?
+        /// 배열이면 그 길이. `uniform float g_AudioSpectrum32Left[32]`가 이 꼴이다.
+        public let count: Int?
     }
 
     public struct Texture: Equatable, Sendable {
@@ -81,7 +83,8 @@ public enum GLSLTranslator {
         let combos = comboDefaults(in: expanded)
         let annotations = uniformAnnotations(in: expanded)
         let stripped = strippingComments(expanded)
-        let truncated = rewritingSampleTruncation(stripped)
+        let modulo = rewritingModulo(stripped)
+        let truncated = rewritingSampleTruncation(modulo)
         let qualified = rewritingParameterQualifiers(truncated)
         let parsed = parseDeclarations(qualified, annotations: annotations)
         return try assemble(parsed, stage: stage, entryPoint: entryPoint, combos: combos)
@@ -267,6 +270,126 @@ public enum GLSLTranslator {
         return out.joined(separator: "\n")
     }
 
+    /// `a % b`를 `wfMod(a, b)` 호출로 바꾼다.
+    ///
+    /// HLSL은 실수에도 `%`를 쓴다 — 실물 오디오 막대 셰이더가
+    /// `uint barFreq = frequency % RESOLUTION;`처럼 쓴다. C++에서는 실수에 `%`를
+    /// 못 쓰고, **내장 타입끼리는 연산자 오버로드도 안 된다.** 그래서 함수로 바꾼다.
+    ///
+    /// assets 셰이더 466개에는 `%`가 하나도 없다. 창작마당 셰이더에만 나오므로
+    /// 이 변환이 건드리는 범위가 좁다.
+    static func rewritingModulo(_ source: String) -> String {
+        var characters = Array(source)
+        var index = 0
+        var out: [Character] = []
+        out.reserveCapacity(characters.count)
+        while index < characters.count {
+            guard characters[index] == "%" else {
+                out.append(characters[index])
+                index += 1
+                continue
+            }
+            // `%=`는 복합 대입이라 그대로 둔다. 전처리기 줄도 건드리지 않는다.
+            let next = index + 1 < characters.count ? characters[index + 1] : " "
+            guard next != "=", !isPreprocessorLine(out) else {
+                out.append(characters[index])
+                index += 1
+                continue
+            }
+            guard let left = takeOperand(from: &out) else {
+                out.append(characters[index])
+                index += 1
+                continue
+            }
+            index += 1
+            guard let right = readOperand(characters, from: &index) else {
+                out.append(contentsOf: left)
+                out.append("%")
+                continue
+            }
+            out.append(contentsOf: "wfMod(\(String(left)), \(right))")
+        }
+        return String(out)
+    }
+
+    /// 지금 쓰고 있는 줄이 전처리기 지시자인지. `#if A % B` 같은 것은 건드리지 않는다.
+    private static func isPreprocessorLine(_ written: [Character]) -> Bool {
+        for character in written.reversed() {
+            if character.isNewline { return false }
+            if character == "#" { return true }
+        }
+        return false
+    }
+
+    /// 이미 써 둔 쪽에서 왼쪽 피연산자를 떼어 낸다.
+    /// 괄호로 끝나면 짝을 맞춰 통째로 가져온다.
+    private static func takeOperand(from written: inout [Character]) -> [Character]? {
+        var trailing: [Character] = []
+        while let last = written.last, last == " " || last == "\t" {
+            trailing.append(written.removeLast())
+        }
+        guard let last = written.last else { return nil }
+        var operand: [Character] = []
+        if last == ")" || last == "]" {
+            let open: Character = last == ")" ? "(" : "["
+            var depth = 0
+            while let character = written.last {
+                written.removeLast()
+                operand.append(character)
+                if character == last { depth += 1 }
+                if character == open {
+                    depth -= 1
+                    if depth == 0 { break }
+                }
+            }
+            // 괄호 앞이 함수 이름이면 그것까지 피연산자다.
+            while let ahead = written.last, ahead.isLetter || ahead.isNumber || ahead == "_"
+                || ahead == "." {
+                operand.append(written.removeLast())
+            }
+        } else if last.isLetter || last.isNumber || last == "_" || last == "." {
+            while let ahead = written.last, ahead.isLetter || ahead.isNumber || ahead == "_"
+                || ahead == "." {
+                operand.append(written.removeLast())
+            }
+        } else {
+            written.append(contentsOf: trailing.reversed())
+            return nil
+        }
+        return operand.reversed()
+    }
+
+    /// 오른쪽 피연산자를 읽는다.
+    private static func readOperand(_ characters: [Character], from index: inout Int) -> String? {
+        while index < characters.count, characters[index] == " " || characters[index] == "\t" {
+            index += 1
+        }
+        guard index < characters.count else { return nil }
+        var operand = ""
+        if characters[index] == "(" {
+            var depth = 0
+            while index < characters.count {
+                let character = characters[index]
+                operand.append(character)
+                index += 1
+                if character == "(" { depth += 1 }
+                if character == ")" {
+                    depth -= 1
+                    if depth == 0 { break }
+                }
+            }
+            return operand
+        }
+        while index < characters.count {
+            let character = characters[index]
+            guard character.isLetter || character.isNumber || character == "_"
+                || character == "." else { break }
+            operand.append(character)
+            index += 1
+        }
+        return operand.isEmpty ? nil : operand
+    }
+
     /// GLSL의 함수 인자 한정자를 MSL로 옮긴다.
     ///
     /// GLSL은 `void f(in vec3 a, out vec3 b, inout vec3 c)`를 쓴다. MSL에는 그런
@@ -355,7 +478,8 @@ public enum GLSLTranslator {
                 parsed.uniforms.append(Uniform(
                     name: name, type: type,
                     materialKey: annotation?["material"] as? String,
-                    defaultValue: annotation.flatMap { stringValue($0["default"]) }))
+                    defaultValue: annotation.flatMap { stringValue($0["default"]) },
+                    count: count))
             case "varying":
                 parsed.varyings.append((type, name, count))
             default:
@@ -451,14 +575,20 @@ public enum GLSLTranslator {
         }
 
         out += "struct Uniforms {\n"
-        for uniform in parsed.uniforms { out += "    \(uniform.type) \(uniform.name);\n" }
+        for uniform in parsed.uniforms {
+            let array = uniform.count.map { "[\($0)]" } ?? ""
+            out += "    \(uniform.type) \(uniform.name)\(array);\n"
+        }
         // 빈 구조체는 MSL이 거부한다.
         if parsed.uniforms.isEmpty { out += "    float _unused;\n" }
         out += "};\n\n"
 
         // 셰이더 본문 전체를 담는 구조체. 여기서 전역이 멤버가 된다.
         out += "struct ShaderContext {\n"
-        for uniform in parsed.uniforms { out += "    \(uniform.type) \(uniform.name);\n" }
+        for uniform in parsed.uniforms {
+            let array = uniform.count.map { "[\($0)]" } ?? ""
+            out += "    \(uniform.type) \(uniform.name)\(array);\n"
+        }
         for texture in parsed.textures {
             out += "    texture2d<float> \(texture.name);\n"
             out += "    sampler \(texture.name)Sampler;\n"
@@ -492,7 +622,15 @@ public enum GLSLTranslator {
 
         var setup: [String] = []
         for uniform in parsed.uniforms {
-            setup.append("    context.\(uniform.name) = uniforms.\(uniform.name);")
+            guard let count = uniform.count else {
+                setup.append("    context.\(uniform.name) = uniforms.\(uniform.name);")
+                continue
+            }
+            // 배열은 통째로 대입할 수 없다. 성분마다 옮긴다.
+            for index in 0..<count {
+                setup.append(
+                    "    context.\(uniform.name)[\(index)] = uniforms.\(uniform.name)[\(index)];")
+            }
         }
         for texture in parsed.textures {
             setup.append("    context.\(texture.name) = \(texture.name);")

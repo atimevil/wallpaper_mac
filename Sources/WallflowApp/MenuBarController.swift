@@ -9,6 +9,7 @@ final class MenuBarController {
     private let onRefresh: () -> Void
     private let onBrowseWorkshop: () -> Void
     private let onToggleSound: (Bool) -> Void
+    private let onToggleAudio: (Bool) -> Void
     private let onQuit: () -> Void
     private var items: [WallpaperItem] = []
 
@@ -17,9 +18,11 @@ final class MenuBarController {
         onRefresh: @escaping () -> Void,
         onBrowseWorkshop: @escaping () -> Void,
         onToggleSound: @escaping (Bool) -> Void,
+        onToggleAudio: @escaping (Bool) -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.onToggleSound = onToggleSound
+        self.onToggleAudio = onToggleAudio
         self.onSelect = onSelect
         self.onRefresh = onRefresh
         self.onBrowseWorkshop = onBrowseWorkshop
@@ -94,6 +97,14 @@ final class MenuBarController {
         // 자연스럽고, 막아 두면 왜 안 눌리는지 알 수 없다.
         menu.addItem(volumeItem)
 
+        // 오디오 반응. 켜면 시스템 소리를 듣고 macOS가 화면 녹화 권한을 묻는다 —
+        // 시스템 오디오 캡처가 그 권한 아래 있다. 기본은 꺼짐이다.
+        let audio = NSMenuItem(
+            title: "소리에 반응하기", action: #selector(toggleAudio), keyEquivalent: "")
+        audio.target = self
+        audio.state = AudioSpectrum.isEnabled ? .on : .off
+        menu.addItem(audio)
+
         let browse = NSMenuItem(
             title: "창작마당 둘러보기…", action: #selector(browseWorkshop), keyEquivalent: "w")
         browse.target = self
@@ -133,6 +144,27 @@ final class MenuBarController {
         // 소리 크기 항목의 켬/끔 표시도 따라가야 한다. 메뉴를 다시 만든다.
         rebuildMenu()
         onToggleSound(enabled)
+    }
+
+    @objc private func toggleAudio(_ sender: NSMenuItem) {
+        let enabled = sender.state != .on
+        if enabled {
+            // 켜기 전에 무엇이 일어나는지 말한다. 배경화면이 소리를 듣기 시작하는
+            // 것은 사용자가 알고 고를 일이지, 조용히 켜질 일이 아니다.
+            let alert = NSAlert()
+            alert.messageText = "소리에 반응하려면 시스템 소리를 들어야 합니다"
+            alert.informativeText = """
+                macOS가 화면 녹화 권한을 한 번 묻습니다. 시스템 오디오 캡처가                 그 권한 아래 있어서입니다.
+
+                Wallflow는 화면을 읽지 않고 소리만 받습니다. 받은 소리는 곧바로                 주파수 크기로 바뀌어 그리는 데 쓰이고 버려집니다 — 저장하지도,                 어디로 보내지도 않습니다.
+                """
+            alert.addButton(withTitle: "켜기")
+            alert.addButton(withTitle: "취소")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        UserDefaults.standard.set(enabled, forKey: AudioSpectrum.enabledKey)
+        sender.state = enabled ? .on : .off
+        onToggleAudio(enabled)
     }
 
     @objc private func setVolume(_ sender: NSMenuItem) {

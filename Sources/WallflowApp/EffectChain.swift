@@ -389,9 +389,9 @@ final class EffectChain {
         }
 
         let vertexLayout = UniformPacker.layout(
-            for: vertex.uniforms.map { ($0.name, $0.type) })
+            for: vertex.uniforms.map { ($0.name, $0.type, $0.count) })
         let fragmentLayout = UniformPacker.layout(
-            for: fragment.uniforms.map { ($0.name, $0.type) })
+            for: fragment.uniforms.map { ($0.name, $0.type, $0.count) })
 
         return CompiledPass(
             pipeline: pipeline,
@@ -444,6 +444,10 @@ final class EffectChain {
     /// 한 프레임을 그린다. 마지막 패스의 결과가 `texture`에 남는다.
     ///
     /// - Parameter source: 이펙트를 걸기 전 레이어의 그림. 첫 패스의 `previous`다.
+    /// 지금 나고 있는 소리의 대역 크기. 오디오 비주얼라이저가 이걸 읽는다.
+    /// 비어 있으면 셰이더의 스펙트럼 유니폼이 0으로 남아 막대가 잠잠하다.
+    var audioBands: [Int: (left: [Float], right: [Float])] = [:]
+
     func render(commandBuffer: MTLCommandBuffer, source: MTLTexture, time: Float) {
         // 두 텍스처를 번갈아 쓴다. 패스가 자기가 읽는 텍스처에 쓰면 결과가 미정이다.
         if ProcessInfo.processInfo.environment["WALLFLOW_EFFECT_PASSTHROUGH"] != nil {
@@ -570,13 +574,21 @@ final class EffectChain {
             ]
             engineValues["g_Texture1Resolution"] = engineValues["g_Texture0Resolution"]
             engineValues["g_Texture2Resolution"] = engineValues["g_Texture0Resolution"]
+            // 오디오 비주얼라이저는 `g_AudioSpectrum32Left[32]` 같은 배열을 읽는다.
+            // 소리를 안 듣고 있으면 채우지 않아 0으로 남는다 — 막대가 잠잠할 뿐
+            // 그림이 깨지지는 않는다.
+            for (resolution, channels) in audioBands {
+                engineValues["g_AudioSpectrum\(resolution)Left"] = channels.left
+                engineValues["g_AudioSpectrum\(resolution)Right"] = channels.right
+            }
             let overlay = UniformPacker.pack(engineValues, into: layout)
             // 엔진 값만 덮어쓴다. 씬이 준 값이 있는 자리는 건드리지 않는다.
             for field in layout.fields where engineValues[field.name] != nil {
-                let size = UniformPacker.layout(of: field.type)?.size ?? 0
-                for offset in field.offset..<Swift.min(field.offset + size, buffer.count) {
-                    buffer[offset] = overlay[offset]
-                }
+                // 필드가 실제로 차지하는 바이트 전부를 덮는다. 타입만 보고 재면
+                // 배열의 첫 원소만 바뀐다.
+                let end = Swift.min(field.offset + field.byteCount, buffer.count, overlay.count)
+                guard field.offset < end else { continue }
+                for offset in field.offset..<end { buffer[offset] = overlay[offset] }
             }
             guard !buffer.isEmpty else { continue }
             buffer.withUnsafeBytes { raw in

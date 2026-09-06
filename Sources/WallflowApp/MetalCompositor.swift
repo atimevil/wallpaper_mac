@@ -51,6 +51,9 @@ enum LayerSource {
     case solid(SIMD4<Float>)
     /// 파티클. 쿼드 하나가 아니라 인스턴싱으로 직접 그린다.
     case particles(ParticleRenderer)
+    /// 합성 레이어. 그 지점까지 그려진 화면을 받아 이펙트를 걸고 그 결과를 그린다.
+    /// 값은 레이어 번호다 — 렌더러가 그 번호로 어느 체인인지 안다.
+    case composition(Int)
 }
 
 /// 직교 투영 공간에 텍스처 쿼드를 겹쳐 그린다.
@@ -71,6 +74,10 @@ final class MetalCompositor {
     private var clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
     /// 지금 프레임의 시차 밀림(직교 단위). 레이어마다 깊이를 곱해 쓴다.
     private var parallax = SIMD2<Float>(0, 0)
+
+    /// 화면과 오프스크린이 같은 포맷이어야 한다. 다르면 raw 복사에서 채널이
+    /// 뒤바뀌고(bgra↔rgba), 파이프라인도 첨부물 포맷이 맞지 않는다.
+    static let colorPixelFormat: MTLPixelFormat = .bgra8Unorm
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -100,7 +107,7 @@ final class MetalCompositor {
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = library.makeFunction(name: "quad_vertex")
         descriptor.fragmentFunction = library.makeFunction(name: "quad_fragment")
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        descriptor.colorAttachments[0].pixelFormat = Self.colorPixelFormat
 
         // 씬 머티리얼의 기본 블렌딩이 translucent다.
         descriptor.colorAttachments[0].isBlendingEnabled = true
@@ -188,6 +195,17 @@ final class MetalCompositor {
     /// 돌려준 것을 화면에 옮긴다. nil을 돌려주면 원래 화면을 그대로 쓴다.
     var postProcess: (@MainActor (MTLCommandBuffer, MTLTexture) -> MTLTexture?)?
 
+    /// 합성 레이어 하나를 처리한다. 그 지점까지 그려진 화면을 받아 결과를 돌려준다.
+    /// nil이면 그 레이어를 건너뛴다.
+    var composite: (@MainActor (Int, MTLCommandBuffer, MTLTexture) -> MTLTexture?)?
+
+    /// 합성 레이어가 있으면 화면이 아니라 텍스처에 그려야 한다 — 그 지점까지의
+    /// 화면을 셰이더가 읽어야 하는데, 표시용 드로어블은 읽을 수 없다.
+    private var needsOffscreen: Bool {
+        if postProcess != nil { return true }
+        return layers.contains { if case .composition = $0.1 { return true } else { return false } }
+    }
+
     /// 후처리가 있을 때 레이어를 모아 그리는 곳.
     private var frameTexture: MTLTexture?
 
@@ -195,8 +213,10 @@ final class MetalCompositor {
         if let frameTexture, frameTexture.width == width, frameTexture.height == height {
             return frameTexture
         }
+        // **화면과 같은 포맷이어야 한다.** 다른 포맷에 그린 뒤 raw로 복사하면
+        // 채널 순서가 뒤바뀐다(bgra↔rgba) — 빨강이 파랑 자리로 가서 색이 죽는다.
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+            pixelFormat: Self.colorPixelFormat, width: width, height: height, mipmapped: false)
         descriptor.usage = [.shaderRead, .renderTarget]
         descriptor.storageMode = .private
         frameTexture = device.makeTexture(descriptor: descriptor)
@@ -211,8 +231,8 @@ final class MetalCompositor {
         prepare?(commands)
 
         // 후처리가 있으면 화면이 아니라 텍스처에 모아 그린다.
-        let offscreen = postProcess == nil
-            ? nil : frame(width: drawable.texture.width, height: drawable.texture.height)
+        let offscreen = needsOffscreen
+            ? frame(width: drawable.texture.width, height: drawable.texture.height) : nil
         if let offscreen {
             descriptor.colorAttachments[0].texture = offscreen
             descriptor.colorAttachments[0].storeAction = .store
@@ -220,10 +240,17 @@ final class MetalCompositor {
         descriptor.colorAttachments[0].clearColor = clearColor
         descriptor.colorAttachments[0].loadAction = .clear
 
-        guard let encoder = commands.makeRenderCommandEncoder(descriptor: descriptor) else {
-            return
+        // 합성 레이어를 만나면 인코더를 끊고 그 지점까지의 화면을 셰이더에 넘겨야
+        // 한다. 그래서 인코더를 다시 열 수 있게 만들어 둔다 — 다시 열 때는
+        // 지금까지 그린 것을 지우면 안 되므로 `.load`다.
+        func startEncoder(clear: Bool) -> MTLRenderCommandEncoder? {
+            descriptor.colorAttachments[0].loadAction = clear ? .clear : .load
+            guard let new = commands.makeRenderCommandEncoder(descriptor: descriptor)
+            else { return nil }
+            new.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            return new
         }
-        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+        guard var encoder = startEncoder(clear: true) else { return }
 
         for (quad, source) in layers {
             var uniforms = QuadUniforms(
@@ -248,6 +275,19 @@ final class MetalCompositor {
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
                 encoder.setFragmentTexture(texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
+            case .composition(let id):
+                // 그 지점까지 그려진 화면이 이 레이어의 입력이다. 인코더를 끊어
+                // 지금까지 그린 것을 텍스처에 확정한 뒤 넘긴다.
+                encoder.endEncoding()
+                let result = offscreen.flatMap { composite?(id, commands, $0) }
+                guard let restarted = startEncoder(clear: false) else { return }
+                encoder = restarted
+                guard let result else { continue }
+                encoder.setRenderPipelineState(pipeline)
+                encoder.setVertexBytes(
+                    &uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+                encoder.setFragmentTexture(result, index: 0)
+                encoder.setFragmentSamplerState(sampler, index: 0)
             case .particles(let renderer):
                 // 파티클은 자기 draw를 인코딩한다. 아래 공통 drawPrimitives까지
                 // 실행되면 파티클 위에 정체불명의 쿼드가 한 장 더 그려진다.
@@ -265,17 +305,26 @@ final class MetalCompositor {
         if let offscreen {
             // 후처리 결과를 화면으로 옮긴다. 후처리가 실패하면 원래 화면을 쓴다.
             let result = postProcess?(commands, offscreen) ?? offscreen
-            if let blit = commands.makeBlitCommandEncoder() {
-                if result.width == drawable.texture.width,
-                   result.height == drawable.texture.height {
-                    blit.copy(from: result, to: drawable.texture)
-                } else {
-                    // 후처리는 작업 해상도를 죄므로 크기가 다를 수 있다.
-                    // 그때는 후처리를 버리고 원래 화면을 낸다 — 늘려 그리는 것보다
-                    // 원본이 낫고, 이 경로는 예산 상한에 걸렸을 때만 온다.
-                    blit.copy(from: offscreen, to: drawable.texture)
-                }
-                blit.endEncoding()
+            // **복사가 아니라 그린다.** raw 복사는 포맷이 다르면 채널 순서를
+            // 뒤바꾸고 감마도 어긋난다. 샘플링해서 그리면 Metal이 변환을 맡는다.
+            let present = MTLRenderPassDescriptor()
+            present.colorAttachments[0].texture = drawable.texture
+            present.colorAttachments[0].loadAction = .clear
+            present.colorAttachments[0].clearColor = clearColor
+            present.colorAttachments[0].storeAction = .store
+            if let encoder = commands.makeRenderCommandEncoder(descriptor: present) {
+                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                encoder.setRenderPipelineState(pipeline)
+                // 화면을 꽉 채우는 쿼드. 시차는 이미 반영돼 있으므로 0이다.
+                var uniforms = QuadUniforms(
+                    origin: projection * 0.5, size: projection, projection: projection,
+                    color: SIMD4(1, 1, 1, 1), rotation: 0)
+                encoder.setVertexBytes(
+                    &uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+                encoder.setFragmentTexture(result, index: 0)
+                encoder.setFragmentSamplerState(sampler, index: 0)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                encoder.endEncoding()
             }
         }
         commands.present(drawable)

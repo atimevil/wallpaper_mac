@@ -95,7 +95,12 @@ public enum EffectConstant: Equatable, Sendable {
             return value.isFinite ? .scalar(value) : nil
         }
         if let text = raw as? String {
-            let parts = text.split(whereSeparator: \.isWhitespace).compactMap(Double.init)
+            // 값은 `"1 1 1"`처럼 공백으로 나뉘기도 하고 `"0.02, 0.02"`처럼
+            // 쉼표로 나뉘기도 한다. 공백만 보면 `"0.0, 1.0"`이 성분 하나로 읽혀
+            // 벡터가 스칼라가 된다 — 실물 주석 기본값이 이 꼴이다.
+            let parts = text
+                .split(whereSeparator: { $0.isWhitespace || $0 == "," })
+                .compactMap(Double.init)
             guard !parts.isEmpty, parts.allSatisfy(\.isFinite) else { return nil }
             return parts.count == 1 ? .scalar(parts[0]) : .vector(parts)
         }

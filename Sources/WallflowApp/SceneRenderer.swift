@@ -42,6 +42,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var postEffectSource: SceneLayer?
     private var postShaderIncludes: [String: String] = [:]
     private var postResolver: ReferenceResolver?
+    /// 합성 레이어들. 입력이 "그 지점까지 그려진 화면"이라 첫 프레임에야 체인을 만든다.
+    private var compositionLayers: [Int: SceneLayer] = [:]
+    private var compositionChains: [Int: EffectChain] = [:]
+    private var compositionResolver: ReferenceResolver?
+    private var compositionIncludes: [String: String] = [:]
     /// 스크립트를 마지막으로 돌린 시각. 시계는 초 단위로 바뀌므로 1초에 한 번이면 된다.
     private var lastScriptTime: CFTimeInterval?
     /// 스크립트를 다시 돌리는 주기.
@@ -366,6 +371,26 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         ProcessInfo.processInfo.environment["WALLFLOW_EFFECTS"] != "0"
     }
 
+    /// 지금 듣고 있는 소리의 대역 크기. 앱 전체가 하나를 공유한다 —
+    /// 화면이 여럿이어도 시스템 소리는 하나다.
+    static var audioSource: AudioSpectrum?
+
+    static var audioBands: [Int: (left: [Float], right: [Float])] {
+        // 진단용: 스펙트럼을 고정값으로 채운다. 씬 자체 애니메이션과 섞이지 않아
+        // 비주얼라이저가 실제로 그려지는지만 가려낼 수 있다.
+        if let forced = ProcessInfo.processInfo.environment["WALLFLOW_AUDIO_TEST"],
+           let level = Float(forced) {
+            var out: [Int: (left: [Float], right: [Float])] = [:]
+            for resolution in AudioSpectrum.resolutions {
+                // 대역마다 다른 높이를 줘야 막대 모양이 보인다.
+                let ramp = (0..<resolution).map { level * Float($0 + 1) / Float(resolution) }
+                out[resolution] = (ramp, ramp)
+            }
+            return out
+        }
+        return audioSource?.bands ?? [:]
+    }
+
     /// 이펙트 체인을 그린다. 컴포지터의 커맨드 버퍼에 같이 실린다.
     ///
     /// 움직이지 않는 이펙트는 **한 번만** 그린다. 배경화면은 상시 구동이라,
@@ -377,9 +402,48 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let isFirstFrame = effectStartTime == nil
         effectStartTime = start
         let time = Float(now - start)
-        for entry in effectChains where entry.chain.isAnimated || isFirstFrame {
+        let bands = Self.audioBands
+        for entry in effectChains where entry.chain.isAnimated || isFirstFrame || !bands.isEmpty {
+            entry.chain.audioBands = bands
             entry.chain.render(commandBuffer: commands, source: entry.source, time: time)
         }
+    }
+
+    /// 합성 레이어 하나를 그린다. 그 지점까지 그려진 화면이 입력이다.
+    private func renderComposition(
+        _ id: Int, commands: MTLCommandBuffer, frame: MTLTexture
+    ) -> MTLTexture? {
+        guard let layer = compositionLayers[id], let resolver = compositionResolver,
+              let device = compositor?.device else { return nil }
+        if compositionChains[id] == nil {
+            var ignored: [String] = []
+            guard let chain = EffectChain(
+                device: device,
+                effects: layer.effects.map(\.definition),
+                effectBases: layer.effects.map(\.base),
+                source: frame, resolver: resolver, includes: compositionIncludes,
+                makeTexture: { [weak self] in
+                    guard let compositor = self?.compositor else {
+                        throw RendererError.noDrawableLayers
+                    }
+                    return try compositor.makeTexture(from: $0)
+                },
+                diagnostics: &ignored) else {
+                // 한 번 실패하면 매 프레임 다시 시도하지 않는다.
+                compositionLayers[id] = nil
+                FileHandle.standardError.write(Data(
+                    "\(layer.name): 합성 레이어의 이펙트를 걸지 못했다\n".utf8))
+                return nil
+            }
+            compositionChains[id] = chain
+        }
+        guard let chain = compositionChains[id] else { return nil }
+        let now = CACurrentMediaTime()
+        let start = effectStartTime ?? now
+        effectStartTime = start
+        chain.audioBands = Self.audioBands
+        chain.render(commandBuffer: commands, source: frame, time: Float(now - start))
+        return chain.texture
     }
 
     /// 합성이 끝난 화면에 후처리를 건다.
@@ -417,6 +481,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let now = CACurrentMediaTime()
         let start = effectStartTime ?? now
         effectStartTime = start
+        chain.audioBands = Self.audioBands
         chain.render(commandBuffer: commands, source: frame, time: Float(now - start))
         return chain.texture
     }
@@ -555,7 +620,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         // 컴포지터의 파이프라인이 bgra8Unorm으로 고정돼 있다. 기본값에 기대지 않고
         // 명시한다. 어긋나면 빌드는 통과하고 화면만 검게 나온다.
-        view.colorPixelFormat = .bgra8Unorm
+        view.colorPixelFormat = MetalCompositor.colorPixelFormat
         view.autoresizingMask = [.width, .height]
         view.isPaused = true                 // 정적 씬이라 필요할 때만 그린다
         view.enableSetNeedsDisplay = true
@@ -606,6 +671,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var drawable: [(QuadInstance, LayerSource)] = []
         var displayStates: [DisplayState] = []
         var postLayers: [SceneLayer] = []
+        var compositions: [Int: SceneLayer] = [:]
         // 스크립트가 화면·캔버스 크기를 물어본다(실물에서 `engine.screenResolution` 13회).
         // 없으면 참조 오류로 스크립트가 통째로 죽는다.
         let screen = view.window?.screen ?? NSScreen.main
@@ -662,6 +728,17 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             }
 
             switch layer.content {
+            case .composition:
+                // 합성 레이어는 그 지점까지 그려진 화면이 입력이라, 체인을 여기서
+                // 만들 수 없다(화면 텍스처가 아직 없다). 자리만 잡아 두고
+                // 첫 프레임에 만든다. 오디오 막대가 이 형태다.
+                guard !layer.effects.isEmpty, Self.effectsEnabled else {
+                    degraded.append("\(layer.name): 합성 레이어인데 걸 이펙트가 없다")
+                    continue
+                }
+                compositions[drawable.count] = layer
+                drawable.append((quad, .composition(drawable.count)))
+
             case .postProcess:
                 // 화면 전체 후처리. 다른 레이어처럼 그리지 않는다 — 합성이 끝난
                 // 화면을 입력으로 받아야 해서, 컴포지터가 마지막에 따로 부른다.
@@ -898,6 +975,15 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         self.effectChains = chains
         self.effectStartTime = nil
         self.postEffects = nil
+        self.compositionLayers = compositions
+        self.compositionChains = [:]
+        self.compositionResolver = resolver
+        self.compositionIncludes = shaderIncludes
+        if !compositions.isEmpty {
+            compositor.composite = { [weak self] id, commands, frame in
+                self?.renderComposition(id, commands: commands, frame: frame)
+            }
+        }
         if let post = postLayers.first, Self.effectsEnabled {
             if postLayers.count > 1 {
                 degraded.append("후처리 레이어가 \(postLayers.count)개다. 첫 번째만 건다")
@@ -980,6 +1066,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         effectStartTime = nil
         postEffects = nil
         postEffectSource = nil
+        compositionLayers = [:]
+        compositionChains = [:]
         view?.delegate = nil
     }
 }

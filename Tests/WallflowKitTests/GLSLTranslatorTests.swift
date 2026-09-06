@@ -360,4 +360,54 @@ final class GLSLTranslatorTests: XCTestCase {
         XCTAssertNil(result.textures[0].comboName)
         XCTAssertEqual(result.textures[1].comboName, "MASK")
     }
+
+    /// HLSL은 실수에도 `%`를 쓴다 — 실물 오디오 막대가
+    /// `uint barFreq = frequency % RESOLUTION;`처럼 쓴다. C++에서는 실수에 `%`를
+    /// 못 쓰고 **내장 타입끼리는 연산자 오버로드도 안 되므로** 함수로 바꾼다.
+    func testModuloBecomesAFunctionCall() {
+        XCTAssertEqual(
+            GLSLTranslator.rewritingModulo("uint a = frequency % RESOLUTION;"),
+            "uint a = wfMod(frequency, RESOLUTION);")
+        XCTAssertEqual(
+            GLSLTranslator.rewritingModulo("uint b = (a + 1) % N;"),
+            "uint b = wfMod((a + 1), N);")
+    }
+
+    /// 그 규칙이 **파이프라인에 실제로 걸려 있는지** 본다.
+    /// 헬퍼만 따로 부르는 테스트는 연결이 끊겨도 통과한다.
+    func testModuloRewriteIsAppliedByTranslate() throws {
+        let result = try translate("""
+        void main() {
+            float frequency = 4.0;
+            uint band = frequency % 32;
+            gl_FragColor = vec4(float(band));
+        }
+        """)
+        XCTAssertTrue(result.source.contains("wfMod(frequency, 32)"), result.source)
+    }
+
+    /// `%=`는 복합 대입이라 건드리면 안 된다.
+    func testCompoundModuloIsUntouched() {
+        let source = "x %= 4;"
+        XCTAssertEqual(GLSLTranslator.rewritingModulo(source), source)
+    }
+
+    /// 전처리기 줄은 그대로 둔다. Metal의 전처리기가 처리한다.
+    func testPreprocessorLineIsUntouched() {
+        let source = "#if A % 2\nfloat x = 1.0;\n#endif"
+        XCTAssertEqual(GLSLTranslator.rewritingModulo(source), source)
+    }
+
+    /// 배열 유니폼. 오디오 스펙트럼이 `uniform float g_AudioSpectrum32Left[32]`로 온다.
+    func testArrayUniformKeepsItsLength() throws {
+        let result = try translate("""
+        uniform float g_AudioSpectrum32Left[32];
+        void main() { gl_FragColor = vec4(g_AudioSpectrum32Left[3]); }
+        """)
+        XCTAssertEqual(result.uniforms.first?.count, 32)
+        XCTAssertTrue(result.source.contains("float g_AudioSpectrum32Left[32];"), result.source)
+        // 배열은 통째로 대입할 수 없다. 성분마다 옮겨야 한다.
+        XCTAssertTrue(result.source.contains(
+            "context.g_AudioSpectrum32Left[31] = uniforms.g_AudioSpectrum32Left[31];"))
+    }
 }

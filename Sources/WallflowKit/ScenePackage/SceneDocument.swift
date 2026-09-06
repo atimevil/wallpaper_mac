@@ -622,9 +622,12 @@ public struct SceneDocument: Sendable {
         guard let name = textures?.first as? String else {
             return .unsupported(reason: "머티리얼의 첫 텍스처가 없다: \(materialPath)")
         }
-        // _rt_ 접두는 파일이 아니라 렌더 타깃이다. FBO 체인이 필요하다.
+        // _rt_ 접두는 파일이 아니라 렌더 타깃이다.
         if name.hasPrefix("_rt_") {
-            return .unsupported(reason: "렌더 타깃 참조라 M6의 이펙트 체인이 필요하다: \(name)")
+            // 화면 전체 버퍼는 우리가 줄 수 있다 — 그 지점까지 합성된 화면이다.
+            // 오디오 막대가 이 형태로 배경 위에 막대를 그린다.
+            if name == "_rt_FullFrameBuffer" { return .composition }
+            return .unsupported(reason: "아직 모르는 렌더 타깃이다: \(name)")
         }
         return .image(texturePath: "materials/\(name).tex")
     }

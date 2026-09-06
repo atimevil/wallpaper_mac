@@ -204,6 +204,10 @@ public enum LayerContent: Equatable, Sendable {
     /// 화면**을 받아 이펙트를 건다. 실물 씬 하나가 마지막 레이어로 filmgrain·vhs·
     /// waterripple·chromaticaberration을 이렇게 건다.
     case postProcess
+    /// 합성 레이어. 자기 그림 대신 **그 아래까지 합성된 화면**을 받아 이펙트를 걸고,
+    /// 그 결과를 자기 자리에 그린다. 오디오 막대가 이 형태다.
+    /// 후처리와 달리 씬 중간에 놓일 수 있어서, 그 지점까지의 화면이 입력이다.
+    case composition
     case unsupported(reason: String)
 }
 

@@ -46,11 +46,28 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         power.start()
         self.power = power
 
+        // 지난번에 켜 뒀으면 이어서 듣는다. 껐으면 아무것도 하지 않는다.
+        if AudioSpectrum.isEnabled {
+            let source = AudioSpectrum()
+            SceneRenderer.audioSource = source
+            source.start()
+        }
+
         menuBar = MenuBarController(
             onSelect: { [weak self] item in self?.select(item) },
             onRefresh: { [weak self] in self?.refreshLibrary() },
             onBrowseWorkshop: { [weak self] in self?.showWorkshop() },
             onToggleSound: { [weak self] _ in self?.displays.applySoundSetting() },
+            onToggleAudio: { enabled in
+                // 소리 듣기는 앱 전체가 하나만 돈다. 화면이 여럿이어도 시스템 소리는 하나다.
+                if enabled {
+                    let source = SceneRenderer.audioSource ?? AudioSpectrum()
+                    SceneRenderer.audioSource = source
+                    source.start()
+                } else {
+                    SceneRenderer.audioSource?.stop()
+                }
+            },
             onQuit: { NSApp.terminate(nil) }
         )
         refreshLibrary()

@@ -263,7 +263,7 @@ final class RealScenesTests: XCTestCase {
     }
 
     /// composelayer는 assets가 있어도 렌더 타깃이라 그릴 수 없다. 이유가 구분되어야 한다.
-    func testComposeLayerReportsRenderTargetEvenWithAssets() throws {
+    func testComposeLayerBecomesACompositionLayer() throws {
         guard let reader = try scenePkg("3552439823") else {
             throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
         }
@@ -271,11 +271,11 @@ final class RealScenesTests: XCTestCase {
             throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정")
         }
         let doc = try SceneDocument.load(from: reader, assets: assets)
+        // 실물 오디오 비주얼라이저. `_rt_FullFrameBuffer`를 읽는 합성 레이어이고,
+        // 그 위에 오디오 막대 이펙트가 붙는다.
         let layer = try XCTUnwrap(doc.layers.first { $0.name == "Audio Visualizer" })
-        guard case .unsupported(let reason) = layer.content else {
-            return XCTFail("렌더 타깃 레이어는 여전히 unsupported여야 한다")
-        }
-        XCTAssertTrue(reason.contains("렌더 타깃"), "이유: \(reason)")
+        XCTAssertEqual(layer.content, .composition)
+        XCTAssertFalse(layer.effects.isEmpty, "막대를 그리는 이펙트가 붙어 있어야 한다")
     }
 
     /// assets의 모든 .tex가 파싱되어야 한다. M2의 이해는 여기서 불완전했다.

@@ -394,7 +394,7 @@ final class SceneDocumentTests: XCTestCase {
     }
 
     /// composelayer는 렌더 타깃을 참조한다. M6의 몫이고, 이유가 구분되어야 한다.
-    func testComposeLayerIsUnsupportedForRenderTargetReason() throws {
+    func testComposeLayerIsACompositionLayer() throws {
         let reader = try makeScenePkg(
             scene: """
             {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
@@ -408,12 +408,10 @@ final class SceneDocumentTests: XCTestCase {
                     #"{"passes":[{"shader":"composelayer","textures":["_rt_FullFrameBuffer"]}]}"#,
             ]
         )
+        // `_rt_FullFrameBuffer`는 우리가 줄 수 있다 — 그 지점까지 합성된 화면이다.
+        // 한동안은 미지원이었지만 이제 합성 레이어로 그린다.
         let doc = try SceneDocument.load(from: reader, assets: nil)
-        guard case .unsupported(let reason) = doc.layers[0].content else {
-            return XCTFail("렌더 타깃 참조는 unsupported여야 한다")
-        }
-        XCTAssertTrue(reason.contains("렌더 타깃"),
-                      "텍스처를 못 찾은 것과 구분되는 이유여야 한다: \(reason)")
+        XCTAssertEqual(doc.layers[0].content, .composition)
     }
 
     func testSolidColorDefaultsToWhiteWhenColorMissing() throws {
@@ -434,7 +432,7 @@ final class SceneDocumentTests: XCTestCase {
 
     /// flat 셰이더라도 텍스처가 있으면 단색이 아니다.
     /// _rt_ 참조가 렌더 타깃 검사에 도달해야 한다. OR 조건이면 여기서 삼켜진다.
-    func testFlatShaderWithRenderTargetReachesRenderTargetCheck() throws {
+    func testFlatShaderWithRenderTargetIsACompositionLayer() throws {
         let reader = try makeScenePkg(
             scene: """
             {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
@@ -447,11 +445,9 @@ final class SceneDocumentTests: XCTestCase {
                     #"{"passes":[{"shader":"flat","textures":["_rt_FullFrameBuffer"]}]}"#,
             ]
         )
+        // flat 셰이더라도 텍스처가 렌더 타깃이면 단색이 아니다.
         let doc = try SceneDocument.load(from: reader, assets: nil)
-        guard case .unsupported(let reason) = doc.layers[0].content else {
-            return XCTFail("flat + _rt_ 는 단색이 아니라 렌더 타깃이어야 한다")
-        }
-        XCTAssertTrue(reason.contains("렌더 타깃"), "이유: \(reason)")
+        XCTAssertEqual(doc.layers[0].content, .composition)
     }
 
     /// 실물 참조 사슬 그대로:
