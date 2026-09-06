@@ -225,7 +225,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         guard let image = try? TextRasterizer.rasterize(
             text: state.value, fontData: state.fontData,
             pointSize: state.pointSize, color: state.text.color,
-            wrapWidth: wrapWidth, maxRows: wrap.maxRows, usesEllipsis: wrap.usesEllipsis)
+            wrapWidth: wrapWidth, maxRows: wrap.maxRows, usesEllipsis: wrap.usesEllipsis,
+            shadow: state.text.shadow,
+            // 그림자 오프셋도 씬 단위라 줄바꿈 폭과 같은 비율로 옮긴다.
+            shadowScale: wrap.pointSize > 0 ? state.pointSize / wrap.pointSize : 1)
         else {
             // 빈 문자열이면 텍스처를 지운다. 이전 글자가 남으면 시계가 멈춘 것처럼 보인다.
             state.texture = nil

@@ -411,7 +411,17 @@ public struct SceneDocument: Sendable {
                 maxRows: (boolValue(object["limitrows"]) ?? false)
                     ? Int(doubleValue(object["maxrows"]) ?? 0) : 0,
                 usesEllipsis: boolValue(object["limituseellipsis"]) ?? false,
-                pointSize: doubleValue(object["pointsize"]) ?? 0))
+                pointSize: doubleValue(object["pointsize"]) ?? 0),
+            shadow: (boolValue(object["dropshadow"]) ?? false)
+                ? TextShadow(
+                    color: (object["dropshadowcolor"] as? String).flatMap(Vec3.parse)
+                        ?? Vec3(x: 0, y: 0, z: 0),
+                    offset: (object["dropshadowoffset"] as? String).flatMap(Vec2.parse)
+                        ?? Vec2(x: 0, y: 0),
+                    blur: doubleValue(object["dropshadowsize"]) ?? 0,
+                    opacity: Swift.min(Swift.max(
+                        doubleValue(object["dropshadowopacity"]) ?? 1, 0), 1))
+                : nil)
     }
 
     /// 파티클 프리셋을 따라가 레이어 내용을 판정한다.

@@ -185,3 +185,46 @@ extension TextRasterizerTests {
         }
     }
 }
+
+extension TextRasterizerTests {
+    /// 그림자는 글자 바깥으로 번지므로 비트맵이 더 커야 한다.
+    /// 여백을 안 주면 오른쪽·아래가 잘려 그림자가 각지게 끊긴다.
+    func testShadowEnlargesBitmap() throws {
+        let plain = try TextRasterizer.rasterize(
+            text: "12:34", fontData: nil, pointSize: 48, color: Vec3(x: 1, y: 1, z: 1))
+        let shadowed = try TextRasterizer.rasterize(
+            text: "12:34", fontData: nil, pointSize: 48, color: Vec3(x: 1, y: 1, z: 1),
+            shadow: TextShadow(color: Vec3(x: 0, y: 0, z: 0),
+                               offset: Vec2(x: 4, y: 4), blur: 6, opacity: 1),
+            shadowScale: 1)
+        XCTAssertGreaterThan(shadowed.width, plain.width)
+        XCTAssertGreaterThan(shadowed.height, plain.height)
+    }
+
+    /// 실제로 어두운 픽셀이 생겨야 한다. 크기만 커지고 안 그려지면 소용없다.
+    func testShadowActuallyDraws() throws {
+        let shadowed = try TextRasterizer.rasterize(
+            text: "8", fontData: nil, pointSize: 64, color: Vec3(x: 1, y: 1, z: 1),
+            shadow: TextShadow(color: Vec3(x: 1, y: 0, z: 0),
+                               offset: Vec2(x: 6, y: 6), blur: 2, opacity: 1),
+            shadowScale: 1)
+        let bytes = try XCTUnwrap(shadowed.dataProvider?.data as Data?)
+        var sawRedish = false
+        for i in stride(from: 0, to: bytes.count - 3, by: 4) where bytes[i + 3] > 60 {
+            // 흰 글자에 빨간 그림자다. 빨간데 초록·파랑이 낮으면 그림자다.
+            if bytes[i] > 120, bytes[i + 1] < 90, bytes[i + 2] < 90 { sawRedish = true; break }
+        }
+        XCTAssertTrue(sawRedish, "그림자가 그려지지 않았다")
+    }
+
+    /// 씬이 그림자를 끄면 크기가 그대로여야 한다.
+    func testNoShadowKeepsSize() throws {
+        let a = try TextRasterizer.rasterize(
+            text: "x", fontData: nil, pointSize: 32, color: Vec3(x: 1, y: 1, z: 1))
+        let b = try TextRasterizer.rasterize(
+            text: "x", fontData: nil, pointSize: 32, color: Vec3(x: 1, y: 1, z: 1),
+            shadow: nil, shadowScale: 1)
+        XCTAssertEqual(a.width, b.width)
+        XCTAssertEqual(a.height, b.height)
+    }
+}

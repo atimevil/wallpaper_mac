@@ -91,6 +91,8 @@ public struct TextLayer: Equatable, Sendable {
     public let verticalAlign: TextVerticalAlignment
     /// 넘칠 때의 줄바꿈·말줄임 규칙.
     public let wrapping: TextWrapping
+    /// 그림자. 씬이 끄면 nil.
+    public let shadow: TextShadow?
 
     /// 폰트가 파일이 아니라 시스템 폰트 이름인지.
     public var usesSystemFont: Bool { fontPath.hasPrefix("systemfont") }
@@ -100,8 +102,10 @@ public struct TextLayer: Equatable, Sendable {
         script: String?, scriptProperties: [String: ScriptPropertyValue],
         horizontalAlign: TextAlignment = .center,
         verticalAlign: TextVerticalAlignment = .center,
-        wrapping: TextWrapping = .none
+        wrapping: TextWrapping = .none,
+        shadow: TextShadow? = nil
     ) {
+        self.shadow = shadow
         self.horizontalAlign = horizontalAlign
         self.verticalAlign = verticalAlign
         self.wrapping = wrapping
@@ -122,6 +126,22 @@ public enum TextAlignment: String, Sendable, Equatable {
 /// 상자 안에서의 세로 정렬. 실물에 center와 top이 나온다.
 public enum TextVerticalAlignment: String, Sendable, Equatable {
     case top, center, bottom
+}
+
+/// 글자 뒤에 까는 그림자. 씬이 켤 때만 그린다.
+public struct TextShadow: Equatable, Sendable {
+    public let color: Vec3
+    /// 씬 단위 오프셋. y는 아래로 양수다(실물 값이 4,4이고 오른쪽 아래로 진다).
+    public let offset: Vec2
+    public let blur: Double
+    public let opacity: Double
+
+    public init(color: Vec3, offset: Vec2, blur: Double, opacity: Double) {
+        self.color = color
+        self.offset = offset
+        self.blur = blur
+        self.opacity = opacity
+    }
 }
 
 /// 글자가 상자를 넘칠 때의 처리. 씬이 정한다.

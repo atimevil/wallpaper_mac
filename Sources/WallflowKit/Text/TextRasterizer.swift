@@ -36,11 +36,13 @@ public enum TextRasterizer {
     /// 하면 말줄임표를 붙인다.
     public static func rasterize(
         text: String, fontData: Data?, pointSize: Double, color: Vec3,
-        wrapWidth: Double, maxRows: Int, usesEllipsis: Bool
+        wrapWidth: Double, maxRows: Int, usesEllipsis: Bool,
+        shadow: TextShadow? = nil, shadowScale: Double = 1
     ) throws -> CGImage {
         guard wrapWidth > 0, wrapWidth.isFinite else {
             return try rasterize(text: text, fontData: fontData,
-                                 pointSize: pointSize, color: color)
+                                 pointSize: pointSize, color: color,
+                                 shadow: shadow, shadowScale: shadowScale)
         }
         guard !text.isEmpty, !text.allSatisfy(\.isWhitespace) else { throw TextRasterError.empty }
         guard pointSize.isFinite, pointSize > 0 else {
@@ -82,7 +84,7 @@ public enum TextRasterizer {
         var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
         _ = CTLineGetTypographicBounds(lines[0], &ascent, &descent, &leading)
         let lineHeight = ceil(ascent + descent + leading)
-        let padding = ceil(pointSize * 0.1)
+        let padding = ceil(pointSize * 0.1 + shadowPadding(shadow, scale: shadowScale))
         let widest = lines.map { max(CTLineGetTypographicBounds($0, nil, nil, nil),
                                      CTLineGetImageBounds($0, nil).maxX) }.max() ?? 0
         let width = Int(ceil(widest) + padding * 2)
@@ -98,6 +100,7 @@ public enum TextRasterizer {
         ) else { throw TextRasterError.contextCreationFailed }
         context.setAllowsAntialiasing(true)
         context.setShouldSmoothFonts(true)
+        applyShadow(shadow, in: context, scale: shadowScale)
         for (index, line) in lines.enumerated() {
             // CoreGraphics의 원점은 좌하단이라 첫 줄이 맨 위에 오도록 뒤에서 센다.
             let baseline = CGFloat(lines.count - index - 1) * lineHeight + descent + padding
@@ -111,7 +114,8 @@ public enum TextRasterizer {
     }
 
     public static func rasterize(
-        text: String, fontData: Data?, pointSize: Double, color: Vec3
+        text: String, fontData: Data?, pointSize: Double, color: Vec3,
+        shadow: TextShadow? = nil, shadowScale: Double = 1
     ) throws -> CGImage {
         guard !text.isEmpty, !text.allSatisfy(\.isWhitespace) else { throw TextRasterError.empty }
         guard pointSize.isFinite, pointSize > 0 else {
@@ -135,7 +139,7 @@ public enum TextRasterizer {
         let typographicWidth = CTLineGetTypographicBounds(line, &ascent, &descent, &leading)
         let inkBounds = CTLineGetImageBounds(line, nil)
 
-        let padding = ceil(pointSize * 0.1)
+        let padding = ceil(pointSize * 0.1 + shadowPadding(shadow, scale: shadowScale))
         let width = Int(ceil(max(typographicWidth, inkBounds.maxX)) + padding * 2)
         let height = Int(ceil(ascent + descent + leading) + padding * 2)
         guard width > 0, height > 0,
@@ -152,6 +156,7 @@ public enum TextRasterizer {
 
         context.setAllowsAntialiasing(true)
         context.setShouldSmoothFonts(true)
+        applyShadow(shadow, in: context, scale: shadowScale)
         // CoreGraphics의 원점은 좌하단이다. baseline을 descent만큼 띄운다.
         context.textPosition = CGPoint(x: padding, y: descent + padding)
         CTLineDraw(line, context)
@@ -178,6 +183,29 @@ public enum TextRasterizer {
         let scale = Swift.min(boxWidth / w, boxHeight / h)
         guard scale.isFinite, scale > 0 else { return (w, h) }
         return (w * scale, h * scale)
+    }
+
+    /// 그림자를 켠다. 켠 뒤에 그린 것에만 붙는다.
+    ///
+    /// 그림자는 글자 바깥으로 번지므로 비트맵에 여백이 더 필요하다.
+    /// 여백을 안 주면 오른쪽·아래가 잘려 그림자가 각지게 끊긴다.
+    static func applyShadow(_ shadow: TextShadow?, in context: CGContext, scale: Double) {
+        guard let shadow, shadow.opacity > 0 else { return }
+        let color = CGColor(
+            red: clamp(shadow.color.x), green: clamp(shadow.color.y),
+            blue: clamp(shadow.color.z), alpha: CGFloat(shadow.opacity))
+        // CoreGraphics의 y는 위가 양수라 씬의 아래 방향과 부호가 반대다.
+        context.setShadow(
+            offset: CGSize(width: shadow.offset.x * scale, height: -shadow.offset.y * scale),
+            blur: CGFloat(max(shadow.blur, 0) * scale),
+            color: color)
+    }
+
+    /// 그림자가 번지는 만큼의 여백.
+    static func shadowPadding(_ shadow: TextShadow?, scale: Double) -> Double {
+        guard let shadow, shadow.opacity > 0 else { return 0 }
+        return (abs(shadow.offset.x).magnitude + abs(shadow.offset.y).magnitude
+                + max(shadow.blur, 0) * 2) * scale
     }
 
     /// 폰트 바이트에서 폰트를 만든다. 실패하면 시스템 폰트로 대체한다 —
