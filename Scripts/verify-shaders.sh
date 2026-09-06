@@ -9,9 +9,9 @@
 #
 # 두 번째 인자로 씬 디렉터리를 주면 pkg 안의 창작마당 이펙트도 함께 번역한다.
 #
-# 2026-09-06 기준: assets 346개 중 339개, 창작마당 106개 중 98개 — 합계 452개 중
-# 437개(97%)가 컴파일된다. 남은 15개는 HLSL식 암묵적 벡터 절단이 대입문에 나오는
-# 형태(표현식을 이해하는 변환이 필요)와 오디오 비주얼라이저다.
+# 2026-09-07 기준: assets 346개 + 창작마당 106개 = 452개 **전부** 컴파일된다.
+# Metal 툴체인 CLI가 없는 기계에서는 `MTLDevice.makeLibrary(source:)`로 재면 된다
+# (런타임 컴파일이라 툴체인이 필요 없다).
 set -euo pipefail
 ASSETS="${1:-$HOME/Library/Application Support/Wallflow/Assets}"
 OUT=$(mktemp -d)

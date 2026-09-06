@@ -84,7 +84,9 @@ public enum GLSLTranslator {
         let annotations = uniformAnnotations(in: expanded)
         let stripped = strippingComments(expanded)
         let modulo = rewritingModulo(stripped)
-        let truncated = rewritingSampleTruncation(modulo)
+        let renamed = rewritingReservedIdentifiers(modulo)
+        let arrays = rewritingArrayConstructors(renamed)
+        let truncated = rewritingTruncation(arrays)
         let qualified = rewritingParameterQualifiers(truncated)
         let parsed = parseDeclarations(qualified, annotations: annotations)
         return try assemble(parsed, stage: stage, entryPoint: entryPoint, combos: combos)
@@ -246,28 +248,175 @@ public enum GLSLTranslator {
     }
 
     /// WE의 셰이더 컴파일러는 HLSL식 **암묵적 벡터 절단**을 허용한다.
-    /// 실물 `shimmer`가 이렇게 쓴다:
+    /// 실물이 이렇게 쓴다:
     /// ```glsl
-    /// vec3 shimmerColor = texSample2D(g_Texture3, frac(shimmerCoord));  // float4를 vec3에
+    /// vec3 shimmerColor = texSample2D(g_Texture3, uv);   // float4를 vec3에
+    /// float mask = texSample2D(g_Texture1, uv);          // float4를 float에
+    /// vec2 causticsCoords = v_TexCoord;                   // vec4 varying을 vec2에
+    /// v_NoiseCoord = v_TexCoord;                          // 대입문에서도
     /// ```
-    /// C++에는 그런 변환이 없다. 실제로 나타나는 형태 — **샘플링 결과를 그대로
-    /// 좁은 벡터에 넣는 선언** — 만 명시적 스위즐로 바꾼다. 표현식 전체를 이해하는
-    /// 변환은 파서가 필요하고, 그건 이 번역기의 범위가 아니다. 못 고치는 형태는
-    /// 컴파일 실패로 남고, 그 이펙트만 건너뛰면 된다.
-    static func rewritingSampleTruncation(_ source: String) -> String {
-        let swizzles = ["vec2": ".xy", "vec3": ".xyz"]
+    /// C++에는 그런 변환이 없다. 표현식의 타입을 알려면 파서가 필요한데, 그 대신
+    /// **받는 쪽의 타입**을 안다는 점을 쓴다 — 선언이면 선언된 타입, 대입이면
+    /// varying의 타입. 값을 `wfToN(...)`로 감싸면 프렐류드의 오버로드가 타입에
+    /// 따라 자르거나(넓으면) 그대로 두거나(같으면) 펼친다(스칼라면).
+    /// 같은 타입이면 항등이라, 모든 선언에 걸어도 뜻이 바뀌지 않는다.
+    static func rewritingTruncation(_ source: String) -> String {
+        let widths = ["float": 1, "vec2": 2, "vec3": 3, "vec4": 4]
+        // 대입문에서 받는 쪽을 알 수 있는 것은 varying뿐이다. 지역 변수는
+        // 선언 자리에서 이미 감쌌고, 그 뒤의 대입은 흔치 않다.
+        var varyingWidth: [String: Int] = [:]
+        for line in source.split(whereSeparator: \.isNewline) {
+            let words = line.trimmingCharacters(in: .whitespaces)
+                .replacingOccurrences(of: ";", with: " ")
+                .split(whereSeparator: \.isWhitespace).map(String.init)
+            guard words.count >= 3, words[0] == "varying",
+                  let width = widths[words[1]], !words[2].contains("[") else { continue }
+            varyingWidth[words[2]] = width
+        }
+
         var out: [String] = []
-        for line in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let words = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
-            guard words.count >= 4, let swizzle = swizzles[words[0]], words[2] == "=",
-                  words[3].hasPrefix("texSample2D"), trimmed.hasSuffix(");")
-            else { out.append(String(line)); continue }
-            // 이미 스위즐이 붙어 있으면(`).rgb;`) 위 검사에서 걸러진다 — 끝이 `);`가 아니다.
-            let cut = String(line).index(String(line).endIndex, offsetBy: -1)
-            out.append(String(String(line)[..<cut]) + swizzle + ";")
+        for rawLine in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            let line = String(rawLine)
+            guard let rewritten = wrappedInitializer(line, widths: widths,
+                                                     varyingWidth: varyingWidth)
+            else { out.append(line); continue }
+            out.append(rewritten)
         }
         return out.joined(separator: "\n")
+    }
+
+    /// 한 줄이 `TYPE NAME = EXPR;`이거나 `VARYING = EXPR;`이면 EXPR을 감싼다.
+    /// 아니면 nil.
+    private static func wrappedInitializer(
+        _ line: String, widths: [String: Int], varyingWidth: [String: Int]
+    ) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        // 한 문장만 다룬다. `;`가 둘이면 for 머리이거나 두 문장이다.
+        guard trimmed.hasSuffix(";"), trimmed.filter({ $0 == ";" }).count == 1,
+              !trimmed.contains("wfTo"), !trimmed.hasPrefix("#"),
+              let equals = trimmed.firstIndex(of: "=") else { return nil }
+        // `==`, `<=`, `+=` 같은 것은 대입이 아니다.
+        let afterEquals = trimmed.index(after: equals)
+        guard afterEquals < trimmed.endIndex, trimmed[afterEquals] != "=" else { return nil }
+        let before = trimmed.index(before: equals)
+        guard !"+-*/<>!&|^%".contains(trimmed[before]) else { return nil }
+
+        let lhs = trimmed[..<equals].trimmingCharacters(in: .whitespaces)
+        var rhs = trimmed[afterEquals...].trimmingCharacters(in: .whitespaces)
+        rhs.removeLast()  // `;`
+        // 배열 초기화와 빈 값은 건드리지 않는다.
+        guard !rhs.isEmpty, !rhs.hasPrefix("{"), !topLevelCommaOrAssignment(in: rhs) else {
+            return nil
+        }
+
+        var lhsWords = lhs.split(whereSeparator: \.isWhitespace).map(String.init)
+        if lhsWords.first == "const" { lhsWords.removeFirst() }
+        let width: Int
+        switch lhsWords.count {
+        case 2:
+            // `TYPE NAME`. 이름에 `[`가 있으면 배열 선언이다.
+            guard let w = widths[lhsWords[0]], !lhsWords[1].contains("[") else { return nil }
+            width = w
+        case 1:
+            // `NAME`. 스위즐(`v.xy = …`)이나 첨자는 받는 쪽 타입이 달라 건너뛴다.
+            guard let w = varyingWidth[lhsWords[0]] else { return nil }
+            width = w
+        default:
+            return nil
+        }
+        let indent = line.prefix { $0 == " " || $0 == "\t" }
+        return "\(indent)\(lhs) = wfTo\(width)(\(rhs));"
+    }
+
+    /// 괄호 밖에 `,`나 `=`가 있는지. `float a = 1, b = 2;`나 `a = b = c;`는
+    /// 한 값이 아니라 감싸면 깨진다.
+    private static func topLevelCommaOrAssignment(in expression: String) -> Bool {
+        var depth = 0
+        var previous: Character = " "
+        for character in expression {
+            switch character {
+            case "(", "[": depth += 1
+            case ")", "]": depth -= 1
+            case ",": if depth == 0 { return true }
+            case "=":
+                // `==`는 비교다. 앞 글자가 `=`이거나 비교 연산자면 넘어간다.
+                if depth == 0, !"=<>!".contains(previous) { return true }
+            default: break
+            }
+            previous = character
+        }
+        return false
+    }
+
+    /// C++의 대체 토큰을 이름으로 쓴 것을 바꾼다.
+    ///
+    /// `or`·`and`·`not` 같은 낱말은 C++에서 연산자다(`||`·`&&`·`!`). GLSL에서는
+    /// 그냥 이름이라 실물 창작마당 셰이더가 `vec2 or = mul(o, _rot);`로 쓴다.
+    /// Metal은 그 줄에서 통째로 떨어진다. 뒤에 밑줄을 붙여 이름으로 만든다.
+    static func rewritingReservedIdentifiers(_ source: String) -> String {
+        let reserved: Set<String> = [
+            "or", "and", "not", "xor", "bitand", "bitor", "compl",
+            "and_eq", "or_eq", "xor_eq", "not_eq",
+        ]
+        var out = ""
+        out.reserveCapacity(source.count)
+        var word = ""
+        func flush() {
+            out += reserved.contains(word) ? word + "_" : word
+            word = ""
+        }
+        for character in source {
+            if character.isLetter || character.isNumber || character == "_" {
+                word.append(character)
+            } else {
+                flush()
+                out.append(character)
+            }
+        }
+        flush()
+        return out
+    }
+
+    /// GLSL의 배열 생성자 `vec3[](a, b, c)`·`vec3[4](…)`를 C++ 초기화 목록
+    /// `{a, b, c}`로 바꾼다. 실물 창작마당 셰이더가 잡음 상수표를 이렇게 적는다.
+    static func rewritingArrayConstructors(_ source: String) -> String {
+        var characters = Array(source)
+        var index = 0
+        while index < characters.count {
+            // `[`를 찾고, 그 앞이 타입 이름이며 `]` 뒤에 `(`가 오는지 본다.
+            guard characters[index] == "[" else { index += 1; continue }
+            var close = index + 1
+            while close < characters.count, characters[close].isNumber { close += 1 }
+            guard close < characters.count, characters[close] == "]" else { index += 1; continue }
+            var open = close + 1
+            while open < characters.count, characters[open] == " " { open += 1 }
+            guard open < characters.count, characters[open] == "(" else { index += 1; continue }
+            // 앞의 타입 이름.
+            var typeStart = index
+            while typeStart > 0,
+                  characters[typeStart - 1].isLetter || characters[typeStart - 1].isNumber
+                    || characters[typeStart - 1] == "_" {
+                typeStart -= 1
+            }
+            guard typeStart < index else { index += 1; continue }
+            // 짝이 맞는 `)`를 찾는다.
+            var depth = 0
+            var end = open
+            var found = false
+            while end < characters.count {
+                if characters[end] == "(" { depth += 1 }
+                if characters[end] == ")" {
+                    depth -= 1
+                    if depth == 0 { found = true; break }
+                }
+                end += 1
+            }
+            guard found else { index += 1; continue }
+            characters[end] = "}"
+            characters.replaceSubrange(typeStart...open, with: Array("{"))
+            index = typeStart + 1
+        }
+        return String(characters)
     }
 
     /// `a % b`를 `wfMod(a, b)` 호출로 바꾼다.
@@ -555,6 +704,14 @@ public enum GLSLTranslator {
         // 값이 조용히 뒤바뀐다. `[[user(이름)]]`으로 **이름으로** 맞물리게 한다.
         out += "struct Varyings {\n    float4 position [[position]];\n"
         for varying in parsed.varyings {
+            // 행렬은 `stage_in`에 못 들어간다. 열마다 벡터 하나로 펼친다.
+            if let columns = matrixColumns(varying.type) {
+                for column in 0..<columns.count {
+                    let name = "\(varying.name)_c\(column)"
+                    out += "    \(columns.type) \(name) [[user(\(name))]];\n"
+                }
+                continue
+            }
             for name in flattenedNames(varying.name, count: varying.count) {
                 out += "    \(varying.type) \(name) [[user(\(name))]];\n"
             }
@@ -649,6 +806,13 @@ public enum GLSLTranslator {
             }
             var copyOut: [String] = ["    varyingsOut.position = context.gl_Position;"]
             for varying in parsed.varyings {
+                if let columns = matrixColumns(varying.type) {
+                    for column in 0..<columns.count {
+                        copyOut.append(
+                            "    varyingsOut.\(varying.name)_c\(column) = context.\(varying.name)[\(column)];")
+                    }
+                    continue
+                }
                 for (offset, name) in flattenedNames(
                     varying.name, count: varying.count).enumerated() {
                     let source = varying.count == nil
@@ -672,6 +836,13 @@ public enum GLSLTranslator {
             """
         case .fragment:
             for varying in parsed.varyings {
+                if let columns = matrixColumns(varying.type) {
+                    let parts = (0..<columns.count)
+                        .map { "varyingsIn.\(varying.name)_c\($0)" }
+                        .joined(separator: ", ")
+                    setup.append("    context.\(varying.name) = \(varying.type)(\(parts));")
+                    continue
+                }
                 for (offset, name) in flattenedNames(
                     varying.name, count: varying.count).enumerated() {
                     let target = varying.count == nil
@@ -699,6 +870,20 @@ public enum GLSLTranslator {
 
     /// 배열이면 `v_TexCoord_0`처럼 성분 이름으로 펼친다. 아니면 이름 하나.
     /// `stage_in` 구조체는 배열을 못 담는다 — 경계에서만 펼치고 안에서는 배열로 쓴다.
+    /// 행렬 varying의 열 수와 열 타입. 행렬이 아니면 nil.
+    ///
+    /// Metal의 `stage_in`에는 행렬을 못 넣는다. 실물 커서 물결 이펙트가
+    /// `varying mat3 v_XForm`을 쓴다 — 열마다 벡터로 나눠 나르고 받는 쪽에서
+    /// 다시 붙인다. 컨텍스트 구조체 안에서는 진짜 행렬이라 본문은 그대로다.
+    static func matrixColumns(_ type: String) -> (count: Int, type: String)? {
+        switch type {
+        case "mat2": return (2, "vec2")
+        case "mat3": return (3, "vec3")
+        case "mat4": return (4, "vec4")
+        default: return nil
+        }
+    }
+
     static func flattenedNames(_ name: String, count: Int?) -> [String] {
         guard let count, count > 0 else { return [name] }
         return (0..<count).map { "\(name)_\($0)" }

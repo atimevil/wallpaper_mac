@@ -102,22 +102,77 @@ final class GLSLTranslatorTests: XCTestCase {
 
     /// WE는 HLSL식 암묵적 벡터 절단을 허용한다. 실물 `shimmer`가
     /// `vec3 c = texSample2D(...)`로 쓰는데 샘플링은 float4를 준다.
-    func testSampleResultIsTruncatedExplicitly() {
+    /// 받는 쪽 타입으로 감싸면 프렐류드의 오버로드가 잘라 준다.
+    func testDeclarationInitializerIsWrappedByTargetType() {
         XCTAssertEqual(
-            GLSLTranslator.rewritingSampleTruncation("\tvec3 c = texSample2D(g_T, uv);"),
-            "\tvec3 c = texSample2D(g_T, uv).xyz;")
+            GLSLTranslator.rewritingTruncation("\tvec3 c = texSample2D(g_T, uv);"),
+            "\tvec3 c = wfTo3(texSample2D(g_T, uv));")
+        XCTAssertEqual(
+            GLSLTranslator.rewritingTruncation("\tfloat mask = texSample2D(g_T, uv);"),
+            "\tfloat mask = wfTo1(texSample2D(g_T, uv));")
+        XCTAssertEqual(
+            GLSLTranslator.rewritingTruncation("\tconst vec2 c = v_TexCoord;"),
+            "\tconst vec2 c = wfTo2(v_TexCoord);")
     }
 
-    /// 이미 스위즐이 붙어 있으면 또 붙이면 안 된다.
-    func testExistingSwizzleIsNotDoubled() {
-        let source = "\tvec3 c = texSample2D(g_T, uv).rgb;"
-        XCTAssertEqual(GLSLTranslator.rewritingSampleTruncation(source), source)
+    /// 대입문은 받는 쪽이 varying일 때만 안다. 실물 `cloudmotion`이
+    /// `v_NoiseCoord = v_TexCoord;`(vec2 ← vec4)로 쓴다.
+    func testAssignmentToVaryingIsWrapped() {
+        let source = "varying vec2 v_NoiseCoord;\nvarying vec4 v_TexCoord;\n"
+            + "void main() {\n\tv_NoiseCoord = v_TexCoord;\n\tv_NoiseCoord.x *= 2.0;\n}"
+        let out = GLSLTranslator.rewritingTruncation(source)
+        XCTAssertTrue(out.contains("\tv_NoiseCoord = wfTo2(v_TexCoord);"), out)
+        XCTAssertTrue(out.contains("\tv_NoiseCoord.x *= 2.0;"), "스위즐 대입은 그대로")
     }
 
-    /// `vec4`는 절단이 아니다. 건드리면 `.xyz`가 붙어 성분이 하나 사라진다.
-    func testVec4AssignmentIsUntouched() {
-        let source = "\tvec4 c = texSample2D(g_T, uv);"
-        XCTAssertEqual(GLSLTranslator.rewritingSampleTruncation(source), source)
+    /// 두 값을 한 줄에 선언하거나 `==`·`+=`가 낀 줄은 건드리면 깨진다.
+    func testMultiDeclaratorsAndCompoundOperatorsAreUntouched() {
+        for source in ["\tfloat a = 1.0, b = 2.0;", "\tfloat x += y;", "\tif (a == b) c = 1.0;",
+                       "\tfloat arr[2] = {1.0, 2.0};", "\tfor (float i = 0.0; i < 3.0; i++) {"] {
+            XCTAssertEqual(GLSLTranslator.rewritingTruncation(source), source, source)
+        }
+    }
+
+    /// `or`·`and`·`not`은 C++에서 연산자다. 실물 창작마당 셰이더가
+    /// `vec2 or = mul(o, _rot);`로 쓴다.
+    func testReservedAlternativeTokensAreRenamed() {
+        XCTAssertEqual(
+            GLSLTranslator.rewritingReservedIdentifiers("vec2 or = mul(o, _rot); float ore = or.x;"),
+            "vec2 or_ = mul(o, _rot); float ore = or_.x;")
+    }
+
+    /// GLSL 배열 생성자 `vec3[](…)`는 C++의 `{…}`다.
+    func testArrayConstructorBecomesInitializerList() {
+        XCTAssertEqual(
+            GLSLTranslator.rewritingArrayConstructors(
+                "const vec3 n[2] = vec3[](vec3(1.0, 2.0, 3.0), vec3(4.0, 5.0, 6.0));"),
+            "const vec3 n[2] = {vec3(1.0, 2.0, 3.0), vec3(4.0, 5.0, 6.0)};")
+        XCTAssertEqual(
+            GLSLTranslator.rewritingArrayConstructors("float f[2] = float[2](0.5, 1.0);"),
+            "float f[2] = {0.5, 1.0};")
+        // 첨자는 배열 생성자가 아니다.
+        XCTAssertEqual(GLSLTranslator.rewritingArrayConstructors("x = arr[0] * (y);"),
+                       "x = arr[0] * (y);")
+    }
+
+    /// 행렬 varying은 열마다 벡터로 나눠 나른다. Metal의 `stage_in`에는 행렬을
+    /// 못 넣는다. 실물 커서 물결 이펙트가 `varying mat3 v_XForm`을 쓴다.
+    func testMatrixVaryingIsSplitIntoColumns() throws {
+        let vertex = try GLSLTranslator.translate("""
+        varying mat3 v_XForm;
+        void main() { v_XForm = mat3(1.0); gl_Position = vec4(0.0); }
+        """, stage: .vertex, entryPoint: "v")
+        XCTAssertTrue(vertex.source.contains("vec3 v_XForm_c0 [[user(v_XForm_c0)]]"), vertex.source)
+        XCTAssertTrue(vertex.source.contains("varyingsOut.v_XForm_c2 = context.v_XForm[2];"))
+        XCTAssertFalse(vertex.source.contains("mat3 v_XForm [[user"), "행렬이 그대로 들어갔다")
+
+        let fragment = try GLSLTranslator.translate("""
+        varying mat3 v_XForm;
+        void main() { gl_FragColor = vec4(mul(vec3(1.0), v_XForm), 1.0); }
+        """, stage: .fragment, entryPoint: "f")
+        XCTAssertTrue(fragment.source.contains(
+            "context.v_XForm = mat3(varyingsIn.v_XForm_c0, varyingsIn.v_XForm_c1, varyingsIn.v_XForm_c2);"),
+            fragment.source)
     }
 
     /// 유니폼 주석이 씬 값과 이어 붙일 **유일한** 근거다.
@@ -248,7 +303,7 @@ final class GLSLTranslatorTests: XCTestCase {
         """)
         XCTAssertTrue(result.source.contains("void scatter(vec2 uv, thread vec3& result)"),
                       "인자 한정자 변환이 파이프라인에 안 걸려 있다")
-        XCTAssertTrue(result.source.contains("texSample2D(g_Texture0, uv).xyz;"),
+        XCTAssertTrue(result.source.contains("wfTo3(texSample2D(g_Texture0, uv));"),
                       "절단 변환이 파이프라인에 안 걸려 있다")
     }
 

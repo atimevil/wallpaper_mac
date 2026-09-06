@@ -45,11 +45,53 @@ public enum ShaderPrelude {
     #define CAST2(x) float2(x)
     #define CAST3(x) float3(x)
     #define CAST4(x) float4(x)
-    #define CAST3X3(x) float3x3(x)
+    // `mat3(m4)`처럼 큰 행렬에서 작은 행렬을 뜯는 것은 GLSL에 있고 C++에는 없다.
+    // 실물 시차 이펙트가 `CAST3X3(g_EffectTextureProjectionMatrixInverse)`로 쓴다.
+    #define CAST3X3(x) wfCast3x3(x)
     #define CASTU(x) uint(x)
 
     // `saturate`는 Metal에 이미 있다. 우리가 또 만들면 호출이 모호해져
     // 그 셰이더가 통째로 컴파일에 실패한다(실물 8개가 이 때문에 떨어졌다).
+
+    inline float3x3 wfCast3x3(float3x3 m) { return m; }
+    inline float3x3 wfCast3x3(float4x4 m) {
+        return float3x3(m[0].xyz, m[1].xyz, m[2].xyz);
+    }
+
+    // 받는 쪽 타입에 맞춘다. 번역기가 `TYPE x = EXPR;`의 EXPR을 이걸로 감싼다.
+    // 같은 타입이면 항등, 넓으면 자르고(HLSL식 암묵적 절단), 스칼라면 펼친다.
+    inline float wfTo1(float v) { return v; }
+    inline float wfTo1(float2 v) { return v.x; }
+    inline float wfTo1(float3 v) { return v.x; }
+    inline float wfTo1(float4 v) { return v.x; }
+    inline float wfTo1(int v) { return float(v); }
+    inline float wfTo1(uint v) { return float(v); }
+    inline float wfTo1(bool v) { return v ? 1.0 : 0.0; }
+    inline float2 wfTo2(float v) { return float2(v); }
+    inline float2 wfTo2(float2 v) { return v; }
+    inline float2 wfTo2(float3 v) { return v.xy; }
+    inline float2 wfTo2(float4 v) { return v.xy; }
+    inline float2 wfTo2(int v) { return float2(float(v)); }
+    inline float2 wfTo2(int2 v) { return float2(v); }
+    inline float3 wfTo3(float v) { return float3(v); }
+    inline float3 wfTo3(float2 v) { return float3(v, 0.0); }
+    inline float3 wfTo3(float3 v) { return v; }
+    inline float3 wfTo3(float4 v) { return v.xyz; }
+    inline float3 wfTo3(int v) { return float3(float(v)); }
+    inline float3 wfTo3(int3 v) { return float3(v); }
+    inline float4 wfTo4(float v) { return float4(v); }
+    inline float4 wfTo4(float2 v) { return float4(v, 0.0, 1.0); }
+    inline float4 wfTo4(float3 v) { return float4(v, 1.0); }
+    inline float4 wfTo4(float4 v) { return v; }
+    inline float4 wfTo4(int v) { return float4(float(v)); }
+    inline float4 wfTo4(int4 v) { return float4(v); }
+
+    // `max(0, x)`처럼 정수 리터럴과 실수를 섞으면 C++에서는 모호하다.
+    // GLSL·HLSL은 정수를 실수로 올린다. 실물 물결·점행렬 이펙트가 이렇게 쓴다.
+    inline float max(int a, float b) { return max(float(a), b); }
+    inline float max(float a, int b) { return max(a, float(b)); }
+    inline float min(int a, float b) { return min(float(a), b); }
+    inline float min(float a, int b) { return min(a, float(b)); }
 
     // 행벡터 관례. v가 왼쪽이다.
     inline float2 mul(float2 v, float2x2 m) { return v * m; }
