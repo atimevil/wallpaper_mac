@@ -16,6 +16,11 @@ public struct Particle: Equatable, Sendable {
     /// `animationmode: randomframe`인 프리셋은 파티클마다 **한 장을 골라 고정**한다.
     /// 수명에 따라 훑으면 빗방울이 16장을 오가며 깜빡인다(실물에서 확인).
     public var frameSeed: Double = 0
+    /// 태어날 때 정해진 크기와 투명도. 수명에 따라 변하는 연산자들이 **여기서부터**
+    /// 다시 계산한다. 직전 프레임 값에 곱하면 프레임마다 복리로 줄어들어,
+    /// 화면 주사율이 다르면 같은 배경화면이 다르게 보인다.
+    public var baseSize: Double = 1
+    public var baseAlpha: Double = 1
 
     public var isAlive: Bool {
         age < lifetime
@@ -74,6 +79,9 @@ public final class ParticleSystem {
     /// 조용히 무시하면 사용자가 레이어가 안 움직이는 이유를 알 수 없고,
     /// 나중에 렌더러 버그로 오인된다.
     public private(set) var unimplementedOperators: [String] = []
+    /// 매 프레임 기준값으로 되돌릴지. 연산자 목록을 프레임마다 훑지 않으려고 미리 센다.
+    private let hasSizeChange: Bool
+    private let hasAlphaFade: Bool
 
     public init(preset: ParticlePreset, random: RandomSource) {
         self.preset = preset
@@ -107,6 +115,12 @@ public final class ParticleSystem {
             }
         }
         self.unimplementedOperators = Array(unimplemented).sorted()
+        self.hasSizeChange = preset.operators.contains {
+            if case .sizeChange = $0 { return true } else { return false }
+        }
+        self.hasAlphaFade = preset.operators.contains {
+            if case .alphaFade = $0 { return true } else { return false }
+        }
     }
 
     /// Returns only alive particles.
@@ -384,6 +398,10 @@ public final class ParticleSystem {
             applyInitializer(initializer, to: &particle)
         }
 
+        // 초기화자가 끝난 값이 기준값이다.
+        particle.baseSize = particle.size
+        particle.baseAlpha = particle.alpha
+
         return particle
     }
 
@@ -469,6 +487,12 @@ public final class ParticleSystem {
         for i in 0..<particleBuffer.count {
             guard particleBuffer[i].isAlive else { continue }
 
+            // 수명에 따라 곱하는 연산자들은 기준값에서 다시 시작한다.
+            // 여러 개가 겹쳐 곱해지되(섬광은 커지는 것과 작아지는 것 둘이다),
+            // 프레임을 넘어 쌓이지는 않는다.
+            if hasSizeChange { particleBuffer[i].size = particleBuffer[i].baseSize }
+            if hasAlphaFade { particleBuffer[i].alpha = particleBuffer[i].baseAlpha }
+
             for op in preset.operators {
                 applyOperator(op, to: &particleBuffer[i], dt: dt)
             }
@@ -526,22 +550,34 @@ public final class ParticleSystem {
             )
 
         case .alphaFade(let fadeInTime, let fadeOutTime):
-            // Fade is computed fresh each frame based on age, not accumulated
-            var alpha = 1.0
-
-            if fadeInTime > 0 && particle.age < fadeInTime {
-                // Fade in from 0 to 1
-                alpha = particle.age / fadeInTime
-            } else if fadeOutTime > 0 {
-                let fadeOutStart = particle.lifetime - fadeOutTime
-                if particle.age >= fadeOutStart {
-                    // Fade out from 1 to 0
-                    let timeInFadeOut = particle.age - fadeOutStart
-                    alpha = 1.0 - (timeInFadeOut / fadeOutTime)
-                }
+            // 시각은 수명 대비 비율이다. 나이를 그대로 쓰면 수명이 0.3초짜리
+            // 물방울이 `fadeouttime: 0.9`에 걸려 통째로 사라진다.
+            guard particle.lifetime > 0 else { return }
+            let progress = min(max(particle.age / particle.lifetime, 0), 1)
+            var factor = 1.0
+            if fadeInTime > 0, progress < fadeInTime {
+                factor = progress / fadeInTime
             }
+            if fadeOutTime < 1, progress > fadeOutTime {
+                factor = min(factor, (1 - progress) / (1 - fadeOutTime))
+            }
+            particle.alpha = max(0, min(1, particle.baseAlpha * factor))
 
-            particle.alpha = max(0, min(1, alpha))
+        case .sizeChange(let startTime, let endTime, let startValue, let endValue):
+            guard particle.lifetime > 0 else { return }
+            let progress = min(max(particle.age / particle.lifetime, 0), 1)
+            let factor: Double
+            if progress <= startTime {
+                factor = startValue
+            } else if progress >= endTime || endTime <= startTime {
+                factor = endValue
+            } else {
+                let t = (progress - startTime) / (endTime - startTime)
+                factor = startValue + (endValue - startValue) * t
+            }
+            // 겹쳐 곱한다. 실물 섬광은 앞 절반에 0→1로 커지는 것과 뒤 절반에
+            // 1→0으로 작아지는 것 둘을 함께 건다.
+            particle.size = max(0, particle.size * factor)
 
         case .oscillatePosition(let mask, let scaleMin, let scaleMax, let frequencyMin, let frequencyMax, let phaseMin, let phaseMax):
             let scale = scaleMin + random.next() * (scaleMax - scaleMin)

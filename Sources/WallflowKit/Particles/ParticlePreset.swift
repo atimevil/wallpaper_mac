@@ -100,7 +100,20 @@ public enum ParticleInitializer: Equatable, Sendable {
 public enum ParticleOperator: Equatable, Sendable {
     case movement(gravity: Vec3, drag: Double)
     case angularMovement(force: Vec3, drag: Double)
+    /// 수명 중 어느 **지점**에서 나타나고 사라지는지. 초가 아니라 0~1 비율이다.
+    ///
+    /// 실물이 `fadeintime: 0.1, fadeouttime: 0.9`처럼 짝으로 적고,
+    /// `rain_splashes_droplets`는 수명이 0.3~0.5초인데 `fadeouttime: 0.9`다 —
+    /// 초로 읽으면 태어나기도 전에 사라져야 한다. 비율이 유일하게 말이 된다.
     case alphaFade(fadeInTime: Double, fadeOutTime: Double)
+    /// 수명에 따라 크기에 곱하는 값. 실물에서 세 번째로 많이 쓰는 연산자다(112곳).
+    ///
+    /// 값은 처음 크기에 **곱한다** — `startvalue: 2`로 적은 프리셋이 있어 절대
+    /// 크기일 수 없다. 시각도 0~1 비율이고, 구간 밖에서는 양 끝값으로 붙어 있다.
+    /// 불꽃 섬광이 이걸로 0에서 부풀었다 꺼진다. 없으면 1200px짜리 원반이
+    /// 수명 내내 그대로 떠서 화면이 하얗게 날아간다.
+    case sizeChange(startTime: Double, endTime: Double,
+                    startValue: Double, endValue: Double)
     case oscillatePosition(mask: Vec3, scaleMin: Double, scaleMax: Double,
                            frequencyMin: Double, frequencyMax: Double,
                            phaseMin: Double, phaseMax: Double)
@@ -378,8 +391,8 @@ public struct ParticlePreset: Equatable, Sendable {
             "colorrandom", "rotationrandom", "angularvelocityrandom", "turbulentvelocityrandom"
         ])
         let knownOperatorNames = Set<String>([
-            "movement", "angularmovement", "alphafade", "oscillateposition",
-            "oscillatealpha", "controlpointattract"
+            "movement", "angularmovement", "alphafade", "sizechange",
+            "oscillateposition", "oscillatealpha", "controlpointattract"
         ])
 
         // Parse maxCount with clamping
@@ -694,9 +707,19 @@ public struct ParticlePreset: Equatable, Sendable {
             return .angularMovement(force: force, drag: drag)
 
         case "alphafade":
+            // 안 적으면 그 쪽으로는 흐려지지 않는다. 편집기가 기본값을 안 적는
+            // 형식이라 맨 `alphafade`(실물 29곳)의 기본값은 확실하지 않다 —
+            // 확실하지 않은 쪽으로 지어내느니 그대로 두는 편이 덜 틀린다.
             let fadeInTime = getDouble(dict["fadeintime"]) ?? 0
-            let fadeOutTime = getDouble(dict["fadeouttime"]) ?? 0
+            let fadeOutTime = getDouble(dict["fadeouttime"]) ?? 1
             return .alphaFade(fadeInTime: fadeInTime, fadeOutTime: fadeOutTime)
+
+        case "sizechange":
+            return .sizeChange(
+                startTime: getDouble(dict["starttime"]) ?? 0,
+                endTime: getDouble(dict["endtime"]) ?? 1,
+                startValue: getDouble(dict["startvalue"]) ?? 1,
+                endValue: getDouble(dict["endvalue"]) ?? 0)
 
         case "oscillateposition":
             // 모든 필드 선택
