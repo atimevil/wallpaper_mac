@@ -152,6 +152,12 @@ public struct SceneLayer: Equatable, Sendable {
     public let tint: Vec3
     /// 화면 평면 회전(라디안). 부모 사슬의 회전이 이미 합쳐져 있다.
     public let rotation: Double
+    /// 부모 사슬이 합쳐진 크기 배율.
+    ///
+    /// 이미지 레이어는 `size`에 이미 곱해져 있지만, 파티클은 크기가 프리셋에서
+    /// 오므로 렌더러가 따로 곱해야 한다. 무시하면 씬이 의도한 것보다 크거나
+    /// 작게 날린다 — 실물 배율이 0.44부터 9.0까지 있다.
+    public let scale: Vec3
     public let content: LayerContent
     /// `visible`/`alpha`에 붙은 스크립트 본문들. 미디어 위젯이 여기서 스스로 숨는다.
     public let displayScripts: [String]
@@ -166,9 +172,11 @@ public struct SceneLayer: Equatable, Sendable {
         id: Int, name: String, visible: Bool, origin: Vec3, size: Vec2,
         content: LayerContent, unrunScripts: [String] = [],
         alpha: Double = 1, tint: Vec3 = Vec3(x: 1, y: 1, z: 1),
-        rotation: Double = 0, displayScripts: [String] = []
+        rotation: Double = 0, displayScripts: [String] = [],
+        scale: Vec3 = Vec3(x: 1, y: 1, z: 1)
     ) {
         self.displayScripts = displayScripts
+        self.scale = scale
         self.alpha = alpha
         self.tint = tint
         self.rotation = rotation

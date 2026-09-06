@@ -237,7 +237,7 @@ public struct SceneDocument: Sendable {
                 size: size ?? Vec2(x: 0, y: 0),
                 content: .unsupported(reason: reason), unrunScripts: unrun,
                 alpha: alpha, tint: tint, rotation: rotation,
-                displayScripts: displayScripts
+                displayScripts: displayScripts, scale: transform.scale
             )
         }
 
@@ -252,7 +252,7 @@ public struct SceneDocument: Sendable {
                 id: id, name: name, visible: visible,
                 origin: origin, size: particleSize,
                 content: content, unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation,
-                displayScripts: displayScripts
+                displayScripts: displayScripts, scale: transform.scale
             )
         }
 
@@ -270,7 +270,7 @@ public struct SceneDocument: Sendable {
                     origin: origin, size: size ?? Vec2(x: 0, y: 0),
                     content: .text(makeTextLayer(text, object: object)),
                     unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation,
-                    displayScripts: displayScripts)
+                    displayScripts: displayScripts, scale: transform.scale)
             }
             if let sound = makeSoundLayer(object) {
                 // 소리는 화면을 차지하지 않는다. origin이 없어도 상관없다.
@@ -280,7 +280,7 @@ public struct SceneDocument: Sendable {
                     size: size ?? Vec2(x: 0, y: 0),
                     content: .sound(sound), unrunScripts: unrun,
                     alpha: alpha, tint: tint, rotation: rotation,
-                    displayScripts: displayScripts)
+                    displayScripts: displayScripts, scale: transform.scale)
             }
             if object["sound"] != nil { return unsupported("소리 파일 목록을 읽지 못했다") }
             // 도형 레이어. 실물에서 빛줄기(Rayons lumineux)가 이 형태인데,
@@ -305,7 +305,7 @@ public struct SceneDocument: Sendable {
             id: id, name: name, visible: visible,
             origin: origin, size: size,
             content: content, unrunScripts: unrun, alpha: alpha, tint: tint,
-            rotation: rotation, displayScripts: displayScripts
+            rotation: rotation, displayScripts: displayScripts, scale: transform.scale
         )
     }
 

@@ -57,6 +57,14 @@ final class ParticleRenderer {
     /// 레이어의 직교 공간 원점. 프리셋의 이미터 좌표는 이 원점을 기준으로 한
     /// 상대 좌표라, 그리기 전에 더해야 화면의 제자리에 나온다.
     private let layerOrigin: SIMD3<Float>
+    /// 레이어의 크기 배율. 파티클의 위치와 크기에 함께 곱해진다.
+    ///
+    /// 무시하면 씬이 의도한 것보다 크거나 작게 날린다. 실물 레이어의 배율이
+    /// 0.44부터 9.0까지 있어서 차이가 크다. 음수는 좌우 반전이라 위치에는
+    /// 부호를 그대로 쓰고, 크기에는 절댓값을 쓴다.
+    private let layerScale: SIMD3<Float>
+    /// 빌보드 크기에 곱할 배율. 축마다 다른 배율을 하나로 줄여야 해서 평균을 쓴다.
+    private let sizeScale: Float
 
     private var instanceCount = 0
     private var textureRatio: Float = 1
@@ -74,9 +82,14 @@ final class ParticleRenderer {
         texture: MTLTexture,
         sampler: MTLSamplerState,
         layerOrigin: SIMD3<Float>,
+        layerScale: SIMD3<Float>,
         sheet: ParticleSpriteSheet?
     ) throws {
         self.layerOrigin = layerOrigin
+        self.layerScale = layerScale
+        // 빌보드는 정사각형 하나라 축별 배율을 표현할 수 없다. 평균이 가장 덜 틀린다.
+        let averaged = (abs(layerScale.x) + abs(layerScale.y)) / 2
+        self.sizeScale = averaged.isFinite && averaged > 0 ? averaged : 1
         self.sheet = sheet
         // 배치가 어긋나면 컴파일은 통과하고 파티클만 엉뚱한 자리·크기로 나온다.
         // 그건 셰이더 버그처럼 보여서 원인을 찾는 데 오래 걸린다. 차라리 여기서
@@ -138,10 +151,10 @@ final class ParticleRenderer {
         for i in 0..<count {
             let p = live[i]
             pointer[i] = ParticleInstance(
-                positionX: layerOrigin.x + Float(p.position.x),
-                positionY: layerOrigin.y + Float(p.position.y),
-                positionZ: layerOrigin.z + Float(p.position.z),
-                size: Float(p.size),
+                positionX: layerOrigin.x + Float(p.position.x) * layerScale.x,
+                positionY: layerOrigin.y + Float(p.position.y) * layerScale.y,
+                positionZ: layerOrigin.z + Float(p.position.z) * layerScale.z,
+                size: Float(p.size) * sizeScale,
                 rotationX: Float(p.rotation.x),
                 rotationY: Float(p.rotation.y),
                 rotationZ: Float(p.rotation.z),

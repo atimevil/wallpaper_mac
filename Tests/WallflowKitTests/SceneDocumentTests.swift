@@ -564,3 +564,33 @@ extension SceneDocumentTests {
         XCTAssertFalse(child.visible, "부모가 숨으면 자식도 숨어야 한다")
     }
 }
+
+extension SceneDocumentTests {
+    /// 파티클은 크기가 프리셋에서 오므로 레이어 배율을 따로 알아야 한다.
+    /// 무시하면 씬이 의도한 것보다 크거나 작게 날린다 — 실물 배율이 0.44~9.0이다.
+    func testLayerScaleIsExposedForParticles() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "L", "origin": "0 0 0", "size": "10 10",
+                      "scale": "2 3 1", "image": "models/x.json"}]}
+        """)
+        let layer = try XCTUnwrap(
+            try SceneDocument.load(from: reader, assets: nil).layers.first)
+        XCTAssertEqual(layer.scale.x, 2, accuracy: 0.001)
+        XCTAssertEqual(layer.scale.y, 3, accuracy: 0.001)
+    }
+
+    /// 부모의 배율도 합쳐져야 한다.
+    func testParentScaleComposesIntoLayerScale() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 1, "name": "부모", "origin": "0 0 0", "size": "10 10", "scale": "2 2 2"},
+           {"id": 2, "name": "자식", "parent": 1, "origin": "0 0 0", "size": "10 10",
+            "scale": "3 3 3", "image": "models/x.json"}]}
+        """)
+        let child = try XCTUnwrap(
+            try SceneDocument.load(from: reader, assets: nil).layers.first { $0.name == "자식" })
+        XCTAssertEqual(child.scale.x, 6, accuracy: 0.001, "부모 2 × 자식 3")
+    }
+}

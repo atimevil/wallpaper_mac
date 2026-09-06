@@ -398,6 +398,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                             maxCount: preset.maxCount, blend: blend, texture: texture,
                             layerOrigin: SIMD3(Float(layer.origin.x), Float(layer.origin.y),
                                                Float(layer.origin.z)),
+                            layerScale: SIMD3(Float(layer.scale.x), Float(layer.scale.y),
+                                              Float(layer.scale.z)),
                             sheet: Self.spriteSheet(of: raw))
                         // 시드를 레이어 id로 나눠 레이어마다 다른 수열을 쓴다.
                         // 같은 시드를 공유하면 눈과 벚꽃이 똑같이 움직인다.
