@@ -594,3 +594,27 @@ extension SceneDocumentTests {
         XCTAssertEqual(child.scale.x, 6, accuracy: 0.001, "부모 2 × 자식 3")
     }
 }
+
+extension SceneDocumentTests {
+    /// disablepropagation이 켜지면 부모 변환을 물려받지 않는다.
+    /// 보유 씬에서는 전부 0이지만, 1인 씬을 만나면 레이어가 부모를 따라
+    /// 엉뚱한 자리로 끌려간다.
+    func testDisablePropagationIgnoresParentTransform() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 1, "name": "부모", "origin": "50 50 0", "size": "10 10", "scale": "2 2 2"},
+           {"id": 2, "name": "따름", "parent": 1, "origin": "5 0 0", "size": "10 10",
+            "image": "models/x.json"},
+           {"id": 3, "name": "안따름", "parent": 1, "origin": "5 0 0", "size": "10 10",
+            "disablepropagation": 1, "image": "models/x.json"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        let follows = try XCTUnwrap(doc.layers.first { $0.name == "따름" })
+        let ignores = try XCTUnwrap(doc.layers.first { $0.name == "안따름" })
+        XCTAssertEqual(follows.origin.x, 60, accuracy: 0.001, "부모 50 + 자식 5×2")
+        XCTAssertEqual(follows.scale.x, 2, accuracy: 0.001)
+        XCTAssertEqual(ignores.origin.x, 5, accuracy: 0.001, "부모를 무시한 자기 좌표")
+        XCTAssertEqual(ignores.scale.x, 1, accuracy: 0.001)
+    }
+}

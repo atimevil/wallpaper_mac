@@ -161,8 +161,12 @@ public struct SceneDocument: Sendable {
             var chain: [[String: Any]] = [object]
             var seen: Set<Int> = [id]
             var current = object
+            // disablepropagation이 켜져 있으면 부모 변환을 물려받지 않는다.
+            // 보유한 씬에서는 전부 0이라 지금은 무해하지만, 1인 씬을 만나면
+            // 그 레이어가 부모를 따라 엉뚱한 자리로 끌려간다.
+            let inherits = !(boolValue(object["disablepropagation"]) ?? false)
             // 실물의 가장 깊은 사슬이 3단이다. 32면 충분히 관대하면서도 고리를 끊는다.
-            for _ in 0..<32 {
+            for _ in 0..<32 where inherits {
                 guard let parentID = current["parent"] as? Int,
                       !seen.contains(parentID),
                       let parent = byID[parentID] else { break }

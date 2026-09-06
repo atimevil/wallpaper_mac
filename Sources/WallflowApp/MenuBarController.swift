@@ -61,6 +61,12 @@ final class MenuBarController {
         }
 
         menu.addItem(.separator())
+        let login = NSMenuItem(
+            title: "로그인할 때 시작", action: #selector(toggleLogin), keyEquivalent: "")
+        login.target = self
+        login.state = LoginItem.isEnabled ? .on : .off
+        menu.addItem(login)
+
         let sound = NSMenuItem(
             title: "씬 소리", action: #selector(toggleSound), keyEquivalent: "s")
         sound.target = self
@@ -85,6 +91,20 @@ final class MenuBarController {
     }
 
     static let soundKey = "wallflow.soundEnabled"
+
+    @objc private func toggleLogin(_ sender: NSMenuItem) {
+        let enable = sender.state != .on
+        if let reason = LoginItem.setEnabled(enable) {
+            // 실패해도 체크 표시를 바꾸지 않는다. 켜졌다고 거짓말하면 안 된다.
+            let alert = NSAlert()
+            alert.messageText = enable ? "로그인 항목으로 등록하지 못했다" : "등록을 해제하지 못했다"
+            alert.informativeText = LoginItem.isDeniedByUser
+                ? "시스템 설정 > 일반 > 로그인 항목에서 Wallflow를 허용해 주세요."
+                : reason
+            alert.runModal()
+        }
+        sender.state = LoginItem.isEnabled ? .on : .off
+    }
 
     @objc private func toggleSound(_ sender: NSMenuItem) {
         let enabled = sender.state != .on
