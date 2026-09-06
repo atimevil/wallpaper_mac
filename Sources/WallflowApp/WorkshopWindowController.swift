@@ -15,24 +15,33 @@ final class WorkshopWindowController: NSWindowController {
     private let installer: WorkshopInstaller
     private let onLibraryChanged: () -> Void
 
-    private let tableView = NSTableView()
+    private let collectionView = NSCollectionView()
     private let searchField = NSSearchField()
     private let sortPopup = NSPopUpButton()
     private let kindPopup = NSPopUpButton()
     private let hideInstalledCheckbox =
         NSButton(checkboxWithTitle: "받은 것 숨기기", target: nil, action: nil)
     private let loginButton = NSButton(title: "스팀 로그인", target: nil, action: nil)
+    private let prevButton = NSButton(title: "◀", target: nil, action: nil)
+    private let nextButton = NSButton(title: "▶", target: nil, action: nil)
+    private let pageLabel = NSTextField(labelWithString: "1")
+    private let removeButton = NSButton(title: "라이브러리에서 빼기", target: nil, action: nil)
     private let accountField = NSTextField()
-    private let statusLabel = NSTextField(labelWithString: "")
+    fileprivate let statusLabel = NSTextField(labelWithString: "")
     private let downloadButton = NSButton(title: "받아서 추가", target: nil, action: nil)
     private let spinner = NSProgressIndicator()
 
-    private var items: [WorkshopItem] = []
-    private var thumbnails: [String: NSImage] = [:]
+    fileprivate var items: [WorkshopItem] = []
+    fileprivate var thumbnails: [String: NSImage] = [:]
     /// 진행 중인 목록 요청. 검색어를 빠르게 바꿀 때 옛 응답이 늦게 도착해
     /// 새 결과를 덮어쓰는 것을 막는다.
     private var loadGeneration = 0
     private var isDownloading = false
+    /// 1부터 센다. 스팀 목록의 페이지 번호다.
+    private var page = 1
+
+    /// 진행률 콜백이 창을 찾기 위한 자리. 창은 한 번에 하나만 뜬다.
+    private static weak var current: WorkshopWindowController?
 
     init(installer: WorkshopInstaller, onLibraryChanged: @escaping () -> Void) {
         self.installer = installer
@@ -46,6 +55,7 @@ final class WorkshopWindowController: NSWindowController {
         window.center()
         super.init(window: window)
         window.contentView = makeContentView()
+        Self.current = self
         reload()
     }
 
@@ -77,27 +87,43 @@ final class WorkshopWindowController: NSWindowController {
 
         let refreshButton = NSButton(title: "새로고침", target: self, action: #selector(reload))
 
+        prevButton.target = self
+        prevButton.action = #selector(previousPage)
+        nextButton.target = self
+        nextButton.action = #selector(nextPage)
+        pageLabel.alignment = .center
+        pageLabel.widthAnchor.constraint(equalToConstant: 28).isActive = true
+
         let top = NSStackView(views: [
-            searchField, sortPopup, kindPopup, hideInstalledCheckbox, refreshButton,
+            searchField, sortPopup, kindPopup, hideInstalledCheckbox,
+            prevButton, pageLabel, nextButton, refreshButton,
         ])
         top.orientation = .horizontal
         top.spacing = 8
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        tableView.headerView = nil
-        tableView.rowHeight = 68
-        tableView.dataSource = self
-        tableView.delegate = self
-        tableView.doubleAction = #selector(download)
-        tableView.target = self
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("item"))
-        column.resizingMask = .autoresizingMask
-        tableView.addTableColumn(column)
+        // 격자로 보여 준다. 흐름 배치라 창 너비가 바뀌면 한 줄에 들어가는 개수가
+        // 알아서 바뀐다. 배경화면은 그림이 본체라 표보다 격자가 맞다.
+        let layout = NSCollectionViewFlowLayout()
+        layout.itemSize = NSSize(width: 216, height: 168)
+        layout.minimumInteritemSpacing = 12
+        layout.minimumLineSpacing = 12
+        layout.sectionInset = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        collectionView.collectionViewLayout = layout
+        collectionView.dataSource = self
+        collectionView.delegate = self
+        collectionView.isSelectable = true
+        collectionView.allowsMultipleSelection = false
+        collectionView.backgroundColors = [.clear]
+        collectionView.register(
+            WorkshopGridItem.self,
+            forItemWithIdentifier: WorkshopGridItem.identifier)
 
         let scroll = NSScrollView()
-        scroll.documentView = tableView
+        scroll.documentView = collectionView
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
 
         accountField.placeholderString = "스팀 계정 이름"
         // 스팀 앱이 이미 로그인해 둔 계정 이름을 미리 채운다. 비밀번호가 아니다.
@@ -122,9 +148,12 @@ final class WorkshopWindowController: NSWindowController {
         loginButton.target = self
         loginButton.action = #selector(openLoginTerminal)
 
+        removeButton.target = self
+        removeButton.action = #selector(removeSelected)
+
         let bottom = NSStackView(views: [
             NSTextField(labelWithString: "계정:"), accountField, loginButton,
-            spinner, statusLabel, downloadButton,
+            spinner, statusLabel, removeButton, downloadButton,
         ])
         bottom.orientation = .horizontal
         bottom.spacing = 8
@@ -146,24 +175,56 @@ final class WorkshopWindowController: NSWindowController {
 
     // MARK: - 목록
 
+    @objc private func previousPage() {
+        guard page > 1, !isDownloading else { return }
+        page -= 1
+        loadPage()
+    }
+
+    @objc private func nextPage() {
+        guard !isDownloading else { return }
+        page += 1
+        loadPage()
+    }
+
+    /// 검색어나 정렬이 바뀌면 첫 페이지로 돌아간다. 3페이지를 보다가 검색하면
+    /// 결과가 3페이지부터 나오는 것은 사용자가 기대하는 동작이 아니다.
     @objc private func reload() {
+        page = 1
+        loadPage()
+    }
+
+    private func loadPage() {
+        pageLabel.stringValue = "\(page)"
+        prevButton.isEnabled = page > 1
         loadGeneration += 1
         let generation = loadGeneration
         let sort = WorkshopSort.allCases[max(0, sortPopup.indexOfSelectedItem)]
         let text = searchField.stringValue
+        let requested = page
         setBusy(true, status: "목록을 읽는 중…")
 
         Task { [weak self] in
             guard let self else { return }
             do {
-                let ids = try await client.listIDs(sort: sort, searchText: text)
+                let ids = try await client.listIDs(
+                    sort: sort, searchText: text, page: requested)
                 let fetched = try await client.details(ids: ids)
                 // 늦게 도착한 옛 요청이 새 결과를 덮어쓰지 않게 한다.
                 guard generation == self.loadGeneration else { return }
                 self.items = fetched
                 self.thumbnails.removeAll()
                 self.refreshTable()
-                self.setBusy(false, status: fetched.isEmpty ? "결과가 없다" : "\(fetched.count)개")
+                // 결과가 없으면 마지막 페이지를 지난 것이다. 되돌려 준다 —
+                // 빈 화면에 갇히면 사용자가 손쓸 방법이 없다.
+                if fetched.isEmpty, requested > 1 {
+                    self.page = requested - 1
+                    self.pageLabel.stringValue = "\(self.page)"
+                    self.setBusy(false, status: "마지막 페이지다")
+                    return
+                }
+                self.setBusy(false, status: fetched.isEmpty ? "결과가 없다"
+                    : "\(requested)페이지 · \(fetched.count)개")
                 self.loadThumbnails(generation: generation)
             } catch {
                 guard generation == self.loadGeneration else { return }
@@ -193,8 +254,15 @@ final class WorkshopWindowController: NSWindowController {
     }
 
     @objc private func refreshTable() {
-        tableView.reloadData()
+        collectionView.reloadData()
         updateDownloadButton()
+    }
+
+    /// 지금 고른 항목. 격자는 선택이 여러 개일 수 있으나 하나만 허용한다.
+    private var selectedItem: WorkshopItem? {
+        guard let index = collectionView.selectionIndexPaths.first?.item else { return nil }
+        let list = visibleItems
+        return index < list.count ? list[index] : nil
     }
 
     private func loadThumbnails(generation: Int) {
@@ -205,11 +273,10 @@ final class WorkshopWindowController: NSWindowController {
                       let image = NSImage(data: data) else { return }
                 guard let self, generation == self.loadGeneration else { return }
                 self.thumbnails[item.id] = image
-                // 보이는 줄만 다시 그린다. 전체 reload는 선택을 잃는다.
-                if let row = self.visibleItems.firstIndex(where: { $0.id == item.id }) {
-                    self.tableView.reloadData(
-                        forRowIndexes: IndexSet(integer: row),
-                        columnIndexes: IndexSet(integer: 0))
+                // 그 칸만 다시 그린다. 전체 reload는 선택을 잃는다.
+                if let index = self.visibleItems.firstIndex(where: { $0.id == item.id }) {
+                    self.collectionView.reloadItems(
+                        at: [IndexPath(item: index, section: 0)])
                 }
             }
         }
@@ -224,10 +291,7 @@ final class WorkshopWindowController: NSWindowController {
 
     @objc private func download() {
         guard !isDownloading else { return }
-        let row = tableView.selectedRow
-        let list = visibleItems
-        guard row >= 0, row < list.count else { return }
-        let item = list[row]
+        guard let item = selectedItem else { return }
 
         saveAccount()
         let account = accountField.stringValue.trimmingCharacters(in: .whitespaces)
@@ -247,9 +311,21 @@ final class WorkshopWindowController: NSWindowController {
         setBusy(true, status: "\(item.title) 받는 중…")
 
         Task { [weak self] in
+            // 진행률 줄은 임의 스레드에서 온다. 창을 직접 만지지 않고 메인으로 넘긴다.
+            // self를 클로저에 가두면 Sendable 검사에 걸리므로 갱신만 하는 함수를 넘긴다.
+            let report: @Sendable (String) -> Void = { line in
+                // steamcmd가 진행률을 이 모양으로 뱉는다:
+                // "Downloading item 123 ...", "Update state (0x61) downloading, progress: 42.11"
+                guard line.contains("%") || line.contains("progress")
+                        || line.contains("Downloading") else { return }
+                Task { @MainActor in
+                    WorkshopWindowController.current?.statusLabel.stringValue =
+                        String(line.prefix(70))
+                }
+            }
             let result: Result<Void, Error> = await Task.detached(priority: .utility) {
                 do {
-                    try steam.download(workshopID: item.id, login: account)
+                    try steam.download(workshopID: item.id, login: account, progress: report)
                     return .success(())
                 } catch {
                     return .failure(error)
@@ -344,16 +420,28 @@ final class WorkshopWindowController: NSWindowController {
         updateDownloadButton()
     }
 
-    private func updateDownloadButton() {
-        let row = tableView.selectedRow
-        let list = visibleItems
-        let hasSelection = row >= 0 && row < list.count
-        downloadButton.isEnabled = hasSelection && !isDownloading
-        if hasSelection, installer.isInstalled(id: list[row].id) {
-            downloadButton.title = "다시 받기"
-        } else {
-            downloadButton.title = "받아서 추가"
+    /// 라이브러리에서 링크만 걷는다. 받아 둔 원본은 남겨 다시 받지 않아도 되게 한다.
+    @objc private func removeSelected() {
+        guard let item = selectedItem else { return }
+        do {
+            if try installer.unlink(id: item.id) {
+                onLibraryChanged()
+                setBusy(false, status: "\(item.title) 뺐다")
+            } else {
+                setBusy(false, status: "라이브러리에 없다")
+            }
+            refreshTable()
+        } catch {
+            present(title: "빼지 못했다", message: Self.describe(error))
         }
+    }
+
+    private func updateDownloadButton() {
+        let item = selectedItem
+        let installed = item.map { installer.isInstalled(id: $0.id) } ?? false
+        downloadButton.isEnabled = item != nil && !isDownloading
+        removeButton.isEnabled = installed && !isDownloading
+        downloadButton.title = installed ? "다시 받기" : "받아서 추가"
     }
 
     private func present(title: String, message: String) {
@@ -377,45 +465,96 @@ final class WorkshopWindowController: NSWindowController {
     }
 }
 
-extension WorkshopWindowController: NSTableViewDataSource, NSTableViewDelegate {
-    func numberOfRows(in tableView: NSTableView) -> Int { visibleItems.count }
+/// 격자 한 칸. 미리보기 그림과 제목·부제를 보여 준다.
+final class WorkshopGridItem: NSCollectionViewItem {
+    static let identifier = NSUserInterfaceItemIdentifier("WorkshopGridItem")
 
-    func tableView(
-        _ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int
-    ) -> NSView? {
-        let list = visibleItems
-        guard row < list.count else { return nil }
-        let item = list[row]
+    private let preview = NSImageView()
+    private let nameLabel = NSTextField(labelWithString: "")
+    private let detailLabel = NSTextField(labelWithString: "")
+    private let box = NSView()
 
-        let image = NSImageView()
-        image.imageScaling = .scaleProportionallyUpOrDown
-        image.image = thumbnails[item.id]
-        image.widthAnchor.constraint(equalToConstant: 96).isActive = true
+    override func loadView() {
+        box.wantsLayer = true
+        box.layer?.cornerRadius = 8
+        box.layer?.borderWidth = 2
+        box.layer?.borderColor = NSColor.clear.cgColor
 
-        let title = NSTextField(labelWithString: item.title)
-        title.font = .systemFont(ofSize: 13, weight: .medium)
-        title.lineBreakMode = .byTruncatingTail
+        preview.imageScaling = .scaleProportionallyUpOrDown
+        preview.wantsLayer = true
+        preview.layer?.cornerRadius = 6
+        preview.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
 
+        nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.maximumNumberOfLines = 1
+        detailLabel.font = .systemFont(ofSize: 10)
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.lineBreakMode = .byTruncatingTail
+
+        let stack = NSStackView(views: [preview, nameLabel, detailLabel])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 3
+        stack.edgeInsets = NSEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: box.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: box.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+            preview.heightAnchor.constraint(equalToConstant: 110),
+            preview.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -12),
+        ])
+        view = box
+    }
+
+    func configure(item: WorkshopItem, image: NSImage?, installed: Bool) {
+        preview.image = image
+        nameLabel.stringValue = item.title
         let megabytes = Double(item.sizeBytes) / 1_000_000
-        var detail = String(format: "%@ · %.1f MB", item.kind.rawValue, megabytes)
-        if installer.isInstalled(id: item.id) { detail += " · 이미 있음" }
-        let subtitle = NSTextField(labelWithString: detail)
-        subtitle.font = .systemFont(ofSize: 11)
-        subtitle.textColor = .secondaryLabelColor
-
-        let text = NSStackView(views: [title, subtitle])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 2
-
-        let row = NSStackView(views: [image, text])
-        row.orientation = .horizontal
-        row.spacing = 10
-        row.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
-        return row
+        detailLabel.stringValue = String(format: "%@ · %.1f MB%@",
+                                      item.kind.rawValue, megabytes,
+                                      installed ? " · 이미 있음" : "")
     }
 
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        updateDownloadButton()
+    override var isSelected: Bool {
+        didSet {
+            box.layer?.borderColor = isSelected
+                ? NSColor.controlAccentColor.cgColor : NSColor.clear.cgColor
+            box.layer?.backgroundColor = isSelected
+                ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.25).cgColor
+                : NSColor.clear.cgColor
+        }
     }
+}
+
+extension WorkshopWindowController: NSCollectionViewDataSource, NSCollectionViewDelegate {
+    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int)
+        -> Int { visibleItems.count }
+
+    func collectionView(
+        _ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath
+    ) -> NSCollectionViewItem {
+        let cell = collectionView.makeItem(
+            withIdentifier: WorkshopGridItem.identifier, for: indexPath)
+        let list = visibleItems
+        if let grid = cell as? WorkshopGridItem, indexPath.item < list.count {
+            let item = list[indexPath.item]
+            grid.configure(item: item, image: thumbnailImage(for: item.id),
+                           installed: installer.isInstalled(id: item.id))
+        }
+        return cell
+    }
+
+    func collectionView(
+        _ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>
+    ) { updateDownloadButton() }
+
+    func collectionView(
+        _ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>
+    ) { updateDownloadButton() }
+
+    func thumbnailImage(for id: String) -> NSImage? { thumbnails[id] }
 }
