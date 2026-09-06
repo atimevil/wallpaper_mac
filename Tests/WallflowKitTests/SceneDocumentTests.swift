@@ -479,16 +479,46 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(texturePath, "materials/particle/chromaticdot.tex")
     }
 
-    /// 원근 투영 씬은 orthogonalprojection이 JSON null로 들어온다.
-    /// 실물 창작마당 씬 "Ocarina of Time"이 이 경우다. 값이 없는 것과
-    /// 뭉개면 파일이 깨진 것처럼 보여 원인을 찾는 데 오래 걸린다.
-    func testPerspectiveSceneIsReportedAsSuch() throws {
-        let reader = try makeScenePkg(scene: """
-        {"general": {"orthogonalprojection": null, "fov": 50}, "objects": []}
-        """)
-        XCTAssertThrowsError(try SceneDocument.load(from: reader, assets: nil)) { error in
-            XCTAssertEqual(error as? SceneError, .perspectiveProjectionUnsupported)
+    /// 재질이 자기 셰이더를 가지면 텍스처를 붙이는 이미지가 아니다. 실물 원근
+    /// 씬의 배경 구름이 `ps2menu`다 — 보통 이미지로 그리면 잡음 텍스처가 그대로
+    /// 보인다. 표준 가족(`genericimage4` 등)은 그대로 이미지다.
+    func testCustomMaterialShaderBecomesShadedImage() throws {
+        func content(shader: String) throws -> LayerContent {
+            let reader = try makeScenePkg(
+                scene: """
+                {"general": {"orthogonalprojection": null},
+                 "objects": [{"id": 1, "name": "Clouds", "image": "models/c.json", "size": "64 64"}]}
+                """,
+                extras: [
+                    "models/c.json": #"{"material": "materials/c.json"}"#,
+                    "materials/c.json":
+                        #"{"passes": [{"shader": "\#(shader)", "textures": ["util/noise"]}]}"#,
+                ])
+            return try XCTUnwrap(SceneDocument.load(from: reader).layers.first).content
         }
+        guard case .shadedImage(let material, let texture) = try content(shader: "ps2menu") else {
+            return XCTFail("셰이더 이미지여야 한다")
+        }
+        XCTAssertEqual(material, "materials/c.json")
+        XCTAssertEqual(texture, "materials/util/noise.tex")
+        guard case .image = try content(shader: "genericimage4") else {
+            return XCTFail("표준 셰이더는 보통 이미지다")
+        }
+    }
+
+    /// 원근 씬은 이제 연다. `orthogonalprojection: null`이면 카메라가 생기고
+    /// 직교 크기는 이름뿐인 값이다. 예전에는 여기서 던져 미리보기로 물러났다.
+    func testPerspectiveSceneLoadsWithCamera() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": null, "fov": 53, "nearz": 1, "farz": 10000},
+             "objects": []}
+            """,
+            extras: [:])
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertTrue(doc.isPerspective)
+        XCTAssertEqual(doc.camera?.fov, 53)
+        XCTAssertGreaterThan(doc.orthoWidth, 0)
     }
 
     /// 키가 아예 없는 것은 여전히 missingField다. 원근 씬과 구분되어야 한다.

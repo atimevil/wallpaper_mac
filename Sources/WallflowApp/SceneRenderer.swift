@@ -58,6 +58,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var parallaxOffset = SIMD2<Float>(0, 0)
     /// 씬의 직교 공간 크기. 시차 밀림을 그 단위로 계산한다.
     private var ortho = SIMD2<Float>(1, 1)
+    /// 원근 씬의 카메라. 직교 씬이면 nil이다. 스크립트가 움직일 수 있어 변수다.
+    private var camera: SceneCamera?
     /// 이 씬의 소리들. 사용자가 켤 때만 실제로 난다.
     private var sounds: [(player: AVAudioPlayer, sceneVolume: Float)] = []
     /// 전력 정책이 재생을 멈췄는지.
@@ -296,6 +298,16 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         // 지수 평활. 프레임률이 달라져도 비슷한 속도로 따라간다.
         parallaxOffset += (target - parallaxOffset) * 0.12
         compositor?.setParallax(parallaxOffset)
+    }
+
+    /// 원근 씬이면 카메라를 매 프레임 넘긴다. 화면 비율은 뷰에서 온다.
+    private func updateCamera(in view: MTKView) {
+        guard let camera else { return }
+        let size = view.drawableSize
+        let aspect = size.height > 0 ? Double(size.width / size.height) : 16.0 / 9.0
+        compositor?.setCamera(
+            viewProjection: camera.viewProjection(aspect: aspect),
+            eye: SIMD3(Float(camera.eye.x), Float(camera.eye.y), Float(camera.eye.z)))
     }
 
     /// 마우스 커서를 씬의 직교 좌표로 옮긴다. 화면 밖이면 가장자리로 죈다.
@@ -791,6 +803,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         compositor.setProjection(width: document.orthoWidth, height: document.orthoHeight)
         parallaxAmount = document.parallaxAmount
         ortho = SIMD2(Float(document.orthoWidth), Float(document.orthoHeight))
+        camera = document.camera
         if document.clearEnabled {
             compositor.setClearColor(MTLClearColor(
                 red: document.clearColor.x, green: document.clearColor.y,
@@ -844,7 +857,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             // 밝기는 색에 곱한다. 섞는 방식과 짝이라, 실물 시계는 밝기 5.56에
             // 오버레이로 섞이는 것을 전제로 그 값이다.
             let brightness = Float(layer.brightness)
-            let quad = QuadInstance(
+            var quad = QuadInstance(
                 origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
                 size: SIMD2(Float(layer.size.x), Float(layer.size.y)),
                 color: SIMD4(Float(layer.tint.x) * brightness,
@@ -854,6 +867,17 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 rotation: Float(layer.rotation),
                 parallaxDepth: Float(layer.parallaxDepth),
                 blendMode: Int32(layer.colorBlendMode))
+            if document.isPerspective {
+                // 원근 씬에서는 자리·크기가 픽셀이 아니라 세계 단위다. 크기에는
+                // 배율이 곱해진다 — 실물 배경 구름이 size 64 × scale 10이다.
+                // 직교 경로의 `size`는 배율이 이미 곱해져 있으므로 여기서는
+                // 배율을 원본 크기와 함께 따로 넣는다.
+                quad.world = Scene3D.world(
+                    origin: layer.origin,
+                    anglesDegrees: Vec3(x: 0, y: 0, z: layer.rotation * 180 / .pi),
+                    scale: Vec3(x: 1, y: 1, z: 1),
+                    size: Vec2(x: layer.size.x, y: layer.size.y))
+            }
             if layer.colorBlendMode != 0, let reason = compositor.blendUnavailableReason {
                 degraded.append(
                     "\(layer.name): 색 섞기(\(layer.colorBlendMode))를 못 걸어 보통으로 그린다: "
@@ -1087,6 +1111,63 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     blendMode: Int32(layer.colorBlendMode)),
                     .dynamic { [weak state] in state?.texture }))
 
+            case .shadedImage(let materialPath, _):
+                // 재질의 셰이더가 그림을 만든다. 메시 렌더러에 단위 사각형을 준다 —
+                // 셰이더 컴파일·유니폼·텍스처가 메시와 똑같기 때문이다.
+                guard document.isPerspective else {
+                    skipped.append("\(layer.name): 직교 씬의 셰이더 이미지는 아직 그리지 않는다: \(materialPath)")
+                    continue
+                }
+                do {
+                    let renderer = try ModelRenderer(
+                        device: compositor.device, model: MDLModel.unitQuad(),
+                        materialPath: materialPath, resolver: resolver, includes: shaderIncludes,
+                        makeTexture: { try compositor.makeTexture(from: $0) },
+                        sampler: compositor.sharedSampler,
+                        eye: { [weak compositor] in compositor?.cameraEye ?? .zero })
+                    // 판의 크기는 size × scale 세계 단위다(실물 배경 구름 64 × 10).
+                    quad.world = Scene3D.world(
+                        origin: layer.origin,
+                        anglesDegrees: Vec3(x: 0, y: 0, z: layer.rotation * 180 / .pi),
+                        scale: Vec3(x: 1, y: 1, z: 1),
+                        size: Vec2(x: layer.size.x, y: layer.size.y))
+                    drawable.append((quad, .model(renderer)))
+                } catch {
+                    skipped.append("\(layer.name): 셰이더 이미지를 그리지 못한다: \(error)")
+                }
+
+            case .model(let path, let skin):
+                guard document.isPerspective else {
+                    skipped.append("\(layer.name): 직교 씬의 3D 메시는 아직 그리지 않는다: \(path)")
+                    continue
+                }
+                guard let raw = resolver.data(for: path) else {
+                    skipped.append("\(layer.name): 메시를 찾을 수 없다: \(path)")
+                    continue
+                }
+                do {
+                    let model = try MDLModel.parse(raw)
+                    // `skin`은 메시의 재질 목록 번호다. 벗어나면 첫 재질로 간다.
+                    guard !model.materials.isEmpty else {
+                        skipped.append("\(layer.name): 메시에 재질이 없다: \(path)")
+                        continue
+                    }
+                    let materialPath = model.materials[min(skin, model.materials.count - 1)]
+                    let renderer = try ModelRenderer(
+                        device: compositor.device, model: model, materialPath: materialPath,
+                        resolver: resolver, includes: shaderIncludes,
+                        makeTexture: { try compositor.makeTexture(from: $0) },
+                        sampler: compositor.sharedSampler,
+                        eye: { [weak compositor] in compositor?.cameraEye ?? .zero })
+                    quad.world = Scene3D.world(
+                        origin: layer.origin,
+                        anglesDegrees: Vec3(x: 0, y: 0, z: layer.rotation * 180 / .pi),
+                        scale: layer.scale)
+                    drawable.append((quad, .model(renderer)))
+                } catch {
+                    skipped.append("\(layer.name): 3D 메시를 그리지 못한다: \(error)")
+                }
+
             case .unsupported(let reason):
                 skipped.append("\(layer.name): \(reason)")
             }
@@ -1237,6 +1318,7 @@ extension SceneRenderer: MTKViewDelegate {
 
     func draw(in view: MTKView) {
         updateParallax(in: view)
+        updateCamera(in: view)
         if !texts.isEmpty || !displays.isEmpty {
             let now = CACurrentMediaTime()
             let since = lastScriptTime.map { now - $0 }

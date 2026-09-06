@@ -61,10 +61,29 @@ public enum GLSLTranslator {
         public let defaultPath: String?
     }
 
+    /// 정점 셰이더가 선언한 `attribute`. `VertexIn`의 `[[attribute(n)]]` 번호가
+    /// 선언 순서 그대로라, 정점 버퍼를 묶는 쪽이 이 순서로 자리를 잡아야 한다.
+    /// 이걸 안 내주면 그리는 쪽이 `a_Position`·`a_TexCoord`만 있다고 가정하게
+    /// 되고, 법선과 접선을 쓰는 3D 모델 셰이더가 엉뚱한 바이트를 읽는다.
+    public struct Attribute: Equatable, Sendable {
+        public let name: String
+        public let type: String
+        public let slot: Int
+    }
+
     public struct Result: Equatable, Sendable {
         public let source: String
         public let uniforms: [Uniform]
         public let textures: [Texture]
+        public let attributes: [Attribute]
+
+        public init(source: String, uniforms: [Uniform], textures: [Texture],
+                    attributes: [Attribute] = []) {
+            self.source = source
+            self.uniforms = uniforms
+            self.textures = textures
+            self.attributes = attributes
+        }
     }
 
     // MARK: - 진입점
@@ -865,7 +884,16 @@ public enum GLSLTranslator {
         }
         out += epilogue + "\n"
 
-        return Result(source: out, uniforms: parsed.uniforms, textures: parsed.textures)
+        var attributes: [Attribute] = []
+        var slot = 0
+        for attribute in parsed.attributes {
+            for name in flattenedNames(attribute.name, count: attribute.count) {
+                attributes.append(Attribute(name: name, type: attribute.type, slot: slot))
+                slot += 1
+            }
+        }
+        return Result(source: out, uniforms: parsed.uniforms, textures: parsed.textures,
+                      attributes: attributes)
     }
 
     /// 배열이면 `v_TexCoord_0`처럼 성분 이름으로 펼친다. 아니면 이름 하나.

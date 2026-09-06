@@ -22,6 +22,9 @@ public struct SceneDocument: Sendable {
     public let orthoWidth: Int
     public let orthoHeight: Int
     public let clearColor: Vec3
+    /// 원근 씬의 카메라. 직교 씬이면 nil이다.
+    public let camera: SceneCamera?
+    public var isPerspective: Bool { camera != nil }
     public let clearEnabled: Bool
     public let layers: [SceneLayer]
     /// 마우스를 따라 레이어를 조금씩 미는 정도. 0이면 끈 것이다.
@@ -105,17 +108,26 @@ public struct SceneDocument: Sendable {
         // 프리즘 넷이 `.mdl` 3D 메시다. 투영만 넣어 그리면 배경 평면 몇 장만
         // 뜬 깨진 화면이 된다 — 미리보기로 물러나는 편이 낫다.
         // 카메라도 스크립트가 움직인다(`Camera (script)`, `OMGMatrix`).
+        // 원근 씬에는 직교 크기가 없다. 좌표가 픽셀이 아니라 세계 단위이고
+        // 화면 비율은 그릴 때 정해진다. 글자·파티클처럼 직교 크기를 쓰는
+        // 경로를 위해 이름뿐인 1920x1080을 둔다.
+        let camera: SceneCamera?
+        let width: Int
+        let height: Int
         if general.keys.contains("orthogonalprojection"),
            !(general["orthogonalprojection"] is [String: Any]) {
-            throw SceneError.perspectiveProjectionUnsupported
-        }
-        // 원근 씬에는 직교 크기가 없다. 좌표가 픽셀이 아니라 정규화 단위라
-        // 화면 비율만 있으면 되므로 자리만 채운다.
-        guard let ortho = general["orthogonalprojection"] as? [String: Any],
-              let width = ortho["width"] as? Int,
-              let height = ortho["height"] as? Int,
-              width > 0, height > 0 else {
-            throw SceneError.missingField("orthogonalprojection")
+            camera = SceneCamera.parse(general)
+            width = 1920
+            height = 1080
+        } else {
+            guard let ortho = general["orthogonalprojection"] as? [String: Any],
+                  let w = ortho["width"] as? Int, let h = ortho["height"] as? Int,
+                  w > 0, h > 0 else {
+                throw SceneError.missingField("orthogonalprojection")
+            }
+            camera = nil
+            width = w
+            height = h
         }
 
         let clearColor = (general["clearcolor"] as? String).flatMap(Vec3.parse)
@@ -133,7 +145,7 @@ public struct SceneDocument: Sendable {
         let transforms = resolveTransforms(objects)
         let rawLayers = objects.enumerated().map { index, object in
             let id = object["id"] as? Int ?? index
-            return makeLayer(object, fallbackID: index, resolver: resolver,
+            return makeLayer(isPerspective: camera != nil, object, fallbackID: index, resolver: resolver,
                              transform: transforms[id] ?? .identity,
                              canvas: Vec2(x: Double(width), y: Double(height)))
         }
@@ -145,7 +157,7 @@ public struct SceneDocument: Sendable {
         let amount = doubleValue(general["cameraparallaxamount"]) ?? 0
         return SceneDocument(
             orthoWidth: width, orthoHeight: height,
-            clearColor: clearColor, clearEnabled: clearEnabled,
+            clearColor: clearColor, camera: camera, clearEnabled: clearEnabled,
             layers: layers,
             scriptModules: scriptModules,
             parallaxAmount: parallaxOn && amount.isFinite ? Swift.min(Swift.max(amount, 0), 2) : 0
@@ -304,6 +316,7 @@ public struct SceneDocument: Sendable {
     /// 레이어 하나가 해석되지 않아도 씬 전체를 버리지 않는다.
     /// 그릴 수 없는 것은 이유를 달아 unsupported로 남긴다.
     private static func makeLayer(
+        isPerspective: Bool = false,
         _ object: [String: Any], fallbackID: Int, resolver: ReferenceResolver,
         transform: LayerTransform, canvas: Vec2
     ) -> SceneLayer {
@@ -419,6 +432,19 @@ public struct SceneDocument: Sendable {
             )
         }
 
+        // 3D 메시. 파일은 그릴 때 읽는다 — 여기서는 경로와 스킨만 잡는다.
+        // 실물 `mainPrism`은 origin이 없다(원점). 크기도 없다 — 메시가 정한다.
+        if let meshPath = object["model"] as? String, !meshPath.isEmpty {
+            let skin = Swift.max(0, (object["skin"] as? NSNumber)?.intValue ?? 0)
+            return SceneLayer(
+                id: id, name: name, visible: visible,
+                origin: origin ?? Vec3(x: 0, y: 0, z: 0),
+                size: size ?? Vec2(x: 0, y: 0),
+                content: .model(path: meshPath, skin: skin), unrunScripts: unrun,
+                alpha: alpha, tint: tint, rotation: rotation,
+                displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
+                colorBlendMode: blendMode, brightness: brightness)
+        }
         guard let modelPath = object["image"] as? String else {
             // text가 객체가 아니라 그냥 문자열인 레이어가 있다(실물 "Audio visualizer").
             // 스크립트 없이 고정 글자만 그리는 경우다.
@@ -474,7 +500,12 @@ public struct SceneDocument: Sendable {
             }
             return unsupported("알 수 없는 레이어 종류")
         }
-        guard let origin, let size else {
+        // 원근 씬의 이미지 레이어는 origin이 없는 것이 보통이다 — 원점에 놓인
+        // 세계 단위의 판이다(실물 배경 구름). 직교 씬에서는 원점이 화면 왼쪽
+        // 아래 구석이라 그런 파일은 깨진 것으로 보는 편이 맞다.
+        let placedOrigin = origin
+            ?? (isPerspective && size != nil && object["origin"] == nil ? Vec3(x: 0, y: 0, z: 0) : nil)
+        guard let origin = placedOrigin, let size else {
             // origin과 size가 아예 없고 effects만 있으면 후처리 레이어다.
             // 실물 "Couche de post-traitement"가 이 경우인데, 스크립트 탓이라고
             // 말하면 사용자를 엉뚱한 원인으로 보낸다.
@@ -729,6 +760,14 @@ public struct SceneDocument: Sendable {
         return out
     }
 
+    /// 우리 쿼드 경로가 그대로 그려도 되는 표준 이미지 셰이더들. 실물 설치 씬
+    /// 15개에서 이미지 재질 64개 중 55개가 이 가족이다. 그 밖(`ps2menu` 9개)은
+    /// 재질의 셰이더로 그려야 한다.
+    static let plainImageShaders: Set<String> = [
+        "genericimage", "genericimage2", "genericimage3", "genericimage4",
+        "flat", "composelayer", "passthrough", "genericimage_hdr",
+    ]
+
     /// 머티리얼을 읽어 이 레이어가 무엇인지 판정한다.
     private static func resolveContent(
         modelPath: String, object: [String: Any], resolver: ReferenceResolver
@@ -745,6 +784,15 @@ public struct SceneDocument: Sendable {
         // 셰이더 flat이면서 텍스처가 없을 때만 단색이다. 실물 solidlayer가 그 모양이다.
         // OR로 쓰면 flat + _rt_ 조합이 렌더 타깃 검사에 닿지 못하고 삼켜지고,
         // textures가 없는 다른 셰이더도 전부 단색이 되어버린다. 반드시 AND다.
+        // 재질이 자기 셰이더를 가지면 텍스처를 붙이는 게 아니라 셰이더가 그림을
+        // 만든다. 실물 원근 씬의 배경 구름(`ps2menu`)이 그렇다 — 보통 이미지로
+        // 그리면 셰이더의 입력 잡음이 그대로 보인다. 표준 이미지 셰이더 가족은
+        // 우리 쿼드 경로가 이미 같은 일을 하므로 그대로 둔다.
+        if let shader = pass["shader"] as? String, !Self.plainImageShaders.contains(shader) {
+            let name = (textures?.first as? String) ?? ""
+            return .shadedImage(materialPath: materialPath,
+                                texturePath: name.isEmpty ? "" : "materials/\(name).tex")
+        }
         if (pass["shader"] as? String) == "flat", textures == nil {
             let color = (object["color"] as? String).flatMap(Vec3.parse)
                 ?? Vec3(x: 1, y: 1, z: 1)

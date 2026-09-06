@@ -189,6 +189,12 @@ public struct SoundLayer: Equatable, Sendable {
 public enum LayerContent: Equatable, Sendable {
     /// .pkg 또는 assets 안의 텍스처 경로.
     case image(texturePath: String)
+    /// 3D 메시. 원근 씬의 본체다. `skin`은 메시가 든 재질 목록의 번호다.
+    case model(path: String, skin: Int)
+    /// 재질이 **자기 셰이더**를 가진 이미지. 그림을 텍스처로 붙이는 게 아니라
+    /// 셰이더가 그림을 만든다(실물 원근 씬의 배경 구름 `ps2menu`, 9개 레이어).
+    /// 보통 이미지처럼 텍스처만 붙이면 셰이더의 입력 잡음이 그대로 보인다.
+    case shadedImage(materialPath: String, texturePath: String)
     /// 텍스처가 MP4인 레이어. 매 프레임 갱신된다.
     case video(texturePath: String)
     /// 셰이더 `flat` 기반의 단색 사각형. 텍스처가 없다.
@@ -327,5 +333,54 @@ public struct SceneLayer: Equatable, Sendable {
             content: content, unrunScripts: unrunScripts, effects: effects,
             alpha: alpha, tint: tint, rotation: rotation, displayScripts: displayScripts,
             scale: scale, parallaxDepth: parallaxDepth)
+    }
+}
+
+
+/// 원근 씬의 카메라. 직교 씬에는 없다.
+///
+/// `general`의 `fov`·`nearz`·`farz`와 `camera {eye, center, up}`에서 온다.
+/// **기본값은 문서에 없다.** 실물 원근 씬은 스크립트가 `setCameraTransforms`로
+/// 눈 위치를 정하므로 기본값이 화면에 보이는 경우가 드물다. 편집기 예제 씬
+/// (`scenes/modeleditor`)의 fov 50·nearz 0.1·farz 10000을 기본으로 두고,
+/// 눈은 원점을 보는 (0, 0, 100)으로 둔다 — 근거가 약한 값이라 스크립트가
+/// 덮어쓰기 전까지만 쓰인다.
+public struct SceneCamera: Equatable, Sendable {
+    public var fov: Double
+    public var nearZ: Double
+    public var farZ: Double
+    public var eye: Vec3
+    public var center: Vec3
+    public var up: Vec3
+
+    public init(fov: Double = 50, nearZ: Double = 0.1, farZ: Double = 10000,
+                eye: Vec3 = Vec3(x: 0, y: 0, z: 100),
+                center: Vec3 = Vec3(x: 0, y: 0, z: 0),
+                up: Vec3 = Vec3(x: 0, y: 1, z: 0)) {
+        self.fov = fov
+        self.nearZ = nearZ
+        self.farZ = farZ
+        self.eye = eye
+        self.center = center
+        self.up = up
+    }
+
+    /// `general`에서 읽는다. 값은 수이거나 `{"user": …, "value": …}` 객체다.
+    static func parse(_ general: [String: Any]) -> SceneCamera {
+        func number(_ raw: Any?, _ fallback: Double, min lo: Double, max hi: Double) -> Double {
+            let value = (raw as? [String: Any])?["value"] ?? raw
+            guard let d = (value as? NSNumber)?.doubleValue, d.isFinite else { return fallback }
+            return Swift.min(Swift.max(d, lo), hi)
+        }
+        var camera = SceneCamera()
+        camera.fov = number(general["fov"], 50, min: 1, max: 179)
+        camera.nearZ = number(general["nearz"], 0.1, min: 0.0001, max: 1e6)
+        camera.farZ = number(general["farz"], 10000, min: camera.nearZ * 1.001, max: 1e9)
+        if let block = general["camera"] as? [String: Any] {
+            if let eye = (block["eye"] as? String).flatMap(Vec3.parse) { camera.eye = eye }
+            if let center = (block["center"] as? String).flatMap(Vec3.parse) { camera.center = center }
+            if let up = (block["up"] as? String).flatMap(Vec3.parse) { camera.up = up }
+        }
+        return camera
     }
 }

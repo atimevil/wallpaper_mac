@@ -69,6 +69,8 @@ final class CorpusCoverageProbe: XCTestCase {
                     layers += 1
                     switch layer.content {
                     case .image: kinds["image", default: 0] += 1
+                    case .model: kinds["model", default: 0] += 1
+                    case .shadedImage: kinds["shadedImage", default: 0] += 1
                     case .video: kinds["video", default: 0] += 1
                     case .solidColor: kinds["solid", default: 0] += 1
                     case .text: kinds["text", default: 0] += 1

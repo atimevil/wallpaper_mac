@@ -155,6 +155,23 @@ final class GLSLTranslatorTests: XCTestCase {
                        "x = arr[0] * (y);")
     }
 
+    /// 정점 속성의 번호는 선언 순서다. 그리는 쪽이 같은 순서로 버퍼를 묶어야
+    /// 하므로 번역 결과가 그 목록을 내준다. 실물 `crystal.vert`가
+    /// `a_Position, a_Normal, a_TexCoord, a_Tangent4` 순이다.
+    func testVertexAttributesAreReportedInDeclarationOrder() throws {
+        let result = try GLSLTranslator.translate("""
+        attribute vec3 a_Position;
+        attribute vec3 a_Normal;
+        attribute vec2 a_TexCoord;
+        attribute vec4 a_Tangent4;
+        void main() { gl_Position = vec4(a_Position, 1.0); }
+        """, stage: .vertex, entryPoint: "v")
+        XCTAssertEqual(result.attributes.map(\.name), ["a_Position", "a_Normal", "a_TexCoord", "a_Tangent4"])
+        XCTAssertEqual(result.attributes.map(\.slot), [0, 1, 2, 3])
+        XCTAssertEqual(result.attributes.map(\.type), ["vec3", "vec3", "vec2", "vec4"])
+        XCTAssertTrue(result.source.contains("vec4 a_Tangent4 [[attribute(3)]]"))
+    }
+
     /// 행렬 varying은 열마다 벡터로 나눠 나른다. Metal의 `stage_in`에는 행렬을
     /// 못 넣는다. 실물 커서 물결 이펙트가 `varying mat3 v_XForm`을 쓴다.
     func testMatrixVaryingIsSplitIntoColumns() throws {

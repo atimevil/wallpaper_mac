@@ -31,6 +31,28 @@ enum SceneShaders {
         float _pad[3];
     };
 
+    /// 원근 씬의 쿼드. 세계 변환과 카메라의 뷰·투영을 그대로 곱한다.
+    /// 직교 경로와 달리 화면 크기로 나누지 않는다 — 크기는 세계 단위다.
+    struct Quad3DUniforms {
+        float4x4 model;
+        float4x4 viewProjection;
+        float4 color;
+    };
+
+    vertex VertexOut quad3d_vertex(
+        VertexIn in [[stage_in]],
+        constant Quad3DUniforms &u [[buffer(1)]]
+    ) {
+        // 단위 쿼드(-0.5..0.5)에 크기·회전·자리는 model 행렬에 들어 있다.
+        float4 world = u.model * float4(in.position, 0.0, 1.0);
+        VertexOut out;
+        out.position = u.viewProjection * world;
+        out.uv = float2(in.position.x + 0.5, 0.5 - in.position.y);
+        out.color = u.color;
+        out.screenTangents = float4(0.0);
+        return out;
+    }
+
     // 단위 쿼드(-0.5..0.5)를 직교 공간에 배치하고 클립 공간으로 옮긴다.
     vertex VertexOut quad_vertex(
         VertexIn in [[stage_in]],

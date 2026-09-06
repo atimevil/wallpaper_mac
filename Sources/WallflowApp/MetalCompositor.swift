@@ -38,6 +38,16 @@ struct QuadInstance {
     var parallaxDepth: Float = 0
     /// 아래 화면과 섞는 방식(WE의 `colorBlendMode`). 0이면 보통 알파 합성이다.
     var blendMode: Int32 = 0
+    /// 원근 씬에서의 세계 변환. 직교 씬에서는 쓰지 않는다(항등).
+    /// 단위 쿼드(-0.5..0.5)를 세계 단위 크기로 늘리고 돌리고 옮긴 것이다.
+    var world: simd_float4x4 = matrix_identity_float4x4
+}
+
+/// MSL의 `Quad3DUniforms`와 같은 배치.
+struct Quad3DUniforms {
+    var model: simd_float4x4
+    var viewProjection: simd_float4x4
+    var color: SIMD4<Float>
 }
 
 /// 레이어가 무엇으로 칠해지는지.
@@ -49,6 +59,8 @@ enum LayerSource {
     /// @MainActor이므로 호출 측은 문제없다. nonisolated로 우회하지 마라 —
     /// 실제 스레딩 가정을 표현하는 대신 숨기게 된다.
     case dynamic(@MainActor () -> MTLTexture?)
+    /// 3D 메시. 렌더러가 자기 draw를 인코딩한다.
+    case model(ModelRenderer)
     /// 텍스처 없이 단색으로 칠한다. 셰이더 flat 레이어가 이 경우다.
     case solid(SIMD4<Float>)
     /// 파티클. 쿼드 하나가 아니라 인스턴싱으로 직접 그린다.
@@ -66,6 +78,10 @@ final class MetalCompositor {
     let device: MTLDevice
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
+    /// 원근 씬용. 카메라가 있으면 쿼드를 이 파이프라인으로 그린다.
+    private let pipeline3D: MTLRenderPipelineState
+    /// 원근 씬의 뷰·투영. nil이면 직교 씬이다.
+    private var viewProjection: simd_float4x4?
     /// 아래 화면을 읽어 직접 섞는 파이프라인. 못 만드는 기기에서는 nil이다.
     /// `WALLFLOW_BLEND_FORCE`로 준 진단용 섞기 방식.
     static let forcedBlendMode: Int32? = ProcessInfo.processInfo
@@ -82,6 +98,8 @@ final class MetalCompositor {
     private let solidPipeline: MTLRenderPipelineState
     private let vertexBuffer: MTLBuffer
     private let sampler: MTLSamplerState
+    /// 메시 렌더러가 같은 샘플러를 쓴다. 텍스처마다 따로 만들 이유가 없다.
+    var sharedSampler: MTLSamplerState { sampler }
     private let library: MTLLibrary
 
     private var projection = SIMD2<Float>(1, 1)
@@ -143,6 +161,15 @@ final class MetalCompositor {
         } catch {
             throw CompositorError.pipelineFailed("\(error)")
         }
+
+        // 원근 쿼드. 프래그먼트는 같고 정점만 세계·카메라 행렬을 곱한다.
+        descriptor.vertexFunction = library.makeFunction(name: "quad3d_vertex")
+        do {
+            pipeline3D = try device.makeRenderPipelineState(descriptor: descriptor)
+        } catch {
+            throw CompositorError.pipelineFailed("\(error)")
+        }
+        descriptor.vertexFunction = library.makeFunction(name: "quad_vertex")
 
         // 단색 레이어용 파이프라인 (같은 정점, 다른 프래그먼트)
         descriptor.fragmentFunction = library.makeFunction(name: "solid_fragment")
@@ -211,6 +238,15 @@ final class MetalCompositor {
         projection = SIMD2(Float(width), Float(height))
     }
 
+    /// 원근 씬의 카메라. 매 프레임 바뀔 수 있다(스크립트가 움직인다).
+    /// nil로 두면 직교 씬처럼 그린다.
+    func setCamera(viewProjection: simd_float4x4?, eye: SIMD3<Float> = .zero) {
+        self.viewProjection = viewProjection
+        self.cameraEye = eye
+    }
+    /// 카메라 눈. 유리 메시 셰이더가 시선 방향을 만드는 데 쓴다.
+    private(set) var cameraEye: SIMD3<Float> = .zero
+
     /// 마우스 시차 밀림을 정한다. 매 프레임 바뀐다.
     func setParallax(_ offset: SIMD2<Float>) {
         parallax = offset.x.isFinite && offset.y.isFinite ? offset : .zero
@@ -250,6 +286,8 @@ final class MetalCompositor {
             case .composition: return true
             // 굴절 파티클도 뒤 화면을 읽어야 한다. 드로어블은 읽을 수 없다.
             case .particles(let renderer): return renderer.needsBackground
+            // 프리즘 같은 유리 메시도 `_rt_FullFrameBuffer`를 읽는다.
+            case .model(let renderer): return renderer.needsBackground
             default: return false
             }
         }
@@ -400,6 +438,16 @@ final class MetalCompositor {
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
                 encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
             case .fixed(let texture):
+                if let viewProjection {
+                    // 원근 씬. 색 섞기는 아직 직교 경로에만 있다.
+                    encoder.setRenderPipelineState(pipeline3D)
+                    var u3 = Quad3DUniforms(model: quad.world, viewProjection: viewProjection,
+                                            color: quad.color)
+                    encoder.setVertexBytes(&u3, length: MemoryLayout<Quad3DUniforms>.stride, index: 1)
+                    encoder.setFragmentTexture(texture, index: 0)
+                    encoder.setFragmentSamplerState(sampler, index: 0)
+                    break
+                }
                 encoder.setRenderPipelineState(
                     mode != 0 ? (blendPipeline ?? pipeline) : pipeline)
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
@@ -411,6 +459,16 @@ final class MetalCompositor {
             case .dynamic(let provider):
                 // 프레임이 아직 없으면 이 레이어만 건너뛴다. 씬 전체를 멈추지 않는다.
                 guard let texture = provider() else { continue }
+                if let viewProjection {
+                    encoder.setRenderPipelineState(pipeline3D)
+                    var u3 = Quad3DUniforms(model: quad.world, viewProjection: viewProjection,
+                                            color: quad.color)
+                    encoder.setVertexBytes(&u3, length: MemoryLayout<Quad3DUniforms>.stride, index: 1)
+                    encoder.setFragmentTexture(texture, index: 0)
+                    encoder.setFragmentSamplerState(sampler, index: 0)
+                    encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                    continue
+                }
                 // 이펙트가 걸린 레이어와 비디오가 이 경로다. **실물에서 섞기가
                 // 걸린 레이어는 대개 이쪽이다** — 여기를 빼먹으면 아무 일도
                 // 일어나지 않고, 화면만 봐서는 왜인지 알 수 없다.
@@ -446,6 +504,26 @@ final class MetalCompositor {
                 }
                 encoder.setFragmentTexture(result, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
+            case .model(let renderer):
+                guard let viewProjection else { continue }
+                if renderer.needsBackground, let offscreen,
+                   let copy = backdrop(width: offscreen.width, height: offscreen.height) {
+                    // 유리 메시는 뒤 화면을 읽는다. 굴절 파티클과 같은 길이다.
+                    encoder.endEncoding()
+                    if let blit = commands.makeBlitCommandEncoder() {
+                        blit.copy(from: offscreen, to: copy)
+                        blit.endEncoding()
+                    }
+                    guard let restarted = startEncoder(clear: false) else { return }
+                    encoder = restarted
+                    encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                    renderer.setBackground(copy)
+                }
+                renderer.encode(into: encoder, world: quad.world, viewProjection: viewProjection,
+                                alpha: quad.color.w, time: Float(CACurrentMediaTime()))
+                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                continue
+
             case .particles(let renderer):
                 if renderer.needsBackground {
                     // 굴절은 **뒤에 이미 그려진 화면**을 읽는다. 그리는 중인
