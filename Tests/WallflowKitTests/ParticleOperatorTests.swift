@@ -213,3 +213,52 @@ final class ParticleOperatorTests: XCTestCase {
         XCTAssertGreaterThan(pushed, 10, "음수면 멀어져야 한다")
     }
 }
+
+/// `remapvalue` — 유리창에 맺힌 비가 이걸로 흘러내린다. 없으면 중력만 남아
+/// 방울이 느리게 떨어지기만 한다.
+extension ParticleOperatorTests {
+    /// 실물 `rain_screen_4k`의 두 줄 그대로. 하나는 우리가 넣고, 하나는
+    /// 아직 못 넣는다 — 못 넣는 것은 **이름과 함께** 남겨야 한다.
+    func testParsesRealRainRemaps() throws {
+        let json = """
+        {"maxcount": 60, "material": "m.json",
+         "operator": [{"name": "remapvalue", "operation": "remap", "output": "velocity",
+                       "outputrangemax": "200 -1000 0", "outputrangemin": "-200 -100 0",
+                       "transformfunction": "simplexnoise", "transforminputscale": 10},
+                      {"flags": 3, "name": "remapvalue", "output": "speed",
+                       "outputrangemax": 7, "outputrangemin": -5,
+                       "transformfunction": "fbmnoise", "transforminputscale": 8}]}
+        """
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(json.utf8)) as? [String: Any])
+        let preset = try XCTUnwrap(ParticlePreset.parse(object))
+        XCTAssertEqual(preset.operators.count, 2)
+        guard case .remapValue(let output, _, let scale, let lo, let hi) = preset.operators[0]
+        else { return XCTFail("remapvalue여야 한다") }
+        XCTAssertEqual(output, .velocity)
+        XCTAssertEqual(scale, 10)
+        XCTAssertEqual(lo, Vec3(x: -200, y: -100, z: 0))
+        XCTAssertEqual(hi, Vec3(x: 200, y: -1000, z: 0))
+
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        XCTAssertEqual(system.unimplementedOperators, ["remapvalue(speed)"],
+                       "못 넣는 출력은 이름과 함께 남겨야 한다")
+    }
+
+    /// 방울마다 다른 속도를 받아야 한다. 하나로 뭉치면 전부 같은 줄로 떨어진다.
+    func testRemapGivesEachParticleItsOwnVelocity() throws {
+        let system = self.system(
+            operators: [.movement(gravity: Vec3(x: 0, y: 0, z: 0), drag: 0),
+                        .remapValue(output: .velocity, transform: .noise, inputScale: 10,
+                                    outputMin: Vec3(x: -200, y: -100, z: 0),
+                                    outputMax: Vec3(x: 200, y: -1000, z: 0))],
+            burst: 16)
+        system.update(deltaTime: 1.0 / 60)
+        let speeds = system.particles.map(\.velocity.y)
+        XCTAssertFalse(speeds.isEmpty)
+        // 전부 범위 안이어야 하고, 서로 달라야 한다.
+        XCTAssertTrue(speeds.allSatisfy { $0 <= -100 && $0 >= -1000 },
+                      "범위를 벗어난 값이 있다: \(speeds)")
+        XCTAssertGreaterThan(Set(speeds.map { Int($0 / 10) }).count, 3, "전부 같은 속도다")
+    }
+}

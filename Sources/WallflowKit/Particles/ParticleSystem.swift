@@ -120,17 +120,24 @@ public final class ParticleSystem {
             if case .controlPointAttract(let point, _, _, _) = op, point != 0 {
                 unimplemented.insert("controlpointattract(제어점 \(point))")
             }
+            // 우리가 안 넣는 출력은 이름과 함께 남긴다.
+            if case .remapValue(let output, _, _, _, _) = op,
+               case .unsupported(let name) = output {
+                unimplemented.insert("remapvalue(\(name))")
+            }
         }
         self.unimplementedOperators = Array(unimplemented).sorted()
         self.hasSizeCurve = preset.operators.contains {
             switch $0 {
             case .sizeChange, .oscillateSize: return true
+            case .remapValue(let output, _, _, _, _): return output == .size
             default: return false
             }
         }
         self.hasAlphaCurve = preset.operators.contains {
             switch $0 {
             case .alphaFade, .oscillateAlpha: return true
+            case .remapValue(let output, _, _, _, _): return output == .opacity
             default: return false
             }
         }
@@ -705,6 +712,41 @@ public final class ParticleSystem {
                 x: particle.velocity.x + tangent.x / tangentLength * speed * dt,
                 y: particle.velocity.y + tangent.y / tangentLength * speed * dt,
                 z: particle.velocity.z + tangent.z / tangentLength * speed * dt)
+
+        case .remapValue(let output, let transform, let inputScale,
+                         let outputMin, let outputMax):
+            // 0~1 하나를 만들어 범위에 옮긴다. 파티클마다 다른 씨앗을 쓰고
+            // 시간에 따라 천천히 흐르게 한다 — 유리창의 물방울이 저마다 다른
+            // 속도로 흘러내리는 모양이 이것이다.
+            //
+            // **입력을 고르는 부분은 아직 없다.** 실물이 쓰는 둘 다 입력 없이
+            // 잡음만 쓴다. 그리고 `simplexnoise`와 `fbmnoise`는 결이 다르지만
+            // 우리 잡음 하나로 받는다 — 흐르는 모양은 나오지만 같지는 않다.
+            let seed = Self.hash(particle.frameSeed, 41) * 64
+            let t: Double
+            switch transform {
+            case .sine:
+                t = 0.5 + 0.5 * sin(elapsed * inputScale + seed)
+            case .noise:
+                t = 0.5 + 0.5 * Self.noise(seed, elapsed * inputScale * 0.05, 0)
+            }
+            let value = Vec3(
+                x: outputMin.x + (outputMax.x - outputMin.x) * t,
+                y: outputMin.y + (outputMax.y - outputMin.y) * t,
+                z: outputMin.z + (outputMax.z - outputMin.z) * t)
+            switch output {
+            case .velocity:
+                particle.velocity = value
+            case .opacity:
+                particle.alpha = min(max(particle.baseAlpha * value.x, 0), 1)
+            case .size:
+                particle.size = max(0, particle.baseSize * value.x)
+            case .color:
+                particle.color = value
+            case .unsupported:
+                // 여기 오면 생성자가 이미 이름과 함께 보고했다.
+                break
+            }
 
         case .controlPointAttract(let controlPoint, let origin, let scale, let threshold):
             // 0번 제어점은 시스템 자신의 자리다. 그 위에 연산자가 적은 `origin`을

@@ -142,6 +142,17 @@ public enum ParticleOperator: Equatable, Sendable {
     /// 모델링하지 않는다. 고리가 적힌 프리셋에서는 그 사실을 보고한다.
     case vortex(axis: Vec3, distanceInner: Double, distanceOuter: Double,
                 speedInner: Double, speedOuter: Double)
+    /// 잡음이나 사인파를 값 범위로 옮겨 파티클 속성에 넣는다.
+    ///
+    /// 유리창에 맺힌 비가 이걸로 흘러내린다 — 방울마다 다른 속도를 잡음에서
+    /// 받는다. 이 연산자가 없으면 중력만 남아 방울이 느리게 떨어지기만 한다.
+    ///
+    /// **`input`을 읽는 쪽은 아직 안 만들었다.** 실물에서 쓰는 두 개가 둘 다
+    /// input 없이 잡음만 쓰고, 다른 input(`distancetocontrolpoint`)은 제어점
+    /// 데이터가 있어야 한다. 우리가 넣을 수 있는 출력만 넣고 나머지는 이름과
+    /// 함께 보고한다.
+    case remapValue(output: ParticleRemapOutput, transform: ParticleRemapTransform,
+                    inputScale: Double, outputMin: Vec3, outputMax: Vec3)
     case controlPointAttract(controlPoint: Int, origin: Vec3, scale: Double, threshold: Double)
 }
 
@@ -150,6 +161,51 @@ public enum ParticleOperator: Equatable, Sendable {
 /// 창작마당 씬은 프리셋을 그대로 쓰지 않고 `instanceoverride`로 개수·속도·크기를
 /// 배로 조절한다. 무시하면 씬이 의도한 것과 전혀 다른 밀도로 뿌린다 — 실물
 /// Hiyuki의 벚꽃은 `count`가 0.05라 프리셋 200장 중 10장만 원한다.
+/// `remapvalue`가 무엇에 값을 넣는지.
+public enum ParticleRemapOutput: Equatable, Sendable {
+    case velocity
+    case opacity
+    case size
+    case color
+    /// 우리가 아직 안 넣는 출력. 이름을 들고 있다가 보고한다.
+    case unsupported(String)
+
+    public static func parse(_ raw: String?) -> ParticleRemapOutput {
+        switch raw?.lowercased() {
+        case "velocity": return .velocity
+        case "opacity", "alpha": return .opacity
+        case "size": return .size
+        case "color": return .color
+        case let other: return .unsupported(other ?? "(없음)")
+        }
+    }
+
+    public var name: String {
+        switch self {
+        case .velocity: return "velocity"
+        case .opacity: return "opacity"
+        case .size: return "size"
+        case .color: return "color"
+        case .unsupported(let name): return name
+        }
+    }
+}
+
+/// 입력을 0~1로 바꾸는 함수.
+public enum ParticleRemapTransform: Equatable, Sendable {
+    case noise
+    case sine
+
+    public static func parse(_ raw: String?) -> ParticleRemapTransform {
+        switch raw?.lowercased() {
+        case "sine": return .sine
+        // `simplexnoise`와 `fbmnoise`는 결이 다르지만 둘 다 매끄러운 잡음이다.
+        // 우리 잡음 하나로 받고, 다르다는 사실은 주석으로 남긴다.
+        default: return .noise
+        }
+    }
+}
+
 public struct ParticleOverride: Equatable, Sendable {
     /// 전부 배율이다. 1이면 프리셋 그대로.
     public var count: Double = 1
@@ -423,7 +479,7 @@ public struct ParticlePreset: Equatable, Sendable {
         let knownOperatorNames = Set<String>([
             "movement", "angularmovement", "alphafade", "sizechange", "colorchange",
             "oscillateposition", "oscillatealpha", "oscillatesize", "turbulence",
-            "vortex", "vortex_v2", "controlpointattract"
+            "vortex", "vortex_v2", "remapvalue", "controlpointattract"
         ])
 
         // Parse maxCount with clamping
@@ -811,6 +867,21 @@ public struct ParticlePreset: Equatable, Sendable {
                 timeScale: getDouble(dict["timescale"]) ?? 0,
                 phaseMin: getDouble(dict["phasemin"]) ?? 0,
                 phaseMax: getDouble(dict["phasemax"]) ?? (getDouble(dict["phasemin"]) ?? 0))
+
+        case "remapvalue":
+            // 범위는 수 하나이거나 `"200 -1000 0"` 같은 벡터다. 수 하나면
+            // 세 성분에 같은 값을 넣는다 — 스칼라 출력은 x만 본다.
+            func range(_ key: String, _ fallback: Double) -> Vec3 {
+                if let text = dict[key] as? String, let vector = Vec3.parse(text) { return vector }
+                if let value = getDouble(dict[key]) { return Vec3(x: value, y: value, z: value) }
+                return Vec3(x: fallback, y: fallback, z: fallback)
+            }
+            return .remapValue(
+                output: ParticleRemapOutput.parse(dict["output"] as? String),
+                transform: ParticleRemapTransform.parse(dict["transformfunction"] as? String),
+                inputScale: getDouble(dict["transforminputscale"]) ?? 1,
+                outputMin: range("outputrangemin", 0),
+                outputMax: range("outputrangemax", 1))
 
         case "vortex", "vortex_v2":
             // 고리(`ringradius`/`ringwidth`/`ringpulldistance`)는 아직 모델링하지
