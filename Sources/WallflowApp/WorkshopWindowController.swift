@@ -62,6 +62,9 @@ final class WorkshopWindowController: NSWindowController {
     private let searchField = NSSearchField()
     private let sortPopup = NSPopUpButton()
     private let kindPopup = NSPopUpButton()
+    private let genrePopup = NSPopUpButton()
+    private let resolutionPopup = NSPopUpButton()
+    private let ratingPopup = NSPopUpButton()
     private let hideInstalledCheckbox =
         NSButton(checkboxWithTitle: "받은 것 숨기기", target: nil, action: nil)
     private let loginButton = NSButton(title: "스팀 로그인", target: nil, action: nil)
@@ -126,10 +129,16 @@ final class WorkshopWindowController: NSWindowController {
         sortPopup.target = self
         sortPopup.action = #selector(reload)
 
-        // 종류 필터. 목록은 이미 받아 왔으므로 다시 요청하지 않고 화면만 거른다.
-        for title in Self.kindTitles { kindPopup.addItem(withTitle: title) }
-        kindPopup.target = self
-        kindPopup.action = #selector(refreshTable)
+        // 조건은 **스팀에** 건다. 받아 온 페이지만 거르면 "웹 배경화면"을 골라도
+        // 그 페이지에 든 두어 개만 남아, 다음 페이지에 있는 것은 영영 못 본다.
+        for (popup, choices) in [
+            (kindPopup, WorkshopTag.kinds), (genrePopup, WorkshopTag.genres),
+            (resolutionPopup, WorkshopTag.resolutions), (ratingPopup, WorkshopTag.ratings),
+        ] {
+            for choice in choices { popup.addItem(withTitle: choice.label) }
+            popup.target = self
+            popup.action = #selector(filterChanged)
+        }
 
         hideInstalledCheckbox.state = .off
         hideInstalledCheckbox.target = self
@@ -149,16 +158,29 @@ final class WorkshopWindowController: NSWindowController {
         tabControl.action = #selector(tabChanged)
 
         let tabRow = NSStackView(views: [
-            tabControl, sortPopup, kindPopup, hideInstalledCheckbox,
+            tabControl, sortPopup, hideInstalledCheckbox,
             prevButton, pageLabel, nextButton, refreshButton,
         ])
         tabRow.orientation = .horizontal
         tabRow.spacing = 8
 
         // 검색창은 탭 아래 제 줄에 둔다. 위 줄에 끼우면 좁고 눈에 덜 띈다.
-        let searchRow = NSStackView(views: [searchField])
+        // 조건 팝업도 같은 줄에 둔다 — 위 줄은 이미 정렬과 쪽 넘김으로 찼다.
+        let searchRow = NSStackView(views: [
+            searchField, kindPopup, genrePopup, resolutionPopup, ratingPopup,
+        ])
         searchRow.orientation = .horizontal
+        searchRow.spacing = 8
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // 팝업이 늘어나면서 검색창을 돋보기만 남게 짓눌렀다. 남는 자리는
+        // 검색창이 가져가되, 팝업이 먼저 제 너비를 갖는다.
+        searchField.setContentCompressionResistancePriority(
+            .defaultHigh, for: .horizontal)
+        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+        for popup in [kindPopup, genrePopup, resolutionPopup, ratingPopup] {
+            popup.setContentHuggingPriority(.required, for: .horizontal)
+            popup.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
 
         let top = NSStackView(views: [tabRow, searchRow])
         top.orientation = .vertical
@@ -271,8 +293,32 @@ final class WorkshopWindowController: NSWindowController {
     }
 
     /// 요청 하나를 가리키는 열쇠. 정렬·검색어·페이지가 같으면 같은 결과다.
-    private func cacheKey(sort: WorkshopSort, text: String, page: Int) -> String {
-        "\(sort.rawValue)|\(text)|\(page)"
+    /// 지금 팝업들이 만드는 조건.
+    private var currentFilter: WorkshopFilter {
+        WorkshopFilter(tags: [
+            (kindPopup, WorkshopTag.kinds), (genrePopup, WorkshopTag.genres),
+            (resolutionPopup, WorkshopTag.resolutions), (ratingPopup, WorkshopTag.ratings),
+        ].map { popup, choices in
+            let index = max(0, popup.indexOfSelectedItem)
+            return index < choices.count ? choices[index].tag : ""
+        })
+    }
+
+    /// 조건이 바뀌면 처음 쪽부터 다시 받는다. 3쪽에서 종류를 바꾸면 그 조건의
+    /// 3쪽이 뜨는데, 사용자는 자기가 못 본 1·2쪽이 있다는 걸 알 수 없다.
+    @objc private func filterChanged() {
+        if tab == .library {
+            refreshTable()
+            return
+        }
+        page = 1
+        loadPage()
+    }
+
+    private func cacheKey(
+        sort: WorkshopSort, filter: WorkshopFilter, text: String, page: Int
+    ) -> String {
+        "\(sort.rawValue)|\(filter.key)|\(text)|\(page)"
     }
 
     private func loadPage() {
@@ -281,9 +327,10 @@ final class WorkshopWindowController: NSWindowController {
         loadGeneration += 1
         let generation = loadGeneration
         let sort = WorkshopSort.allCases[max(0, sortPopup.indexOfSelectedItem)]
+        let filter = currentFilter
         let text = searchField.stringValue
         let requested = page
-        let key = cacheKey(sort: sort, text: text, page: requested)
+        let key = cacheKey(sort: sort, filter: filter, text: text, page: requested)
 
         // 이미 받아 둔 페이지면 바로 보여 준다. 뒤로 가기와 미리 받아 둔
         // 다음 페이지가 즉시 뜬다 — 한 페이지에 2초쯤 걸리므로 체감이 크다.
@@ -292,7 +339,7 @@ final class WorkshopWindowController: NSWindowController {
             refreshTable()
             setBusy(false, status: "\(requested)페이지 · \(cached.count)개")
             loadThumbnails(generation: loadGeneration)
-            schedulePrefetch(sort: sort, text: text, after: requested)
+            schedulePrefetch(sort: sort, filter: filter, text: text, after: requested)
             return
         }
 
@@ -302,7 +349,7 @@ final class WorkshopWindowController: NSWindowController {
             guard let self else { return }
             do {
                 let ids = try await client.listIDs(
-                    sort: sort, searchText: text, page: requested)
+                    sort: sort, filter: filter, searchText: text, page: requested)
                 let fetched = try await client.details(ids: ids)
                 // 늦게 도착한 옛 요청이 새 결과를 덮어쓰지 않게 한다.
                 guard generation == self.loadGeneration else { return }
@@ -322,7 +369,8 @@ final class WorkshopWindowController: NSWindowController {
                 self.setBusy(false, status: fetched.isEmpty ? "결과가 없다"
                     : "\(requested)페이지 · \(fetched.count)개")
                 self.loadThumbnails(generation: generation)
-                self.schedulePrefetch(sort: sort, text: text, after: requested)
+                self.schedulePrefetch(
+                    sort: sort, filter: filter, text: text, after: requested)
             } catch {
                 guard generation == self.loadGeneration else { return }
                 self.items = []
@@ -333,8 +381,6 @@ final class WorkshopWindowController: NSWindowController {
     }
 
     /// 종류 필터의 표시 이름. 순서가 곧 팝업 순서다.
-    static let kindTitles = ["모든 종류", "씬", "비디오", "웹"]
-
     /// 검색은 탭마다 뜻이 다르다. 라이브러리는 가진 것을 걸러내고,
     /// 창작마당은 스팀에 새로 요청한다.
     @objc private func searchChanged() {
@@ -390,14 +436,16 @@ final class WorkshopWindowController: NSWindowController {
     ///
     /// 목록 한 페이지에 2초쯤 걸린다(HTML 1.1초 + 메타 0.6초). 누른 뒤에 받으면
     /// 그 시간이 그대로 기다림이 된다.
-    private func schedulePrefetch(sort: WorkshopSort, text: String, after page: Int) {
-        let key = cacheKey(sort: sort, text: text, page: page + 1)
+    private func schedulePrefetch(
+        sort: WorkshopSort, filter: WorkshopFilter, text: String, after page: Int
+    ) {
+        let key = cacheKey(sort: sort, filter: filter, text: text, page: page + 1)
         guard pageCache[key] == nil else { return }
         prefetch?.cancel()
         prefetch = Task { [weak self] in
             guard let self else { return }
             guard let ids = try? await client.listIDs(
-                sort: sort, searchText: text, page: page + 1), !ids.isEmpty,
+                sort: sort, filter: filter, searchText: text, page: page + 1), !ids.isEmpty,
                 let fetched = try? await client.details(ids: ids) else { return }
             guard !Task.isCancelled else { return }
             self.pageCache[key] = fetched
