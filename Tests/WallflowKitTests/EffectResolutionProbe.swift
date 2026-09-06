@@ -35,8 +35,6 @@ final class EffectResolutionProbe: XCTestCase {
             }
         }
         print("EFFECTS 적용 \(applied) 해석 \(resolved) 패스 \(passes)")
-    }
-        }
         for file in missing.sorted() { print("EFFECT_MISS \(file)") }
     }
 }
