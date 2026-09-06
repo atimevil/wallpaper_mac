@@ -778,4 +778,45 @@ extension SceneDocumentTests {
         let layer = try XCTUnwrap(try SceneDocument.load(from: reader, assets: nil).layers.first)
         XCTAssertEqual(layer.parallaxDepth, -0.67, accuracy: 0.001)
     }
+
+    /// 도형 레이어는 그림이 없고 **거기 붙은 이펙트가 그림을 만든다**
+    /// (실물은 전부 `quad` + `lightshafts`인 빛줄기다).
+    ///
+    /// 파일에 크기가 없다. 근거는 assets에서 찾았다 — 편집기가 이 레이어를 만드는
+    /// 프리셋(`presets/lightshafts/`)의 미리보기 씬이 256x256 캔버스이고 도형이
+    /// scale 1.2로 그 안을 채운다. 같은 이펙트의 미리보기가 쓰는 이미지 레이어도
+    /// 정확히 256x256이다. 공식 문서에는 크기가 적혀 있지 않다.
+    func testShapeQuadGetsTheDocumentedBaseSize() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 3440, "height": 1440}},
+         "objects": [{"id": 1, "name": "Rayons lumineux", "shape": "quad",
+                      "origin": "732.00000 399.00000 0.00000",
+                      "scale": "1.50000 1.20000 1.00000"}]}
+        """)).layers.first)
+        XCTAssertEqual(layer.size.x, 256 * 1.5, accuracy: 0.001)
+        XCTAssertEqual(layer.size.y, 256 * 1.2, accuracy: 0.001)
+        XCTAssertEqual(layer.content, .solidColor(Vec3(x: 1, y: 1, z: 1)))
+    }
+
+    /// scale이 없으면 기준 크기 그대로다.
+    func testShapeQuadWithoutScaleUsesTheBaseSize() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "q", "shape": "quad",
+                      "origin": "10.00000 10.00000 0.00000"}]}
+        """)).layers.first)
+        XCTAssertEqual(layer.size.x, 256, accuracy: 0.001)
+    }
+
+    /// 모르는 도형은 그리지 않는다. 사각형으로 짐작해 그리면 엉뚱한 판이 생긴다.
+    func testUnknownShapeIsSkipped() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "c", "shape": "circle",
+                      "origin": "10.00000 10.00000 0.00000"}]}
+        """)).layers.first)
+        guard case .unsupported = layer.content else {
+            return XCTFail("모르는 도형을 그리면 안 된다: \(layer.content)")
+        }
+    }
 }

@@ -35,6 +35,11 @@ public struct SceneDocument: Sendable {
     public let scriptModules: [String: String]
     public let parallaxAmount: Double
 
+    /// 도형(`shape: quad`) 레이어의 기준 한 변. 파일에는 크기가 없다.
+    /// 근거는 `presets/lightshafts/`의 미리보기 씬(256x256 캔버스)과
+    /// 같은 이펙트의 미리보기가 쓰는 256x256 이미지 레이어다.
+    static let shapeQuadBaseSize = 256.0
+
     public static func load(from reader: PkgReader) throws -> SceneDocument {
         try load(from: reader, assets: nil)
     }
@@ -389,10 +394,28 @@ public struct SceneDocument: Sendable {
                     displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth)
             }
             if object["sound"] != nil { return unsupported("소리 파일 목록을 읽지 못했다") }
-            // 도형 레이어. 실물에서 빛줄기(Rayons lumineux)가 이 형태인데,
-            // 도형 자체가 아니라 거기 붙은 이펙트가 그림을 만든다.
-            if object["shape"] != nil {
-                return unsupported("도형 레이어라 M6의 이펙트 체인이 필요하다")
+            // 도형 레이어. 그림 없는 사각형이고, 거기 붙은 이펙트가 그림을 만든다
+            // (실물은 전부 `quad` + `lightshafts`인 빛줄기다).
+            //
+            // **파일에 크기가 없다.** 근거를 assets에서 찾았다: 편집기가 이 레이어를
+            // 만드는 프리셋(`presets/lightshafts/`)의 미리보기 씬이 256x256
+            // 캔버스이고 도형이 scale 1.2로 그 안을 채운다. 같은 이펙트의 미리보기가
+            // 쓰는 이미지 레이어도 정확히 256x256이다. 그래서 기준 변을 256으로 본다.
+            if let shape = object["shape"] as? String {
+                guard shape == "quad" else {
+                    return unsupported("아직 모르는 도형이다: \(shape)")
+                }
+                guard let origin else {
+                    return unsupported("도형 레이어의 origin을 읽을 수 없다")
+                }
+                let base = Self.shapeQuadBaseSize
+                return SceneLayer(
+                    id: id, name: name, visible: visible, origin: origin,
+                    size: Vec2(x: base * transform.scale.x, y: base * transform.scale.y),
+                    content: .solidColor(Vec3(x: 1, y: 1, z: 1)),
+                    unrunScripts: unrun, effects: effects, alpha: alpha, tint: tint,
+                    rotation: rotation, displayScripts: displayScripts,
+                    scale: transform.scale, parallaxDepth: depth)
             }
             return unsupported("알 수 없는 레이어 종류")
         }

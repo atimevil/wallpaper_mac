@@ -377,6 +377,24 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         }
     }
 
+    /// 이펙트가 그림을 그릴 흰 판. 도형 레이어에는 원본 그림이 없다.
+    ///
+    /// 크기는 레이어 크기를 따르되 상한을 지킨다 — 상시 구동 앱에서 큰 판을
+    /// 잡을 이유가 없고, 어차피 화면 크기로 줄여 보인다.
+    private static func makeBlankTexture(
+        width: Double, height: Double, compositor: MetalCompositor
+    ) -> MTLTexture? {
+        let cap = Double(EffectChain.maxWorkingSide)
+        let longest = Swift.max(width, height)
+        let divisor = longest > cap ? longest / cap : 1
+        let pixelWidth = Int((width / divisor).rounded())
+        let pixelHeight = Int((height / divisor).rounded())
+        guard pixelWidth > 0, pixelHeight > 0 else { return nil }
+        let bytes = [UInt8](repeating: 255, count: pixelWidth * pixelHeight * 4)
+        return try? compositor.makeTexture(from: .pixels(
+            bytes: Data(bytes), width: pixelWidth, height: pixelHeight, format: .rgba8888))
+    }
+
     /// 셰이더가 `#include`로 부르는 헤더들을 모은다.
     ///
     /// 헤더는 pkg에도 assets에도 있다. 한쪽만 보면 `ApplyBlending` 같은 공용 함수를
@@ -600,7 +618,24 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
             switch layer.content {
             case .solidColor(let c):
-                drawable.append((quad, .solid(SIMD4(Float(c.x), Float(c.y), Float(c.z), 1))))
+                // 도형 레이어는 그림이 없고 이펙트가 그림을 만든다(실물 빛줄기).
+                // 흰 판을 만들어 체인에 넣고 그 결과를 그린다.
+                if !layer.effects.isEmpty, Self.effectsEnabled,
+                   let blank = Self.makeBlankTexture(
+                    width: layer.size.x, height: layer.size.y, compositor: compositor),
+                   let chain = EffectChain(
+                    device: device,
+                    effects: layer.effects.map(\.definition),
+                    effectBases: layer.effects.map(\.base),
+                    source: blank, resolver: resolver,
+                    includes: shaderIncludes,
+                    makeTexture: { try compositor.makeTexture(from: $0) },
+                    diagnostics: &degraded) {
+                    chains.append((chain, blank))
+                    drawable.append((quad, .dynamic { [weak chain] in chain?.texture }))
+                } else {
+                    drawable.append((quad, .solid(SIMD4(Float(c.x), Float(c.y), Float(c.z), 1))))
+                }
 
             case .image(let path), .video(let path):
                 guard let raw = resolver.data(for: path) else {
