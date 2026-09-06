@@ -39,11 +39,36 @@ public enum TextRasterizer {
         wrapWidth: Double, maxRows: Int, usesEllipsis: Bool,
         shadow: TextShadow? = nil, shadowScale: Double = 1
     ) throws -> CGImage {
+        // 줄바꿈이 있으면 폭 제한이 없어도 여러 줄이다. **실물 시계 위젯의
+        // 날짜가 한 글자씩 줄바꿈으로 세로로 쌓는다** — `"0\n7\n\nS\nE\nP"` 꼴이다.
+        // 줄바꿈을 무시하면 그게 한 줄로 이어져, 상자에 맞추느라 깨알같이 작아진다.
+        let hasHardBreak = text.contains(where: \.isNewline)
         guard wrapWidth > 0, wrapWidth.isFinite else {
-            return try rasterize(text: text, fontData: fontData,
-                                 pointSize: pointSize, color: color,
-                                 shadow: shadow, shadowScale: shadowScale)
+            if !hasHardBreak {
+                return try rasterize(text: text, fontData: fontData,
+                                     pointSize: pointSize, color: color,
+                                     shadow: shadow, shadowScale: shadowScale)
+            }
+            return try rasterizeParagraphs(
+                text: text, fontData: fontData, pointSize: pointSize, color: color,
+                wrapWidth: 0, maxRows: maxRows, usesEllipsis: usesEllipsis,
+                shadow: shadow, shadowScale: shadowScale)
         }
+        return try rasterizeParagraphs(
+            text: text, fontData: fontData, pointSize: pointSize, color: color,
+            wrapWidth: wrapWidth, maxRows: maxRows, usesEllipsis: usesEllipsis,
+            shadow: shadow, shadowScale: shadowScale)
+    }
+
+    /// 줄바꿈으로 먼저 나누고, 각 문단을 폭에 맞춰 다시 접는다.
+    ///
+    /// 빈 줄도 한 줄만큼 자리를 차지해야 한다 — 실물 날짜가 묶음 사이를 빈 줄로
+    /// 띄운다(`"0\n7\n\nS\nE\nP"`). 빈 줄을 버리면 글자가 위로 붙어 버린다.
+    private static func rasterizeParagraphs(
+        text: String, fontData: Data?, pointSize: Double, color: Vec3,
+        wrapWidth: Double, maxRows: Int, usesEllipsis: Bool,
+        shadow: TextShadow?, shadowScale: Double
+    ) throws -> CGImage {
         guard !text.isEmpty, !text.allSatisfy(\.isWhitespace) else { throw TextRasterError.empty }
         guard pointSize.isFinite, pointSize > 0 else {
             throw TextRasterError.badSize(width: 0, height: 0)
@@ -58,29 +83,25 @@ public enum TextRasterizer {
 
         // 줄을 직접 나눈다. CTFramesetter는 높이를 미리 알아야 해서 두 번 재야 한다.
         var lines: [CTLine] = []
-        var remaining = Substring(text)
         let limit = maxRows > 0 ? maxRows : 64
-        while !remaining.isEmpty, lines.count < limit {
-            let attributed = NSAttributedString(string: String(remaining), attributes: attributes)
-            let typesetter = CTTypesetterCreateWithAttributedString(attributed)
-            let count = CTTypesetterSuggestLineBreak(typesetter, 0, wrapWidth)
-            guard count > 0 else { break }
-            let isLast = lines.count == limit - 1 && count < remaining.count
-            if isLast, usesEllipsis {
-                // 마지막 줄이 잘리면 말줄임표를 붙인다. 자리를 만들려고 조금 줄인다.
-                let head = String(remaining.prefix(max(1, count - 1))) + "…"
+        // 빈 줄인지 함께 들고 있는다. 그려도 아무것도 안 나오지만 자리는 차지한다.
+        let paragraphs = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        for paragraph in paragraphs where lines.count < limit {
+            if paragraph.isEmpty {
                 lines.append(CTLineCreateWithAttributedString(
-                    NSAttributedString(string: head, attributes: attributes)))
-                remaining = ""
-                break
+                    NSAttributedString(string: " ", attributes: attributes)))
+                continue
             }
-            let piece = String(remaining.prefix(count))
-            lines.append(CTLineCreateWithAttributedString(
-                NSAttributedString(string: piece, attributes: attributes)))
-            remaining = remaining.dropFirst(count)
+            if wrapWidth <= 0 {
+                lines.append(CTLineCreateWithAttributedString(
+                    NSAttributedString(string: String(paragraph), attributes: attributes)))
+                continue
+            }
+            appendWrapped(paragraph, into: &lines, limit: limit,
+                          wrapWidth: wrapWidth, usesEllipsis: usesEllipsis,
+                          attributes: attributes)
         }
         guard !lines.isEmpty else { throw TextRasterError.empty }
-
         var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
         _ = CTLineGetTypographicBounds(lines[0], &ascent, &descent, &leading)
         let lineHeight = ceil(ascent + descent + leading)
@@ -111,6 +132,33 @@ public enum TextRasterizer {
             throw TextRasterError.contextCreationFailed
         }
         return image
+    }
+
+    /// 문단 하나를 폭에 맞춰 접어 줄 목록에 붙인다.
+    private static func appendWrapped(
+        _ paragraph: Substring, into lines: inout [CTLine], limit: Int,
+        wrapWidth: Double, usesEllipsis: Bool,
+        attributes: [NSAttributedString.Key: Any]
+    ) {
+        var remaining = paragraph
+        while !remaining.isEmpty, lines.count < limit {
+            let attributed = NSAttributedString(string: String(remaining), attributes: attributes)
+            let typesetter = CTTypesetterCreateWithAttributedString(attributed)
+            let count = CTTypesetterSuggestLineBreak(typesetter, 0, wrapWidth)
+            guard count > 0 else { break }
+            let isLast = lines.count == limit - 1 && count < remaining.count
+            if isLast, usesEllipsis {
+                // 마지막 줄이 잘리면 말줄임표를 붙인다. 자리를 만들려고 조금 줄인다.
+                let head = String(remaining.prefix(max(1, count - 1))) + "…"
+                lines.append(CTLineCreateWithAttributedString(
+                    NSAttributedString(string: head, attributes: attributes)))
+                return
+            }
+            let piece = String(remaining.prefix(count))
+            lines.append(CTLineCreateWithAttributedString(
+                NSAttributedString(string: piece, attributes: attributes)))
+            remaining = remaining.dropFirst(count)
+        }
     }
 
     public static func rasterize(

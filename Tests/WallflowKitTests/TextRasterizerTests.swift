@@ -228,3 +228,55 @@ extension TextRasterizerTests {
         XCTAssertEqual(a.height, b.height)
     }
 }
+
+/// 줄바꿈. **실물 시계 위젯의 날짜가 한 글자씩 세로로 쌓는다** —
+/// `"0\n7\n\nS\nE\nP\n\n2\n0\n2\n6"` 꼴이다. 줄바꿈을 무시하면 그게 한 줄로
+/// 이어지고, 상자에 맞추느라 깨알같이 작아진다.
+extension TextRasterizerTests {
+    private func multiline(
+        _ text: String, wrapWidth: Double = 0, maxRows: Int = 0
+    ) throws -> CGImage {
+        try TextRasterizer.rasterize(
+            text: text, fontData: nil, pointSize: 64, color: white,
+            wrapWidth: wrapWidth, maxRows: maxRows, usesEllipsis: false)
+    }
+
+    func testHardBreaksStackLines() throws {
+        let stacked = try multiline("0\n7\nS")
+        let inline = try multiline("07S")
+        XCTAssertGreaterThan(stacked.height, inline.height * 2, "세로로 쌓여야 한다")
+        XCTAssertLessThan(stacked.width, inline.width, "한 글자 폭이어야 한다")
+    }
+
+    /// 빈 줄도 한 줄만큼 자리를 차지한다. 실물 날짜가 묶음 사이를 빈 줄로 띄운다.
+    func testBlankLinesTakeSpace() throws {
+        let spaced = try multiline("0\n\n7")
+        let tight = try multiline("0\n7")
+        XCTAssertGreaterThan(spaced.height, tight.height, "빈 줄이 사라졌다")
+    }
+
+    /// 폭 제한이 없어도 줄바꿈은 지킨다. 예전에는 폭 제한이 있을 때만 여러 줄이었다.
+    func testHardBreaksWorkWithoutWrapWidth() throws {
+        let text = "0\n7\n\nS\nE\nP\n\n2\n0\n2\n6"
+        let image = try multiline(text)
+        let single = try TextRasterizer.rasterize(
+            text: "07SEP2026", fontData: nil, pointSize: 64, color: white)
+        XCTAssertGreaterThan(image.height, single.height * 8, "11줄이 쌓여야 한다")
+        XCTAssertLessThan(image.width, single.width, "세로로 쌓이면 폭이 좁아진다")
+    }
+
+    /// 줄 수 제한은 그대로 걸린다. 스크립트가 만든 글자가 끝없이 길어질 수 있다.
+    func testMaxRowsStillLimits() throws {
+        let all = try multiline("1\n2\n3\n4\n5\n6")
+        let capped = try multiline("1\n2\n3\n4\n5\n6", maxRows: 2)
+        XCTAssertLessThan(capped.height, all.height)
+    }
+
+    /// 줄바꿈 안에서도 폭 제한은 살아 있다. 문단마다 따로 접어야 한다.
+    func testWrapsInsideEachParagraph() throws {
+        let wrapped = try multiline(
+            "aaaaaaaaaaaaaaaa\nbb", wrapWidth: 120)
+        let short = try multiline("aa\nbb", wrapWidth: 120)
+        XCTAssertGreaterThan(wrapped.height, short.height, "긴 문단이 접히지 않았다")
+    }
+}
