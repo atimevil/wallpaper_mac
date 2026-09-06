@@ -5,6 +5,20 @@ public enum ParticleEmitter: Equatable, Sendable {
                       distanceMin: Double, distanceMax: Double)
     case boxRandom(rate: Double, origin: Vec3, directions: Vec3,
                    distanceMin: Vec3, distanceMax: Vec3)
+
+    /// 씬의 조정값을 얹는다. 방출 주기는 rate로, 뿌리는 범위는 크기 배율로 조절한다.
+    func scaled(rate factor: Double, distance: Double) -> ParticleEmitter {
+        switch self {
+        case .sphereRandom(let r, let o, let d, let lo, let hi):
+            return .sphereRandom(rate: r * factor, origin: o, directions: d,
+                                 distanceMin: lo * distance, distanceMax: hi * distance)
+        case .boxRandom(let r, let o, let d, let lo, let hi):
+            return .boxRandom(
+                rate: r * factor, origin: o, directions: d,
+                distanceMin: Vec3(x: lo.x * distance, y: lo.y * distance, z: lo.z * distance),
+                distanceMax: Vec3(x: hi.x * distance, y: hi.y * distance, z: hi.z * distance))
+        }
+    }
 }
 
 public enum ParticleInitializer: Equatable, Sendable {
@@ -16,8 +30,32 @@ public enum ParticleInitializer: Equatable, Sendable {
     case rotationRandom(min: Vec3, max: Vec3)
     case angularVelocityRandom(min: Vec3, max: Vec3)
     case turbulentVelocityRandom(offset: Double, scale: Double, speedMin: Double, speedMax: Double)
-}
 
+    /// 씬의 조정값을 얹는다. 크기·속도·수명·투명도는 배율이고 색은 갈아끼운다.
+    func scaled(size: Double, speed: Double, lifetime: Double, alpha: Double,
+                color: Vec3?) -> ParticleInitializer {
+        func mul(_ v: Vec3, _ k: Double) -> Vec3 { Vec3(x: v.x * k, y: v.y * k, z: v.z * k) }
+        switch self {
+        case .lifetimeRandom(let a, let b):
+            return .lifetimeRandom(min: a * lifetime, max: b * lifetime)
+        case .sizeRandom(let a, let b):
+            return .sizeRandom(min: a * size, max: b * size)
+        case .alphaRandom(let a, let b):
+            return .alphaRandom(min: a * alpha, max: b * alpha)
+        case .velocityRandom(let a, let b):
+            return .velocityRandom(min: mul(a, speed), max: mul(b, speed))
+        case .colorRandom(let a, let b):
+            // 씬이 색을 지정하면 프리셋의 범위를 버리고 그 색으로 고정한다.
+            guard let color else { return .colorRandom(min: a, max: b) }
+            return .colorRandom(min: color, max: color)
+        case .turbulentVelocityRandom(let offset, let scale, let lo, let hi):
+            return .turbulentVelocityRandom(offset: offset, scale: scale,
+                                            speedMin: lo * speed, speedMax: hi * speed)
+        case .rotationRandom, .angularVelocityRandom:
+            return self
+        }
+    }
+}
 public enum ParticleOperator: Equatable, Sendable {
     case movement(gravity: Vec3, drag: Double)
     case angularMovement(force: Vec3, drag: Double)
@@ -30,10 +68,70 @@ public enum ParticleOperator: Equatable, Sendable {
     case controlPointAttract(controlPoint: Int, origin: Vec3, scale: Double, threshold: Double)
 }
 
+/// 씬이 프리셋 위에 얹는 조정값.
+///
+/// 창작마당 씬은 프리셋을 그대로 쓰지 않고 `instanceoverride`로 개수·속도·크기를
+/// 배로 조절한다. 무시하면 씬이 의도한 것과 전혀 다른 밀도로 뿌린다 — 실물
+/// Hiyuki의 벚꽃은 `count`가 0.05라 프리셋 200장 중 10장만 원한다.
+public struct ParticleOverride: Equatable, Sendable {
+    /// 전부 배율이다. 1이면 프리셋 그대로.
+    public var count: Double = 1
+    public var rate: Double = 1
+    public var size: Double = 1
+    public var speed: Double = 1
+    public var lifetime: Double = 1
+    public var alpha: Double = 1
+    /// 색은 배율이 아니라 통째로 갈아끼운다. 0~1이다.
+    public var color: Vec3?
+
+    public init() {}
+
+    /// 아무것도 바꾸지 않는지. 그러면 프리셋을 그대로 쓴다.
+    public var isIdentity: Bool {
+        count == 1 && rate == 1 && size == 1 && speed == 1
+            && lifetime == 1 && alpha == 1 && color == nil
+    }
+
+    /// `instanceoverride` 객체에서 읽는다. 배율은 파일에서 오므로 이상한 값은 버린다.
+    public static func parse(_ json: [String: Any]) -> ParticleOverride {
+        var result = ParticleOverride()
+        func factor(_ key: String) -> Double? {
+            let raw = (json[key] as? [String: Any])?["value"] ?? json[key]
+            let value: Double?
+            if let d = raw as? Double { value = d }
+            else if let s = raw as? String { value = Double(s) }
+            else { value = nil }
+            guard let value, value.isFinite, value >= 0, value <= 100 else { return nil }
+            return value
+        }
+        result.count = factor("count") ?? 1
+        result.rate = factor("rate") ?? 1
+        result.size = factor("size") ?? 1
+        result.speed = factor("speed") ?? 1
+        result.lifetime = factor("lifetime") ?? 1
+        result.alpha = factor("alpha") ?? 1
+        if let text = ((json["colorn"] as? [String: Any])?["value"] ?? json["colorn"]) as? String,
+           let parsed = Vec3.parse(text) {
+            // colorn은 이미 0~1이다. 파티클 프리셋의 색(0~255)과 다르다.
+            result.color = parsed
+        }
+        return result
+    }
+}
+
 public struct ParticlePreset: Equatable, Sendable {
     /// maxcount는 파일에서 온 값이고 시뮬레이션 버퍼 크기를 정한다.
     /// 실물 프리셋의 최대가 300이므로 8192는 충분히 관대하다.
     public static let maxAllowedCount = 8192
+
+    /// 씬 하나가 시뮬레이션할 수 있는 파티클 총량.
+    ///
+    /// `maxAllowedCount`는 프리셋 하나만 막는다. 레이어가 여섯이면 그 여섯 배가
+    /// 되므로 상시 구동 앱의 예산은 지켜지지 않는다. 실측: 창작마당 씬 하나가
+    /// 파티클 48,192개로 프레임당 23.3ms를 썼다 — 60fps 예산 16.7ms를 넘긴다.
+    /// 파티클 하나가 약 0.5µs이므로 12,000개는 약 6ms다. 이건 배경화면이라
+    /// 항상 켜져 있고, 사용자의 진짜 작업이 CPU를 먼저 써야 한다.
+    public static let maxAllowedSceneCount = 12_000
 
     /// 이미터의 rate 필드가 없을 때 쓰는 기본 방출률.
     /// WE 자체 예제 particles/example.json에서 20을 쓴다.
@@ -74,6 +172,48 @@ public struct ParticlePreset: Equatable, Sendable {
         self.operators = operators
         self.unsupportedNames = unsupportedNames
         self.malformedNames = malformedNames
+    }
+
+    /// 씬의 조정값을 얹은 프리셋을 만든다.
+    ///
+    /// 개수는 최소 1로 남긴다 — 배율이 0.05여도 아예 안 나오면 씬이 의도한
+    /// "드물게 흩날림"이 아니라 "없음"이 된다.
+    public func applying(_ override: ParticleOverride) -> ParticlePreset {
+        guard !override.isIdentity else { return self }
+        let scaledCount = override.count == 1 ? maxCount
+            : Swift.max(1, Swift.min(Int((Double(maxCount) * override.count).rounded()),
+                                     Self.maxAllowedCount))
+        return ParticlePreset(
+            maxCount: scaledCount,
+            startTime: startTime,
+            materialPath: materialPath,
+            emitters: emitters.map { $0.scaled(rate: override.rate, distance: override.size) },
+            initializers: initializers.map {
+                $0.scaled(size: override.size, speed: override.speed,
+                          lifetime: override.lifetime, alpha: override.alpha,
+                          color: override.color)
+            },
+            operators: operators,
+            unsupportedNames: unsupportedNames,
+            malformedNames: malformedNames)
+    }
+
+    /// 총량 예산에 맞추기 위한 축소 배율. 줄일 필요가 없으면 1이다.
+    public static func budgetScale(forTotalCount total: Int) -> Double {
+        guard total > maxAllowedSceneCount else { return 1 }
+        return Double(maxAllowedSceneCount) / Double(total)
+    }
+
+    /// 예산에 맞춰 개수와 방출률을 같은 배율로 줄인다.
+    ///
+    /// 개수만 줄이면 방출이 빈 슬롯을 기다리며 몰려, 밀도 대신 수명이 짧아 보인다.
+    /// 둘을 같이 줄여야 "덜 많다"로 보이고 씬이 의도한 모양이 남는다.
+    public func scaledToBudget(_ factor: Double) -> ParticlePreset {
+        guard factor < 1, factor > 0 else { return self }
+        var budget = ParticleOverride()
+        budget.count = factor
+        budget.rate = factor
+        return applying(budget)
     }
 
     public static func parse(_ json: [String: Any]) -> ParticlePreset? {

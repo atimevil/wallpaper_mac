@@ -258,4 +258,13 @@ public struct SceneLayer: Equatable, Sendable {
         self.content = content
         self.unrunScripts = unrunScripts
     }
+
+    /// 내용만 바꾼 사본. 배치와 스크립트는 그대로 둔다.
+    public func replacingContent(_ content: LayerContent) -> SceneLayer {
+        SceneLayer(
+            id: id, name: name, visible: visible, origin: origin, size: size,
+            content: content, unrunScripts: unrunScripts, alpha: alpha, tint: tint,
+            rotation: rotation, displayScripts: displayScripts, scale: scale,
+            parallaxDepth: parallaxDepth)
+    }
 }

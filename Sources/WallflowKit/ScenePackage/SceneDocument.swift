@@ -83,11 +83,12 @@ public struct SceneDocument: Sendable {
         // 부모-자식 변환을 먼저 푼다. 자식의 origin과 scale은 부모 기준 상대값이라,
         // 무시하면 시계가 화면 밖에 그려지고 글자 크기가 어긋난다(실물에서 확인).
         let transforms = resolveTransforms(objects)
-        let layers = objects.enumerated().map { index, object in
+        let rawLayers = objects.enumerated().map { index, object in
             let id = object["id"] as? Int ?? index
             return makeLayer(object, fallbackID: index, resolver: resolver,
                              transform: transforms[id] ?? .identity)
         }
+        let layers = applyingParticleBudget(rawLayers)
 
         // cameraparallax가 꺼져 있으면 강도를 0으로 본다.
         let parallaxOn = boolValue(general["cameraparallax"]) ?? false
@@ -98,6 +99,29 @@ public struct SceneDocument: Sendable {
             layers: layers,
             parallaxAmount: parallaxOn && amount.isFinite ? Swift.min(Swift.max(amount, 0), 2) : 0
         )
+    }
+
+    /// 씬 전체의 파티클 총량을 예산 안으로 죈다.
+    ///
+    /// 프리셋 하나의 상한만으로는 부족하다 — 파티클 레이어가 여섯인 씬이 있고,
+    /// `instanceoverride`가 개수를 올리기도 한다(실물에서 2,000 → 8,000).
+    /// 넘치면 **모든 파티클 레이어를 같은 배율로** 줄인다. 큰 것만 자르면
+    /// 레이어 사이의 밀도 관계가 깨져 씬이 다른 그림이 된다.
+    static func applyingParticleBudget(_ layers: [SceneLayer]) -> [SceneLayer] {
+        var total = 0
+        for layer in layers {
+            if case .particle(let preset, _, _) = layer.content { total += preset.maxCount }
+        }
+        let factor = ParticlePreset.budgetScale(forTotalCount: total)
+        guard factor < 1 else { return layers }
+        return layers.map { layer in
+            guard case .particle(let preset, let texturePath, let blend) = layer.content else {
+                return layer
+            }
+            return layer.replacingContent(
+                .particle(preset: preset.scaledToBudget(factor),
+                          texturePath: texturePath, blend: blend))
+        }
     }
 
     /// 레이어 하나의 최종 배치. 부모 사슬을 이미 합쳐 놓은 값이다.
@@ -266,7 +290,12 @@ public struct SceneDocument: Sendable {
             }
             let particleSize = (object["size"] as? String).flatMap(Vec2.parse)
                 ?? Vec2(x: 0, y: 0)
-            let content = resolveParticleContent(presetPath: particlePresetPath, resolver: resolver)
+            // 씬은 프리셋을 그대로 쓰지 않고 instanceoverride로 개수·속도·크기를
+            // 배로 조절한다. 무시하면 의도와 전혀 다른 밀도로 뿌린다.
+            let override = (object["instanceoverride"] as? [String: Any])
+                .map(ParticleOverride.parse) ?? ParticleOverride()
+            let content = resolveParticleContent(
+                presetPath: particlePresetPath, resolver: resolver, override: override)
             return SceneLayer(
                 id: id, name: name, visible: visible,
                 origin: origin, size: particleSize,
@@ -426,7 +455,7 @@ public struct SceneDocument: Sendable {
 
     /// 파티클 프리셋을 따라가 레이어 내용을 판정한다.
     private static func resolveParticleContent(
-        presetPath: String, resolver: ReferenceResolver
+        presetPath: String, resolver: ReferenceResolver, override: ParticleOverride
     ) -> LayerContent {
         // 프리셋 JSON을 읽는다
         guard let presetJson = resolver.json(for: presetPath) else {
@@ -458,7 +487,8 @@ public struct SceneDocument: Sendable {
 
         // 텍스처 경로를 만든다
         let texturePath = "materials/\(textureName).tex"
-        return .particle(preset: preset, texturePath: texturePath, blend: blend)
+        return .particle(preset: preset.applying(override),
+                         texturePath: texturePath, blend: blend)
     }
 
     /// 머티리얼을 읽어 이 레이어가 무엇인지 판정한다.
