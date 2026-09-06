@@ -144,3 +144,70 @@ final class ScriptEngineTests: XCTestCase {
         XCTAssertEqual(engine.update(value: ""), "ok")
     }
 }
+
+extension ScriptEngineTests {
+    /// 실물 Deltarune 씬의 미디어 위젯 스크립트를 그대로 옮긴 것.
+    /// 음악이 안 나오면 스스로 숨는다 — 이벤트를 안 보내면 저장된 alpha로 그려져
+    /// 배경화면 위에 반투명한 검은 상자가 남는다.
+    func testMediaWidgetHidesItselfWhenNothingIsPlaying() throws {
+        let engine = ScriptEngine(source: """
+        'use strict';
+        export function init(value) {
+            thisLayer.isUserHidden = (value === false);
+            thisLayer.visible = true;
+            thisLayer.alpha = thisLayer.isUserHidden ? 0 : 1;
+            return value;
+        }
+        export function mediaPlaybackChanged(event) {
+            if (thisLayer.isUserHidden) { thisLayer.alpha = 0; return; }
+            let isPlaying = event.state !== MediaPlaybackEvent.PLAYBACK_STOPPED;
+            thisLayer.alpha = isPlaying ? 1 : 0;
+        }
+        """)
+        let state = try XCTUnwrap(
+            engine.runLayerCallbacks(initial: LayerScriptState(alpha: 0.5, visible: true)))
+        XCTAssertEqual(state.alpha, 0, "재생 중이 아니면 숨어야 한다")
+    }
+
+    /// 썸네일 콜백만 있는 스크립트도 있다(실물 alpha 스크립트).
+    func testThumbnailCallbackAlsoRuns() throws {
+        let engine = ScriptEngine(source: """
+        export function mediaThumbnailChanged(event) {
+            if (thisLayer.visible == true) {
+                thisLayer.alpha = 0;
+                thisObject.getAnimation().play();
+            }
+        }
+        """)
+        let state = try XCTUnwrap(
+            engine.runLayerCallbacks(initial: LayerScriptState(alpha: 1, visible: true)))
+        XCTAssertEqual(state.alpha, 0)
+    }
+
+    /// 콜백이 하나도 없으면 아무것도 바꾸지 않는다.
+    /// 있지도 않은 근거로 레이어를 숨기면 안 된다.
+    func testNoCallbacksLeavesStateAlone() {
+        let engine = ScriptEngine(source: "export function update(v) { return v; }")
+        XCTAssertNil(engine.runLayerCallbacks(initial: LayerScriptState(alpha: 1, visible: true)))
+    }
+
+    /// 콜백 안에서 던져도 죽지 않아야 한다.
+    func testThrowingCallbackIsSurvivable() {
+        let engine = ScriptEngine(source: """
+        export function mediaPlaybackChanged(event) { throw new Error("펑"); }
+        """)
+        XCTAssertNil(engine.runLayerCallbacks(initial: LayerScriptState(alpha: 1, visible: true)))
+    }
+
+    /// 스크립트가 이상한 alpha를 넣어도 0~1로 죈다. 파일에서 온 코드다.
+    func testAlphaIsClamped() throws {
+        for (set, want) in [("-3", 0.0), ("42", 1.0)] {
+            let engine = ScriptEngine(source: """
+            export function mediaPlaybackChanged(e) { thisLayer.alpha = \(set); }
+            """)
+            let state = try XCTUnwrap(
+                engine.runLayerCallbacks(initial: LayerScriptState(alpha: 1, visible: true)))
+            XCTAssertEqual(state.alpha, want, accuracy: 0.001)
+        }
+    }
+}

@@ -26,6 +26,17 @@ public enum ScriptFailure: Equatable, Sendable {
 /// (`SceneRenderer` 참고). 렌더 스레드에서 직접 부르지 마라.
 ///
 /// `JSContext`는 스레드 안전하지 않다. 인스턴스 하나를 한 스레드에서만 쓴다.
+/// 레이어 속성 스크립트가 정하는 표시 상태.
+public struct LayerScriptState: Equatable, Sendable {
+    public var alpha: Double
+    public var visible: Bool
+
+    public init(alpha: Double, visible: Bool) {
+        self.alpha = alpha
+        self.visible = visible
+    }
+}
+
 /// 직렬 큐 하나에 갇혀 쓰이는 것을 전제로 Sendable을 단다. `JSContext`는 스레드
 /// 안전하지 않으므로 두 스레드에서 동시에 부르면 안 된다. 이 약속은 호출자가 지킨다.
 public final class ScriptEngine: @unchecked Sendable {
@@ -103,6 +114,65 @@ public final class ScriptEngine: @unchecked Sendable {
         // 길이는 곧 메모리다. 자를 때 UTF-16 경계를 넘지 않게 문자 단위로 센다.
         return text.count > Self.maxResultLength
             ? String(text.prefix(Self.maxResultLength)) : text
+    }
+
+    /// 레이어 속성 스크립트를 돌려 최종 표시 상태를 얻는다.
+    ///
+    /// 창작마당의 미디어 위젯(앨범 표지·곡 제목)은 `update`가 아니라 **이벤트 콜백**으로
+    /// 자기를 숨긴다. 실물 스크립트가 이렇게 되어 있다:
+    /// ```js
+    /// let isPlaying = event.state !== MediaPlaybackEvent.PLAYBACK_STOPPED;
+    /// thisLayer.alpha = isPlaying ? 1 : 0;
+    /// ```
+    /// 즉 **음악이 안 나오면 숨긴다.** 이벤트를 안 보내면 저장된 alpha(0.5)로 그려져
+    /// 배경화면 위에 반투명한 검은 상자가 남는다. 추측해서 숨기는 대신 스크립트에게
+    /// "지금 아무것도 재생 중이 아니다"라고 알려 스스로 판단하게 한다.
+    ///
+    /// - Returns: 스크립트가 정한 표시 상태. 콜백이 하나도 없으면 nil.
+    public func runLayerCallbacks(initial: LayerScriptState) -> LayerScriptState? {
+        var thrown: String?
+        context.exceptionHandler = { _, value in
+            thrown = value?.toString() ?? "알 수 없는 예외"
+        }
+
+        context.setObject(
+            ["alpha": initial.alpha, "visible": initial.visible, "isUserHidden": false],
+            forKeyedSubscript: "thisLayer" as NSString)
+        // 실물 스크립트가 쓰는 상수와 API를 흉내 낸다. 값 자체는 중요하지 않고
+        // 같은 상수끼리 비교되기만 하면 된다.
+        context.evaluateScript("""
+        var MediaPlaybackEvent = { PLAYBACK_PLAYING: 0, PLAYBACK_PAUSED: 1, PLAYBACK_STOPPED: 2 };
+        var MediaThumbnailEvent = {};
+        // 애니메이션 API는 없다. 불려도 죽지 않게만 한다.
+        var thisObject = { getAnimation: function () { return { play: function () {} }; } };
+        """)
+
+        var ran = false
+        // init은 사용자가 저장한 값을 받는다. 이걸 건너뛰면 isUserHidden이 정해지지 않는다.
+        if let initFn = context.objectForKeyedSubscript("init"), !initFn.isUndefined {
+            initFn.call(withArguments: [initial.visible])
+            ran = true
+        }
+        // 지금 아무것도 재생 중이 아니다. 그게 사실이다.
+        if let fn = context.objectForKeyedSubscript("mediaPlaybackChanged"), !fn.isUndefined {
+            fn.call(withArguments: [["state": 2]])
+            ran = true
+        }
+        if let fn = context.objectForKeyedSubscript("mediaThumbnailChanged"), !fn.isUndefined {
+            fn.call(withArguments: [["hasThumbnail": false]])
+            ran = true
+        }
+        guard ran else { return nil }
+        if let thrown {
+            failure = .updateFailed(thrown)
+            return nil
+        }
+
+        guard let layer = context.objectForKeyedSubscript("thisLayer"), !layer.isUndefined,
+              let alpha = layer.objectForKeyedSubscript("alpha")?.toDouble(),
+              alpha.isFinite else { return nil }
+        let visible = layer.objectForKeyedSubscript("visible")?.toBool() ?? initial.visible
+        return LayerScriptState(alpha: min(max(alpha, 0), 1), visible: visible)
     }
 
     /// 줄 맨 앞의 `export`만 지운다. ES 모듈 문법을 `evaluateScript`가 모르기 때문이다.

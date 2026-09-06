@@ -153,6 +153,8 @@ public struct SceneLayer: Equatable, Sendable {
     /// 화면 평면 회전(라디안). 부모 사슬의 회전이 이미 합쳐져 있다.
     public let rotation: Double
     public let content: LayerContent
+    /// `visible`/`alpha`에 붙은 스크립트 본문들. 미디어 위젯이 여기서 스스로 숨는다.
+    public let displayScripts: [String]
     /// 스크립트가 붙어 있지만 우리가 아직 돌리지 못하는 속성 이름들.
     ///
     /// 조용히 무시하면 사용자는 레이어가 왜 안 움직이는지 알 수 없다. 실물에서
@@ -164,8 +166,9 @@ public struct SceneLayer: Equatable, Sendable {
         id: Int, name: String, visible: Bool, origin: Vec3, size: Vec2,
         content: LayerContent, unrunScripts: [String] = [],
         alpha: Double = 1, tint: Vec3 = Vec3(x: 1, y: 1, z: 1),
-        rotation: Double = 0
+        rotation: Double = 0, displayScripts: [String] = []
     ) {
+        self.displayScripts = displayScripts
         self.alpha = alpha
         self.tint = tint
         self.rotation = rotation

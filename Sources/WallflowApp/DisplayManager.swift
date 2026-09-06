@@ -15,8 +15,20 @@ final class DisplayManager {
     var isOccluded: Bool {
         guard !windows.isEmpty else { return false }
         // 하나라도 보이면 그린다.
-        return !windows.values.contains { $0.occlusionState.contains(.visible) }
+        let occluded = !windows.values.contains { $0.occlusionState.contains(.visible) }
+        if occluded != lastLoggedOcclusion {
+            lastLoggedOcclusion = occluded
+            // "배경화면이 검다"는 신고의 첫 번째 원인이 이것이다. 가려지면 그리기를
+            // 멈추는 것이 의도된 동작이라는 걸 로그로 구별할 수 있어야 한다.
+            FileHandle.standardError.write(Data(
+                (occluded
+                    ? "배경 윈도우가 전부 가려져 그리기를 멈춘다\n"
+                    : "배경 윈도우가 보여 그리기를 재개한다\n").utf8))
+        }
+        return occluded
     }
+
+    private var lastLoggedOcclusion: Bool?
 
     init() {
         NotificationCenter.default.addObserver(

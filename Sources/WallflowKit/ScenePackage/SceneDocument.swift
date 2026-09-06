@@ -192,9 +192,17 @@ public struct SceneDocument: Sendable {
         }
         // 스크립트가 붙어 있는데 우리가 못 돌리는 경우를 사용자에게 알린다.
         var unrun: [String] = []
-        for key in ["origin", "size", "scale", "alpha", "color", "visible"]
-        where (object[key] as? [String: Any])?["script"] != nil {
-            unrun.append(key)
+        var displayScripts: [String] = []
+        for key in ["origin", "size", "scale", "alpha", "color", "visible"] {
+            guard let script = (object[key] as? [String: Any])?["script"] as? String
+            else { continue }
+            // alpha와 visible 스크립트는 실제로 돌린다. 미디어 위젯이 여기서
+            // "지금 재생 중이 아니다"를 알고 스스로 숨는다.
+            if key == "alpha" || key == "visible" {
+                displayScripts.append(script)
+            } else {
+                unrun.append(key)
+            }
         }
 
         func unsupported(_ reason: String) -> SceneLayer {
@@ -203,7 +211,8 @@ public struct SceneDocument: Sendable {
                 origin: origin ?? Vec3(x: 0, y: 0, z: 0),
                 size: size ?? Vec2(x: 0, y: 0),
                 content: .unsupported(reason: reason), unrunScripts: unrun,
-                alpha: alpha, tint: tint, rotation: rotation
+                alpha: alpha, tint: tint, rotation: rotation,
+                displayScripts: displayScripts
             )
         }
 
@@ -217,7 +226,8 @@ public struct SceneDocument: Sendable {
             return SceneLayer(
                 id: id, name: name, visible: visible,
                 origin: origin, size: particleSize,
-                content: content, unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation
+                content: content, unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation,
+                displayScripts: displayScripts
             )
         }
 
@@ -234,7 +244,8 @@ public struct SceneDocument: Sendable {
                     id: id, name: name, visible: visible,
                     origin: origin, size: size ?? Vec2(x: 0, y: 0),
                     content: .text(makeTextLayer(text, object: object)),
-                    unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation)
+                    unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation,
+                    displayScripts: displayScripts)
             }
             if let sound = makeSoundLayer(object) {
                 // 소리는 화면을 차지하지 않는다. origin이 없어도 상관없다.
@@ -243,7 +254,8 @@ public struct SceneDocument: Sendable {
                     origin: origin ?? Vec3(x: 0, y: 0, z: 0),
                     size: size ?? Vec2(x: 0, y: 0),
                     content: .sound(sound), unrunScripts: unrun,
-                    alpha: alpha, tint: tint, rotation: rotation)
+                    alpha: alpha, tint: tint, rotation: rotation,
+                    displayScripts: displayScripts)
             }
             if object["sound"] != nil { return unsupported("소리 파일 목록을 읽지 못했다") }
             return unsupported("알 수 없는 레이어 종류")
@@ -263,7 +275,7 @@ public struct SceneDocument: Sendable {
             id: id, name: name, visible: visible,
             origin: origin, size: size,
             content: content, unrunScripts: unrun, alpha: alpha, tint: tint,
-            rotation: rotation
+            rotation: rotation, displayScripts: displayScripts
         )
     }
 

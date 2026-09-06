@@ -100,6 +100,40 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         super.init()
     }
 
+    /// `alpha`/`visible` 스크립트를 돌려 표시 상태를 정한다.
+    ///
+    /// 여러 스크립트가 붙어 있으면 가장 숨기는 쪽을 따른다. 이 위젯들은 조건이
+    /// 맞지 않을 때 자기를 감추는 용도라, 하나라도 숨기라면 숨기는 것이 의도에 맞다.
+    private static func applyDisplayScripts(
+        _ layer: SceneLayer, degraded: inout [String]
+    ) -> SceneLayer {
+        guard !layer.displayScripts.isEmpty else { return layer }
+        var alpha = layer.alpha
+        var visible = layer.visible
+        var ran = false
+        for source in layer.displayScripts {
+            let engine = ScriptEngine(source: source)
+            // 콜백 전용 스크립트에는 update가 없다. 그건 실패가 아니다 —
+            // 미디어 위젯은 이벤트로만 동작한다. 본문 평가 실패만 건너뛴다.
+            if case .evaluationFailed = engine.failure { continue }
+            guard let state = engine.runLayerCallbacks(
+                initial: LayerScriptState(alpha: layer.alpha, visible: layer.visible))
+            else { continue }
+            alpha = Swift.min(alpha, state.alpha)
+            visible = visible && state.visible
+            ran = true
+        }
+        guard ran else {
+            degraded.append("\(layer.name): 표시 스크립트를 돌리지 못해 저장된 값으로 그린다")
+            return layer
+        }
+        return SceneLayer(
+            id: layer.id, name: layer.name, visible: visible,
+            origin: layer.origin, size: layer.size, content: layer.content,
+            unrunScripts: layer.unrunScripts, alpha: alpha, tint: layer.tint,
+            rotation: layer.rotation, displayScripts: layer.displayScripts)
+    }
+
     /// 소리 파일을 찾아 재생기를 만든다.
     ///
     /// 파일을 임시 디스크에 풀지 않는다. `AVAudioPlayer(data:)`가 메모리에서 바로 읽는다.
@@ -281,7 +315,16 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var sounds: [AVAudioPlayer] = []
         var drawable: [(QuadInstance, LayerSource)] = []
 
-        for layer in document.layers where layer.visible {
+        for rawLayer in document.layers where rawLayer.visible {
+            // 표시 스크립트를 먼저 돌린다. 미디어 위젯이 "지금 재생 중이 아니다"를
+            // 알고 스스로 숨는다 — 저장된 alpha로 그리면 반투명한 검은 상자가 남는다.
+            let layer = Self.applyDisplayScripts(rawLayer, degraded: &degraded)
+            guard layer.visible, layer.alpha > 0.004 else {
+                if rawLayer.alpha != layer.alpha || rawLayer.visible != layer.visible {
+                    degraded.append("\(layer.name): 스크립트가 숨김으로 정했다")
+                }
+                continue
+            }
             if !layer.unrunScripts.isEmpty {
                 // 조용히 무시하면 사용자가 레이어가 왜 안 움직이는지 알 수 없다.
                 degraded.append(
