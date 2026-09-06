@@ -85,20 +85,30 @@ public struct TextLayer: Equatable, Sendable {
     public let script: String?
     /// 스크립트에 넘길 사용자 설정값. 스크립트 안의 빌더를 이긴다.
     public let scriptProperties: [String: ScriptPropertyValue]
+    /// 상자 안에서의 가로 정렬.
+    public let horizontalAlign: TextAlignment
 
     /// 폰트가 파일이 아니라 시스템 폰트 이름인지.
     public var usesSystemFont: Bool { fontPath.hasPrefix("systemfont") }
 
     public init(
         value: String, fontPath: String, color: Vec3,
-        script: String?, scriptProperties: [String: ScriptPropertyValue]
+        script: String?, scriptProperties: [String: ScriptPropertyValue],
+        horizontalAlign: TextAlignment = .center
     ) {
+        self.horizontalAlign = horizontalAlign
         self.value = value
         self.fontPath = fontPath
         self.color = color
         self.script = script
         self.scriptProperties = scriptProperties
     }
+}
+
+/// 글자를 상자 안 어디에 붙이는지. 실물에 left·center·right가 모두 나온다.
+/// 무시하고 전부 가운데 두면 좌·우 정렬된 시계와 곡 제목이 제자리에서 벗어난다.
+public enum TextAlignment: String, Sendable, Equatable {
+    case left, center, right
 }
 
 /// 소리만 내는 레이어. 그림은 없다.

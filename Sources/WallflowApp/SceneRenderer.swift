@@ -60,12 +60,17 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let pointSize: Double
         /// 씬이 정한 글자 상자(직교 공간). 구운 글자를 여기 맞춰 넣는다.
         let box: SIMD2<Float>
-        let origin: SIMD2<Float>
+        /// 상자 안에서의 가로 정렬. 글자 폭이 바뀌면 붙는 자리도 달라진다.
+        let align: TextAlignment
+        /// 상자의 중심. 정렬에 따라 실제 그리는 중심이 이것과 달라진다.
+        let boxCenter: SIMD2<Float>
         let queue: DispatchQueue
         let engine: ScriptEngine?
         var value: String
         var texture: MTLTexture?
         var size: SIMD2<Float> = .zero
+        /// 실제로 그리는 중심. 정렬 때문에 상자 중심과 다를 수 있다.
+        var origin: SIMD2<Float>
         /// 이미 돌고 있으면 또 던지지 않는다. 느린 스크립트가 큐에 쌓이면
         /// 나중엔 몇 분 전 시각을 그리게 된다.
         var inFlight = false
@@ -74,6 +79,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
         init(text: TextLayer, fontData: Data?, pointSize: Double, origin: SIMD2<Float>,
              box: SIMD2<Float>, engine: ScriptEngine?, name: String) {
+            self.align = text.horizontalAlign
+            self.boxCenter = origin
+            self.origin = origin
             self.text = text
             self.fontData = fontData
             self.pointSize = pointSize
@@ -196,6 +204,14 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             imageWidth: image.width, imageHeight: image.height,
             boxWidth: Double(state.box.x), boxHeight: Double(state.box.y))
         state.size = SIMD2(Float(fitted.width), Float(fitted.height))
+        // 정렬은 **origin을 기준점으로** 글자의 어느 쪽을 붙이는지다. 상자 기준으로
+        // 잡으면 안 된다 — 실물 Chisa 씬의 시계는 상자가 화면 오른쪽 밖(3886 > 3840)
+        // 까지 나가 있어서, 상자 오른쪽에 붙이면 초 자리가 잘린다.
+        switch state.align {
+        case .left: state.origin.x = state.boxCenter.x + state.size.x / 2
+        case .right: state.origin.x = state.boxCenter.x - state.size.x / 2
+        case .center: state.origin.x = state.boxCenter.x
+        }
     }
 
     /// 스크립트를 돌려 값이 바뀌었으면 다시 굽는다.

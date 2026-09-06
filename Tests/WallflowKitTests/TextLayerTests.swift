@@ -99,3 +99,35 @@ final class TextLayerTests: XCTestCase {
         try PkgReader(data: buildPkg(version: "PKGV0023", entries: [("scene.json", Data(scene.utf8))]))
     }
 }
+
+extension TextLayerTests {
+    /// 실물에 left·center·right가 모두 나온다. Chisa 씬의 시계가 우측 정렬이다.
+    /// 무시하고 가운데로만 두면 글자 수가 바뀔 때마다 제자리에서 벗어난다.
+    func testParsesHorizontalAlignment() throws {
+        for (raw, want) in [("left", TextAlignment.left), ("right", .right),
+                            ("center", .center)] {
+            let reader = try makeScenePkg(scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "T", "origin": "0 0 0", "size": "10 10",
+                          "font": "f.ttf", "horizontalalign": "\(raw)",
+                          "text": {"value": "x"}}]}
+            """)
+            let doc = try SceneDocument.load(from: reader, assets: nil)
+            guard case .text(let t) = doc.layers[0].content else { return XCTFail("텍스트여야 한다") }
+            XCTAssertEqual(t.horizontalAlign, want, raw)
+        }
+    }
+
+    /// 모르는 값이나 없는 경우는 가운데다.
+    func testUnknownAlignmentDefaultsToCenter() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "T", "origin": "0 0 0", "size": "10 10",
+                      "font": "f.ttf", "horizontalalign": "justify",
+                      "text": {"value": "x"}}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .text(let t) = doc.layers[0].content else { return XCTFail("텍스트여야 한다") }
+        XCTAssertEqual(t.horizontalAlign, .center)
+    }
+}

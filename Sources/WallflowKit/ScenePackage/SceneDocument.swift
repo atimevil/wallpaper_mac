@@ -379,7 +379,10 @@ public struct SceneDocument: Sendable {
             // 실물 텍스트의 color는 이미 0~1이다. 파티클(0~255)과 다르니 나누지 마라.
             color: (object["color"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 1, y: 1, z: 1),
             script: text["script"] as? String,
-            scriptProperties: properties)
+            scriptProperties: properties,
+            // 실물에 left·center·right가 모두 나온다. 모르는 값은 가운데로 둔다.
+            horizontalAlign: TextAlignment(rawValue: object["horizontalalign"] as? String ?? "")
+                ?? .center)
     }
 
     /// 파티클 프리셋을 따라가 레이어 내용을 판정한다.
