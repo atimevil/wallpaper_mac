@@ -33,6 +33,8 @@ public enum ShaderPrelude {
     /// 뒤집으면 행렬이 전치되어 모든 변환이 어긋난다.
     public static let helpers = """
     #define frac fract
+    // GLSL의 `mod`는 MSL의 `fmod`다.
+    #define mod fmod
     #define lerp mix
     // `atan2(y, x)`는 Metal에 이미 있다. `atan`으로 바꾸면 인자 둘짜리가 없어 떨어진다.
     #define ddx dfdx
