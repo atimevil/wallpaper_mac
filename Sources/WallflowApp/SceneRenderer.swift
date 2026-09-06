@@ -175,6 +175,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         super.init()
     }
 
+    /// 사용자가 바꾼 속성값이 사는 곳. 라이브러리 폴더와 따로 둔다 — 그쪽은
+    /// "지우기"가 통째로 지우고, 설정은 다시 받아도 남아야 한다.
+    static let propertyStore = UserPropertyStore(
+        root: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Wallflow/Properties"))
+
     /// `alpha`/`visible` 스크립트를 돌려 표시 상태를 정한다.
     ///
     /// 여러 스크립트가 붙어 있으면 가장 숨기는 쪽을 따른다. 이 위젯들은 조건이
@@ -775,7 +781,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         )
         let reader = try PkgReader(data: raw)
         let assets = Self.defaultAssetsStore()
-        let document = try SceneDocument.load(from: reader, assets: assets)
+        // 사용자가 설정 창에서 바꾼 값을 얹는다. 씬을 읽을 때 한 번 얹히므로
+        // 값이 바뀌면 배경화면을 다시 연다.
+        let document = try SceneDocument.load(
+            from: reader, assets: assets,
+            userOverrides: Self.propertyStore.overrides(for: item.id))
 
         let compositor = try MetalCompositor(device: device)
         compositor.setProjection(width: document.orthoWidth, height: document.orthoHeight)

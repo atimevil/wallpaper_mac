@@ -44,6 +44,33 @@ public struct SceneDocument: Sendable {
         try load(from: reader, assets: nil)
     }
 
+    /// 사용자가 바꾼 속성값을 씬 JSON에 얹는다.
+    ///
+    /// 씬은 속성을 `{"user": "이름", "value": …}`로 가리키고, 파서들은 그 `value`를
+    /// 읽는다(색·알파·보임·이펙트 상수 전부). 그래서 **트리를 한 번 훑어 `value`만
+    /// 바꿔치기**하면 파서를 하나도 안 건드리고 전부에 먹는다. 레이어든 이펙트
+    /// 패스든 자리를 가리지 않는다.
+    static func applyingUserOverrides(
+        _ node: Any, overrides: [String: UserPropertyValue]
+    ) -> Any {
+        guard !overrides.isEmpty else { return node }
+        if var dict = node as? [String: Any] {
+            if let name = dict["user"] as? String, let value = overrides[name],
+               dict["value"] != nil {
+                dict["value"] = value.sceneJSONValue
+                return dict
+            }
+            for (key, child) in dict {
+                dict[key] = applyingUserOverrides(child, overrides: overrides)
+            }
+            return dict
+        }
+        if let array = node as? [Any] {
+            return array.map { applyingUserOverrides($0, overrides: overrides) }
+        }
+        return node
+    }
+
     /// 씬 정의가 든 항목 이름.
     ///
     /// 보통 `scene.json`이지만 늘 그런 것은 아니다. 실물 창작마당 씬에
@@ -59,12 +86,15 @@ public struct SceneDocument: Sendable {
     }
 
     public static func load(
-        from reader: PkgReader, assets: AssetsStore?
+        from reader: PkgReader, assets: AssetsStore?,
+        userOverrides: [String: UserPropertyValue] = [:]
     ) throws -> SceneDocument {
         let raw = try reader.data(for: Self.sceneEntryName(in: reader))
-        guard let root = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] else {
+        guard let parsed = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] else {
             throw SceneError.malformedSceneJSON
         }
+        let root = applyingUserOverrides(parsed, overrides: userOverrides) as? [String: Any]
+            ?? parsed
 
         let general = root["general"] as? [String: Any] ?? [:]
         // 키는 있는데 값이 null이면 직교가 아니라 원근 투영 씬이다.

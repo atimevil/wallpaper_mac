@@ -48,7 +48,10 @@ final class PowerMonitor {
             isLowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
             isThermallyPressured: Self.isThermallyPressured()
         )
-        let directive = PowerPolicy.directive(for: signals)
+        // 사용자가 설정 창에서 고른 규칙을 매번 읽는다. 5초에 한 번이라 값싸고,
+        // 캐시하면 설정을 바꾼 뒤 재시작해야 먹는다.
+        let directive = PowerPolicy.directive(
+            for: signals, preferences: PowerPreferencesStore.load())
         guard directive != last else { return }
         last = directive
         onChange(directive)

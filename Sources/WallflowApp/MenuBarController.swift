@@ -10,6 +10,7 @@ final class MenuBarController {
     private let onBrowseWorkshop: () -> Void
     private let onToggleSound: (Bool) -> Void
     private let onToggleAudio: (Bool) -> Void
+    private let onOpenSettings: () -> Void
     private let onQuit: () -> Void
     private var items: [WallpaperItem] = []
 
@@ -19,10 +20,12 @@ final class MenuBarController {
         onBrowseWorkshop: @escaping () -> Void,
         onToggleSound: @escaping (Bool) -> Void,
         onToggleAudio: @escaping (Bool) -> Void,
+        onOpenSettings: @escaping () -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.onToggleSound = onToggleSound
         self.onToggleAudio = onToggleAudio
+        self.onOpenSettings = onOpenSettings
         self.onSelect = onSelect
         self.onRefresh = onRefresh
         self.onBrowseWorkshop = onBrowseWorkshop
@@ -38,6 +41,9 @@ final class MenuBarController {
         self.items = items
         rebuildMenu()
     }
+
+    /// 설정 창에서 값이 바뀌면 메뉴의 체크 표시도 따라가야 한다.
+    func refreshStates() { rebuildMenu() }
 
     private func rebuildMenu() {
         let menu = NSMenu()
@@ -114,6 +120,11 @@ final class MenuBarController {
         audio.state = AudioSpectrum.isEnabled ? .on : .off
         menu.addItem(audio)
 
+        let settings = NSMenuItem(
+            title: "설정…", action: #selector(openSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+
         let browse = NSMenuItem(
             title: "창작마당 둘러보기…", action: #selector(browseWorkshop), keyEquivalent: "w")
         browse.target = self
@@ -155,26 +166,31 @@ final class MenuBarController {
         onToggleSound(enabled)
     }
 
+    /// 켜기 전에 무엇이 일어나는지 말한다. 배경화면이 소리를 듣기 시작하는
+    /// 것은 사용자가 알고 고를 일이지, 조용히 켜질 일이 아니다.
+    /// 메뉴와 설정 창이 같은 확인창을 쓴다.
+    static func confirmAudioCapture() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "소리에 반응하려면 시스템 소리를 들어야 합니다"
+        alert.informativeText = """
+            macOS가 화면 녹화 권한을 한 번 묻습니다. 시스템 오디오 캡처가             그 권한 아래 있어서입니다.
+
+            Wallflow는 화면을 읽지 않고 소리만 받습니다. 받은 소리는 곧바로             주파수 크기로 바뀌어 그리는 데 쓰이고 버려집니다 — 저장하지도,             어디로 보내지도 않습니다.
+            """
+        alert.addButton(withTitle: "켜기")
+        alert.addButton(withTitle: "취소")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     @objc private func toggleAudio(_ sender: NSMenuItem) {
         let enabled = sender.state != .on
-        if enabled {
-            // 켜기 전에 무엇이 일어나는지 말한다. 배경화면이 소리를 듣기 시작하는
-            // 것은 사용자가 알고 고를 일이지, 조용히 켜질 일이 아니다.
-            let alert = NSAlert()
-            alert.messageText = "소리에 반응하려면 시스템 소리를 들어야 합니다"
-            alert.informativeText = """
-                macOS가 화면 녹화 권한을 한 번 묻습니다. 시스템 오디오 캡처가                 그 권한 아래 있어서입니다.
-
-                Wallflow는 화면을 읽지 않고 소리만 받습니다. 받은 소리는 곧바로                 주파수 크기로 바뀌어 그리는 데 쓰이고 버려집니다 — 저장하지도,                 어디로 보내지도 않습니다.
-                """
-            alert.addButton(withTitle: "켜기")
-            alert.addButton(withTitle: "취소")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
+        if enabled, !Self.confirmAudioCapture() { return }
         UserDefaults.standard.set(enabled, forKey: AudioSpectrum.enabledKey)
         sender.state = enabled ? .on : .off
         onToggleAudio(enabled)
     }
+
+    @objc private func openSettings() { onOpenSettings() }
 
     @objc private func setVolume(_ sender: NSMenuItem) {
         UserDefaults.standard.set(

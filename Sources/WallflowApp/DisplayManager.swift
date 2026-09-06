@@ -16,6 +16,16 @@ final class DisplayManager {
     /// 기본 바탕화면이 보인다. 쓰던 배경화면이 확장되는 것이 기대에 맞다.
     private var defaultItem: WallpaperItem?
 
+    /// 지금 모든 화면에 걸린 배경화면. 설정 창이 속성 탭을 채울 때 본다.
+    var currentItem: WallpaperItem? { defaultItem }
+
+    /// 걸린 배경화면을 다시 연다. 사용자 속성은 씬을 읽을 때 얹히므로,
+    /// 값이 바뀌면 이렇게 다시 읽어야 먹는다.
+    func reloadCurrent() {
+        guard let item = defaultItem else { return }
+        try? assign(item, toDisplay: nil)
+    }
+
     /// 배경 윈도우가 전부 가려졌는지. PowerMonitor가 poll 시점에 읽는다.
     var isOccluded: Bool {
         guard !windows.isEmpty else { return false }

@@ -10,6 +10,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private let library: LibraryStore
     private let installer: WorkshopInstaller
     private var workshop: WorkshopWindowController?
+    private var settings: SettingsWindowController?
 
     /// 마지막으로 고른 배경화면의 id. 배경화면 앱이 켤 때마다 빈 화면으로
     /// 시작하면 매번 메뉴에서 다시 골라야 한다.
@@ -58,16 +59,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             onRefresh: { [weak self] in self?.refreshLibrary() },
             onBrowseWorkshop: { [weak self] in self?.showWorkshop() },
             onToggleSound: { [weak self] _ in self?.displays.applySoundSetting() },
-            onToggleAudio: { enabled in
-                // 소리 듣기는 앱 전체가 하나만 돈다. 화면이 여럿이어도 시스템 소리는 하나다.
-                if enabled {
-                    let source = SceneRenderer.audioSource ?? AudioSpectrum()
-                    SceneRenderer.audioSource = source
-                    source.start()
-                } else {
-                    SceneRenderer.audioSource?.stop()
-                }
-            },
+            onToggleAudio: { [weak self] enabled in self?.setAudioCapture(enabled) },
+            onOpenSettings: { [weak self] in self?.showSettings() },
             onQuit: { NSApp.terminate(nil) }
         )
         refreshLibrary()
@@ -105,6 +98,39 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         workshop?.window?.makeKeyAndOrderFront(nil)
     }
 
+    /// 소리 듣기는 앱 전체가 하나만 돈다. 화면이 여럿이어도 시스템 소리는 하나다.
+    /// 메뉴와 설정 창이 같은 길을 쓴다.
+    private func setAudioCapture(_ enabled: Bool) {
+        if enabled {
+            let source = SceneRenderer.audioSource ?? AudioSpectrum()
+            SceneRenderer.audioSource = source
+            source.start()
+        } else {
+            SceneRenderer.audioSource?.stop()
+        }
+        menuBar?.refreshStates()
+    }
+
+    private func showSettings() {
+        if settings == nil {
+            settings = SettingsWindowController(
+                store: SceneRenderer.propertyStore,
+                currentItem: { [weak self] in self?.displays.currentItem },
+                onPropertiesChanged: { [weak self] in self?.displays.reloadCurrent() },
+                // 규칙이 바뀌면 다음 5초를 기다리지 않고 바로 다시 판정한다.
+                onPowerChanged: { [weak self] in self?.power?.poll() },
+                onSoundChanged: { [weak self] in
+                    self?.displays.applySoundSetting()
+                    self?.menuBar?.refreshStates()
+                },
+                onAudioChanged: { [weak self] enabled in self?.setAudioCapture(enabled) })
+        }
+        settings?.reloadProperties()
+        NSApp.activate(ignoringOtherApps: true)
+        settings?.showWindow(nil)
+        settings?.window?.makeKeyAndOrderFront(nil)
+    }
+
     private func refreshLibrary() {
         let items = (try? library.scan()) ?? []
         menuBar?.setItems(items)
@@ -118,6 +144,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             if remember {
                 UserDefaults.standard.set(item.id, forKey: Self.lastSelectionKey)
             }
+            // 설정 창이 열려 있으면 속성 탭을 새 배경화면 것으로 바꾼다.
+            settings?.reloadProperties()
         } catch {
             // 배경화면은 항상 켜져 있어야 한다. 실패해도 앱을 죽이지 않는다.
             // 다만 **이유는 반드시 남긴다** — 조용히 검은 화면이 되면 사용자는
