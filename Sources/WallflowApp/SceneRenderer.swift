@@ -576,10 +576,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private func refreshLayers() {
         guard let compositor else { return }
         for state in texts where state.layerIndex < layerList.count {
-            layerList[state.layerIndex].0 = QuadInstance(
-                origin: state.origin, size: state.size,
-                color: layerList[state.layerIndex].0.color,
-                rotation: layerList[state.layerIndex].0.rotation)
+            // 자리와 크기만 갈아 끼운다. 통째로 새로 만들면 시차·섞는 방식처럼
+            // 여기 안 적은 값이 조용히 기본값으로 되돌아간다.
+            layerList[state.layerIndex].0.origin = state.origin
+            layerList[state.layerIndex].0.size = state.size
         }
         compositor.setLayers(layerList)
     }
@@ -751,13 +751,24 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     "\(layer.name): \(layer.unrunScripts.joined(separator: ", "))의 스크립트를 "
                         + "아직 돌리지 못해 저장된 값으로 그린다")
             }
+            // 밝기는 색에 곱한다. 섞는 방식과 짝이라, 실물 시계는 밝기 5.56에
+            // 오버레이로 섞이는 것을 전제로 그 값이다.
+            let brightness = Float(layer.brightness)
             let quad = QuadInstance(
                 origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
                 size: SIMD2(Float(layer.size.x), Float(layer.size.y)),
-                color: SIMD4(Float(layer.tint.x), Float(layer.tint.y), Float(layer.tint.z),
+                color: SIMD4(Float(layer.tint.x) * brightness,
+                             Float(layer.tint.y) * brightness,
+                             Float(layer.tint.z) * brightness,
                              Float(layer.alpha)),
                 rotation: Float(layer.rotation),
-                parallaxDepth: Float(layer.parallaxDepth))
+                parallaxDepth: Float(layer.parallaxDepth),
+                blendMode: Int32(layer.colorBlendMode))
+            if layer.colorBlendMode != 0, let reason = compositor.blendUnavailableReason {
+                degraded.append(
+                    "\(layer.name): 색 섞기(\(layer.colorBlendMode))를 못 걸어 보통으로 그린다: "
+                        + reason)
+            }
 
             // 표시 스크립트는 한 번으로 끝나지 않는다. 진행 막대는 타이머가 끝나야
             // 숨기라고 답하므로, 엔진을 살려 두고 주기적으로 다시 묻는다.
@@ -968,11 +979,18 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 state.layerIndex = drawable.count
                 // 글자 색은 래스터화할 때 이미 칠했다. 여기서 또 곱하면 색이 제곱된다.
                 // 틴트는 흰색으로 두고 레이어 투명도만 넘긴다.
+                //
+                // 밝기는 색과 별개라 여기서 곱한다. **실물에서 섞기가 걸린
+                // 레이어 여덟 중 여섯이 글자다**(시계·요일·날짜) — 이미지 쪽만
+                // 이어 두면 정작 필요한 곳에 안 걸린다.
+                let textBrightness = Float(layer.brightness)
                 drawable.append((QuadInstance(
                     origin: state.origin, size: state.size,
-                    color: SIMD4(1, 1, 1, Float(layer.alpha)),
+                    color: SIMD4(textBrightness, textBrightness, textBrightness,
+                                 Float(layer.alpha)),
                     rotation: Float(layer.rotation),
-                    parallaxDepth: Float(layer.parallaxDepth)),
+                    parallaxDepth: Float(layer.parallaxDepth),
+                    blendMode: Int32(layer.colorBlendMode)),
                     .dynamic { [weak state] in state?.texture }))
 
             case .unsupported(let reason):

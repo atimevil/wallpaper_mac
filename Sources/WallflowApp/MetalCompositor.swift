@@ -36,6 +36,8 @@ struct QuadInstance {
     var rotation: Float = 0
     /// 마우스 시차에서 이 레이어가 밀리는 정도.
     var parallaxDepth: Float = 0
+    /// 아래 화면과 섞는 방식(WE의 `colorBlendMode`). 0이면 보통 알파 합성이다.
+    var blendMode: Int32 = 0
 }
 
 /// 레이어가 무엇으로 칠해지는지.
@@ -64,6 +66,15 @@ final class MetalCompositor {
     let device: MTLDevice
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
+    /// 아래 화면을 읽어 직접 섞는 파이프라인. 못 만드는 기기에서는 nil이다.
+    /// `WALLFLOW_BLEND_FORCE`로 준 진단용 섞기 방식.
+    static let forcedBlendMode: Int32? = ProcessInfo.processInfo
+        .environment["WALLFLOW_BLEND_FORCE"].flatMap { Int32($0) }
+    private let blendPipeline: MTLRenderPipelineState?
+    /// 섞기 파이프라인을 못 만든 이유. 만들었으면 nil이다.
+    /// 조용히 보통 합성으로 그리면 사용자는 시계가 왜 하얗게 뜨는지 알 수 없다.
+    let blendUnavailableReason: String?
+    private let solidBlendPipeline: MTLRenderPipelineState?
     private let solidPipeline: MTLRenderPipelineState
     private let vertexBuffer: MTLBuffer
     private let sampler: MTLSamplerState
@@ -136,6 +147,25 @@ final class MetalCompositor {
         } catch {
             throw CompositorError.pipelineFailed("\(error)")
         }
+
+        // 색 섞기 파이프라인. 프래그먼트가 아래 화면을 직접 읽으므로 **고정
+        // 블렌딩을 끈다** — 켜 두면 우리가 섞은 것을 GPU가 한 번 더 섞는다.
+        //
+        // 타일 메모리를 읽는 것은 Apple GPU의 기능이다. 없는 기기(인텔 맥)에서는
+        // 파이프라인 생성이 실패하므로, 던지지 않고 nil로 두고 보통 합성으로
+        // 그린다 — 섞기 하나 때문에 배경화면 전체가 안 뜨면 안 된다.
+        descriptor.colorAttachments[0].isBlendingEnabled = false
+        descriptor.fragmentFunction = library.makeFunction(name: "quad_blend_fragment")
+        var blendFailure: String?
+        do {
+            blendPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        } catch {
+            blendPipeline = nil
+            blendFailure = "\(error)"
+        }
+        blendUnavailableReason = blendFailure
+        descriptor.fragmentFunction = library.makeFunction(name: "solid_blend_fragment")
+        solidBlendPipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
 
         let samplerDescriptor = MTLSamplerDescriptor()
         samplerDescriptor.minFilter = .linear
@@ -258,21 +288,49 @@ final class MetalCompositor {
                 size: quad.size, projection: projection,
                 color: quad.color, rotation: quad.rotation)
 
+            // 섞기 파이프라인이 없는 기기면 보통 합성으로 그린다.
+            var mode = blendPipeline == nil ? 0 : quad.blendMode
+            // 진단용: 모든 레이어에 같은 방식을 강제한다. 실물 씬에서 섞기가
+            // 걸린 레이어는 숨어 있는 위젯이거나 결과가 보통과 거의 같아서,
+            // 화면만 봐서는 이 경로가 도는지 알 수 없다. 2(곱하기)를 주면
+            // 검은 바탕과 곱해져 화면이 통째로 어두워진다.
+            if let forced = Self.forcedBlendMode { mode = forced }
+
             switch source {
             case .solid(var color):
+                if mode != 0, let solidBlendPipeline {
+                    encoder.setRenderPipelineState(solidBlendPipeline)
+                    encoder.setVertexBytes(
+                        &uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+                    encoder.setFragmentBytes(&mode, length: MemoryLayout<Int32>.stride, index: 0)
+                    encoder.setFragmentBytes(
+                        &color, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
+                    break
+                }
                 encoder.setRenderPipelineState(solidPipeline)
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
                 encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
             case .fixed(let texture):
-                encoder.setRenderPipelineState(pipeline)
+                encoder.setRenderPipelineState(
+                    mode != 0 ? (blendPipeline ?? pipeline) : pipeline)
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+                if mode != 0 {
+                    encoder.setFragmentBytes(&mode, length: MemoryLayout<Int32>.stride, index: 0)
+                }
                 encoder.setFragmentTexture(texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
             case .dynamic(let provider):
                 // 프레임이 아직 없으면 이 레이어만 건너뛴다. 씬 전체를 멈추지 않는다.
                 guard let texture = provider() else { continue }
-                encoder.setRenderPipelineState(pipeline)
+                // 이펙트가 걸린 레이어와 비디오가 이 경로다. **실물에서 섞기가
+                // 걸린 레이어는 대개 이쪽이다** — 여기를 빼먹으면 아무 일도
+                // 일어나지 않고, 화면만 봐서는 왜인지 알 수 없다.
+                encoder.setRenderPipelineState(
+                    mode != 0 ? (blendPipeline ?? pipeline) : pipeline)
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+                if mode != 0 {
+                    encoder.setFragmentBytes(&mode, length: MemoryLayout<Int32>.stride, index: 0)
+                }
                 encoder.setFragmentTexture(texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
             case .composition(let id):
@@ -283,9 +341,13 @@ final class MetalCompositor {
                 guard let restarted = startEncoder(clear: false) else { return }
                 encoder = restarted
                 guard let result else { continue }
-                encoder.setRenderPipelineState(pipeline)
+                encoder.setRenderPipelineState(
+                    mode != 0 ? (blendPipeline ?? pipeline) : pipeline)
                 encoder.setVertexBytes(
                     &uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+                if mode != 0 {
+                    encoder.setFragmentBytes(&mode, length: MemoryLayout<Int32>.stride, index: 0)
+                }
                 encoder.setFragmentTexture(result, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
             case .particles(let renderer):

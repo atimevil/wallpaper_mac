@@ -294,6 +294,15 @@ public struct SceneDocument: Sendable {
             return 0
         }()
 
+        // 섞는 방식과 밝기는 짝이다. 밝기 5.56짜리 시계는 오버레이로 섞이는 것을
+        // 전제로 그 값이라, 하나만 읽으면 글자가 하얗게 타 버린다.
+        // 값은 그대로 두고 판정하지 않는다 — 모르는 번호는 셰이더가 보통으로 그린다.
+        let blendMode = (object["colorBlendMode"] as? NSNumber)?.intValue ?? 0
+        // 밝기는 음수일 이유가 없고, 실물 최대가 6.24다. 상한을 크게 잡아 둔다 —
+        // 큰 값이 셰이더로 흘러가면 그 레이어가 통째로 하얗게 탄다.
+        // 무한대와 NaN은 `doubleValue`가 이미 걸러 nil로 준다.
+        let brightness = Swift.min(Swift.max(doubleValue(object["brightness"]) ?? 1, 0), 64)
+
         // origin/size가 문자열이 아니라 {"script": ..., "value": ...} 객체인 씬이 있다.
         // 그 객체에도 `value`가 있고 그게 편집기에서 마지막으로 정해진 좌표다.
         // 스크립트를 아직 못 돌려도 이 값으로 제자리에 그릴 수 있다 —
@@ -352,7 +361,8 @@ public struct SceneDocument: Sendable {
                 size: size ?? Vec2(x: 0, y: 0),
                 content: .unsupported(reason: reason), unrunScripts: unrun,
                 alpha: alpha, tint: tint, rotation: rotation,
-                displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth
+                displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
+                colorBlendMode: blendMode, brightness: brightness
             )
         }
 
@@ -372,7 +382,8 @@ public struct SceneDocument: Sendable {
                 id: id, name: name, visible: visible,
                 origin: origin, size: particleSize,
                 content: content, unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation,
-                displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth
+                displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
+                colorBlendMode: blendMode, brightness: brightness
             )
         }
 
@@ -390,7 +401,8 @@ public struct SceneDocument: Sendable {
                     origin: origin, size: size ?? Vec2(x: 0, y: 0),
                     content: .text(makeTextLayer(text, object: object)),
                     unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation,
-                    displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth)
+                    displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
+                    colorBlendMode: blendMode, brightness: brightness)
             }
             if let sound = makeSoundLayer(object) {
                 // 소리는 화면을 차지하지 않는다. origin이 없어도 상관없다.
@@ -400,7 +412,8 @@ public struct SceneDocument: Sendable {
                     size: size ?? Vec2(x: 0, y: 0),
                     content: .sound(sound), unrunScripts: unrun,
                     alpha: alpha, tint: tint, rotation: rotation,
-                    displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth)
+                    displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
+                    colorBlendMode: blendMode, brightness: brightness)
             }
             if object["sound"] != nil { return unsupported("소리 파일 목록을 읽지 못했다") }
             // 도형 레이어. 그림 없는 사각형이고, 거기 붙은 이펙트가 그림을 만든다
@@ -424,7 +437,8 @@ public struct SceneDocument: Sendable {
                     content: .solidColor(Vec3(x: 1, y: 1, z: 1)),
                     unrunScripts: unrun, effects: effects, alpha: alpha, tint: tint,
                     rotation: rotation, displayScripts: displayScripts,
-                    scale: transform.scale, parallaxDepth: depth)
+                    scale: transform.scale, parallaxDepth: depth,
+                    colorBlendMode: blendMode, brightness: brightness)
             }
             return unsupported("알 수 없는 레이어 종류")
         }
@@ -445,7 +459,8 @@ public struct SceneDocument: Sendable {
                     content: .postProcess, unrunScripts: unrun, effects: effects,
                     alpha: alpha, tint: tint, rotation: rotation,
                     displayScripts: displayScripts, scale: transform.scale,
-                    parallaxDepth: depth)
+                    parallaxDepth: depth,
+                    colorBlendMode: blendMode, brightness: brightness)
             }
             return unsupported("origin이나 size를 읽을 수 없다")
         }
@@ -460,7 +475,8 @@ public struct SceneDocument: Sendable {
             id: id, name: name, visible: visible,
             origin: origin, size: size,
             content: content, unrunScripts: unrun, effects: effects, alpha: alpha, tint: tint,
-            rotation: rotation, displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth
+            rotation: rotation, displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
+                colorBlendMode: blendMode, brightness: brightness
         )
     }
 

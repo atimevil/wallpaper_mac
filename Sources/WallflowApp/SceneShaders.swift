@@ -63,6 +63,167 @@ enum SceneShaders {
         return tex.sample(samp, in.uv) * in.color;
     }
 
+    // ---- 레이어 색 섞기 ----
+    //
+    // 값과 식은 WE 자신의 `shaders/common_blending.h`를 그대로 옮긴 것이다.
+    // 눈으로 비슷하게 맞춘 근사가 아니다 — `BlendSoftLightf`의 `sqrt`나
+    // `BlendColorDodgef`의 `blend == 1.0` 예외 같은 것은 지어낼 수 없다.
+    //
+    // `A`가 아래 화면, `B`가 이 레이어다. `opacity`는 이 레이어의 알파다.
+
+    inline float wfScreenf(float a, float b) { return 1.0 - ((1.0 - a) * (1.0 - b)); }
+    inline float wfOverlayf(float a, float b) {
+        return a < 0.5 ? (2.0 * a * b) : (1.0 - 2.0 * (1.0 - a) * (1.0 - b));
+    }
+    inline float wfSoftLightf(float a, float b) {
+        return (b < 0.5) ? (2.0 * a * b + a * a * (1.0 - 2.0 * b))
+                         : (sqrt(a) * (2.0 * b - 1.0) + 2.0 * a * (1.0 - b));
+    }
+    inline float wfColorDodgef(float a, float b) {
+        return (b == 1.0) ? b : min(a / (1.0 - b), 1.0);
+    }
+    inline float wfColorBurnf(float a, float b) {
+        return (b == 0.0) ? b : max((1.0 - ((1.0 - a) / b)), 0.0);
+    }
+    inline float wfLinearBurnf(float a, float b) { return max(a + b - 1.0, 0.0); }
+    inline float wfLinearLightf(float a, float b) {
+        return b < 0.5 ? wfLinearBurnf(a, 2.0 * b) : (a + 2.0 * (b - 0.5));
+    }
+    inline float wfVividLightf(float a, float b) {
+        return (b < 0.5) ? wfColorBurnf(a, 2.0 * b) : wfColorDodgef(a, 2.0 * (b - 0.5));
+    }
+    inline float wfPinLightf(float a, float b) {
+        return (b < 0.5) ? min(a, 2.0 * b) : max(a, 2.0 * (b - 0.5));
+    }
+    inline float wfReflectf(float a, float b) {
+        return (b == 1.0) ? b : min(a * a / (1.0 - b), 1.0);
+    }
+    inline float3 wfPerChannel3(float3 a, float3 b, float (*f)(float, float)) {
+        return float3(f(a.r, b.r), f(a.g, b.g), f(a.b, b.b));
+    }
+
+    // HSL 계열(26~29). 헤더의 RGBToHSL/HSLToRGB를 그대로 옮긴다.
+    inline float3 wfRGBToHSL(float3 color) {
+        float3 hsl;
+        float fmin = min(min(color.r, color.g), color.b);
+        float fmax = max(max(color.r, color.g), color.b);
+        float delta = fmax - fmin;
+        hsl.z = (fmax + fmin) / 2.0;
+        if (delta == 0.0) { hsl.x = 0.0; hsl.y = 0.0; return hsl; }
+        hsl.y = hsl.z < 0.5 ? delta / (fmax + fmin) : delta / (2.0 - fmax - fmin);
+        float dR = (((fmax - color.r) / 6.0) + (delta / 2.0)) / delta;
+        float dG = (((fmax - color.g) / 6.0) + (delta / 2.0)) / delta;
+        float dB = (((fmax - color.b) / 6.0) + (delta / 2.0)) / delta;
+        if (color.r == fmax) hsl.x = dB - dG;
+        else if (color.g == fmax) hsl.x = (1.0 / 3.0) + dR - dB;
+        else hsl.x = (2.0 / 3.0) + dG - dR;
+        if (hsl.x < 0.0) hsl.x += 1.0; else if (hsl.x > 1.0) hsl.x -= 1.0;
+        return hsl;
+    }
+
+    inline float wfHueToRGB(float f1, float f2, float hue) {
+        if (hue < 0.0) hue += 1.0; else if (hue > 1.0) hue -= 1.0;
+        if ((6.0 * hue) < 1.0) return f1 + (f2 - f1) * 6.0 * hue;
+        if ((2.0 * hue) < 1.0) return f2;
+        if ((3.0 * hue) < 2.0) return f1 + (f2 - f1) * ((2.0 / 3.0) - hue) * 6.0;
+        return f1;
+    }
+
+    inline float3 wfHSLToRGB(float3 hsl) {
+        if (hsl.y == 0.0) return float3(hsl.z);
+        float f2 = hsl.z < 0.5 ? hsl.z * (1.0 + hsl.y) : (hsl.z + hsl.y) - (hsl.y * hsl.z);
+        float f1 = 2.0 * hsl.z - f2;
+        return float3(wfHueToRGB(f1, f2, hsl.x + (1.0 / 3.0)),
+                      wfHueToRGB(f1, f2, hsl.x),
+                      wfHueToRGB(f1, f2, hsl.x - (1.0 / 3.0)));
+    }
+
+    inline float3 wfBlend(int mode, float3 A, float3 B, float opacity) {
+        switch (mode) {
+        case 1: return mix(A, min(B, A), opacity);
+        case 2: return mix(A, A * B, opacity);
+        case 3: return mix(A, wfPerChannel3(A, B, wfColorBurnf), opacity);
+        case 4: return mix(A, max(A + B - 1.0, 0.0), opacity);
+        // 5와 10은 헤더에서도 불투명도를 쓰지 않는다.
+        case 5: return min(A, B);
+        case 6: return mix(A, max(B, A), opacity);
+        case 7: return mix(A, wfPerChannel3(A, B, wfScreenf), opacity);
+        case 8: return mix(A, wfPerChannel3(A, B, wfColorDodgef), opacity);
+        case 9: return mix(A, min(A + B, float3(1.0)), opacity);
+        case 10: return max(A, B);
+        case 11: return mix(A, wfPerChannel3(A, B, wfOverlayf), opacity);
+        case 12: return mix(A, wfPerChannel3(A, B, wfSoftLightf), opacity);
+        // 하드라이트는 오버레이의 인자를 뒤집은 것이다.
+        case 13: return mix(A, wfPerChannel3(B, A, wfOverlayf), opacity);
+        case 14: return mix(A, wfPerChannel3(A, B, wfVividLightf), opacity);
+        case 15: return mix(A, wfPerChannel3(A, B, wfLinearLightf), opacity);
+        case 16: return mix(A, wfPerChannel3(A, B, wfPinLightf), opacity);
+        case 17: return mix(A, float3(
+            wfVividLightf(A.r, B.r) < 0.5 ? 0.0 : 1.0,
+            wfVividLightf(A.g, B.g) < 0.5 ? 0.0 : 1.0,
+            wfVividLightf(A.b, B.b) < 0.5 ? 0.0 : 1.0), opacity);
+        case 18: return mix(A, abs(A - B), opacity);
+        case 19: return mix(A, A + B - 2.0 * A * B, opacity);
+        // 20은 헤더에서 4와 같은 식이다(Substract).
+        case 20: return mix(A, max(A + B - 1.0, 0.0), opacity);
+        case 21: return mix(A, wfPerChannel3(A, B, wfReflectf), opacity);
+        // 글로우는 리플렉트의 인자를 뒤집은 것이다.
+        case 22: return mix(A, wfPerChannel3(B, A, wfReflectf), opacity);
+        case 23: return mix(A, min(A, B) - max(A, B) + float3(1.0), opacity);
+        case 24: return mix(A, (A + B) / 2.0, opacity);
+        case 25: return mix(A, float3(1.0) - abs(float3(1.0) - A - B), opacity);
+        case 26: {
+            float3 hsl = wfRGBToHSL(A);
+            return mix(A, wfHSLToRGB(float3(wfRGBToHSL(B).r, hsl.g, hsl.b)), opacity);
+        }
+        case 27: {
+            float3 hsl = wfRGBToHSL(A);
+            return mix(A, wfHSLToRGB(float3(hsl.r, wfRGBToHSL(B).g, hsl.b)), opacity);
+        }
+        case 28: {
+            float3 hsl = wfRGBToHSL(B);
+            return mix(A, wfHSLToRGB(float3(hsl.r, hsl.g, wfRGBToHSL(A).b)), opacity);
+        }
+        case 29: {
+            float3 hsl = wfRGBToHSL(A);
+            return mix(A, wfHSLToRGB(float3(hsl.r, hsl.g, wfRGBToHSL(B).b)), opacity);
+        }
+        case 30: return mix(A, float3(max(A.x, max(A.y, A.z))) * B, opacity);
+        case 31: return A + B * opacity;
+        case 32: return mix(A, A + A * B, opacity);
+        // 0과 모르는 번호는 보통 합성이다.
+        default: return mix(A, B, opacity);
+        }
+    }
+
+    /// 아래 화면을 읽어 직접 섞는다.
+    ///
+    /// `dst`는 이미 이 자리에 그려진 색이다(타일 메모리에서 그대로 읽는다).
+    /// 그래서 이 파이프라인은 **고정 블렌딩을 끄고** 결과를 그대로 쓴다 —
+    /// 켜 두면 우리가 섞은 것을 GPU가 한 번 더 섞는다.
+    fragment float4 quad_blend_fragment(
+        VertexOut in [[stage_in]],
+        float4 dst [[color(0)]],
+        constant int &mode [[buffer(0)]],
+        texture2d<float> tex [[texture(0)]],
+        sampler samp [[sampler(0)]]
+    ) {
+        float4 src = tex.sample(samp, in.uv) * in.color;
+        float3 blended = wfBlend(mode, dst.rgb, src.rgb, saturate(src.a));
+        // 알파는 아래가 이미 정한 것을 지키되, 이 레이어가 더 진하면 올린다.
+        return float4(blended, max(dst.a, src.a));
+    }
+
+    fragment float4 solid_blend_fragment(
+        VertexOut in [[stage_in]],
+        float4 dst [[color(0)]],
+        constant int &mode [[buffer(0)]],
+        constant float4 &color [[buffer(1)]]
+    ) {
+        float3 blended = wfBlend(mode, dst.rgb, color.rgb, saturate(color.a));
+        return float4(blended, max(dst.a, color.a));
+    }
+
     fragment float4 solid_fragment(
         VertexOut in [[stage_in]],
         constant float4 &color [[buffer(0)]]

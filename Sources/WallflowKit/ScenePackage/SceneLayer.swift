@@ -262,6 +262,17 @@ public struct SceneLayer: Equatable, Sendable {
     /// 마우스 시차에서 이 레이어가 얼마나 밀리는지. 실물 값이 -0.67~0.5다.
     /// 음수면 반대로 밀려 앞뒤 느낌을 만든다.
     public let parallaxDepth: Double
+    /// 이 레이어를 **아래 화면과** 섞는 방식. 0이면 보통(알파 합성)이다.
+    ///
+    /// 값과 식은 WE 자신의 `shaders/common_blending.h`에 있다 — 1이 어둡게,
+    /// 7이 스크린, 11이 오버레이 하는 식으로 32가지다. 무시하면 오버레이로
+    /// 얹으라던 시계가 불투명한 흰 글자로 찍힌다.
+    public let colorBlendMode: Int
+    /// 색에 곱하는 밝기. 기본 1.
+    ///
+    /// **섞는 방식과 짝이다.** 실물에서 밝기 5.56짜리 시계는 오버레이로 섞이는
+    /// 것을 전제로 그 값이다 — 하나만 넣으면 둘 다 없는 것보다 나쁘다.
+    public let brightness: Double
     public let content: LayerContent
     /// 이 레이어에 걸린 이펙트들. 순서대로 이어서 건다.
     public let effects: [LayerEffect]
@@ -281,8 +292,12 @@ public struct SceneLayer: Equatable, Sendable {
         alpha: Double = 1, tint: Vec3 = Vec3(x: 1, y: 1, z: 1),
         rotation: Double = 0, displayScripts: [DisplayScript] = [],
         scale: Vec3 = Vec3(x: 1, y: 1, z: 1),
-        parallaxDepth: Double = 0
+        parallaxDepth: Double = 0,
+        colorBlendMode: Int = 0,
+        brightness: Double = 1
     ) {
+        self.colorBlendMode = colorBlendMode
+        self.brightness = brightness
         self.displayScripts = displayScripts
         self.scale = scale
         self.parallaxDepth = parallaxDepth
