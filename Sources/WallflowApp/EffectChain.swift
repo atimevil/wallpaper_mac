@@ -37,12 +37,30 @@ final class EffectChain {
         return 1
     }
 
+    /// 이펙트를 그리는 작업 해상도의 한 변 상한.
+    ///
+    /// 레이어 텍스처가 화면보다 훨씬 클 수 있다 — 실물에 9000픽셀짜리가 있어서
+    /// 체인 하나가 텍스처만 973MB를 잡았다. 어차피 화면 크기로 축소되어 보이므로
+    /// 그 해상도에서 이펙트를 돌릴 이유가 없다. 상시 구동 앱이라 이 낭비는
+    /// 그대로 사용자 메모리다.
+    static let maxWorkingSide = 2560
+
+    /// 씬 하나가 이펙트에 쓸 수 있는 텍스처 총량.
+    /// 파티클 예산과 같은 이유다 — 레이어 하나의 상한만으로는 여러 개를 못 막는다.
+    static let maxSceneTextureBytes = 320 * 1_000_000
+
     private let device: MTLDevice
     private let passes: [CompiledPass]
     private var targets: [String: MTLTexture] = [:]
     private let output: MTLTexture
-    private let scratch: MTLTexture
+    /// 이펙트 패스가 번갈아 쓰는 두 버퍼. 하나는 체인 입구의 미리 곱한 사본이기도 하다.
+    private let bufferA: MTLTexture
+    private let bufferB: MTLTexture
     private let sampler: MTLSamplerState
+    /// 입구·출구 패스용. 1:1 복사라 점 필터여야 한다 — 선형이면 그 패스 자체가 번진다.
+    private let pointSampler: MTLSamplerState
+    private let clean: MTLRenderPipelineState
+    private let copy: MTLRenderPipelineState
     /// 슬롯을 채울 것이 없을 때 묶는 1x1 흰색. 마스크 자리에 검정을 묶으면
     /// 레이어가 통째로 사라지므로 흰색이 안전하다.
     private let placeholder: MTLTexture
@@ -56,6 +74,12 @@ final class EffectChain {
     /// 매 프레임 다시 그려야 하는지. 시간이 안 들어가면 한 번으로 끝난다.
     let isAnimated: Bool
 
+    /// 이 체인이 잡은 텍스처 메모리(바이트). 상시 구동 예산을 재는 근거다.
+    var textureBytes: Int {
+        let full = width * height * 4
+        return full * 3 + targets.values.reduce(0) { $0 + $1.width * $1.height * 4 }
+    }
+
     // MARK: - 만들기
 
     /// - Returns: 하나도 컴파일되지 않으면 nil. 호출자가 원본 텍스처를 그대로 쓴다.
@@ -64,9 +88,14 @@ final class EffectChain {
           makeTexture: (TextureData) throws -> MTLTexture,
           diagnostics: inout [String]) {
         self.device = device
-        self.width = source.width
-        self.height = source.height
-        guard width > 0, height > 0 else { return nil }
+        guard source.width > 0, source.height > 0 else { return nil }
+        // 긴 변을 상한에 맞춰 줄인다. 비율은 지킨다 — 안 지키면 이펙트가
+        // 늘어난 좌표계에서 돌아 무늬가 찌그러진다.
+        let longest = Swift.max(source.width, source.height)
+        let divisor = longest > Self.maxWorkingSide
+            ? Double(longest) / Double(Self.maxWorkingSide) : 1
+        self.width = Swift.max(1, Int((Double(source.width) / divisor).rounded()))
+        self.height = Swift.max(1, Int((Double(source.height) / divisor).rounded()))
 
         var compiled: [CompiledPass] = []
         for (effect, base) in zip(effects, effectBases) {
@@ -90,10 +119,30 @@ final class EffectChain {
         self.isAnimated = compiled.contains { $0.isAnimated }
 
         guard let output = Self.makeTarget(device: device, width: width, height: height),
-              let scratch = Self.makeTarget(device: device, width: width, height: height)
+              let bufferA = Self.makeTarget(device: device, width: width, height: height),
+              let bufferB = Self.makeTarget(device: device, width: width, height: height)
         else { return nil }
         self.output = output
-        self.scratch = scratch
+        self.bufferA = bufferA
+        self.bufferB = bufferB
+
+        // 입구·출구 파이프라인. 우리가 쓴 셰이더라 실패하면 코드가 틀린 것이다.
+        guard let library = try? device.makeLibrary(source: Self.alphaShaders, options: nil),
+              let vertexFunction = library.makeFunction(name: "alphaVertex"),
+              let cleanFunction = library.makeFunction(name: "cleanFragment"),
+              let copyFunction = library.makeFunction(name: "copyFragment")
+        else { return nil }
+        func makePipeline(_ fragment: MTLFunction) -> MTLRenderPipelineState? {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertexFunction
+            descriptor.fragmentFunction = fragment
+            descriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
+            return try? device.makeRenderPipelineState(descriptor: descriptor)
+        }
+        guard let clean = makePipeline(cleanFunction),
+              let copy = makePipeline(copyFunction) else { return nil }
+        self.clean = clean
+        self.copy = copy
 
         let descriptor = MTLSamplerDescriptor()
         descriptor.minFilter = .linear
@@ -104,6 +153,14 @@ final class EffectChain {
         descriptor.tAddressMode = .clampToEdge
         guard let sampler = device.makeSamplerState(descriptor: descriptor) else { return nil }
         self.sampler = sampler
+        let pointDescriptor = MTLSamplerDescriptor()
+        pointDescriptor.minFilter = .nearest
+        pointDescriptor.magFilter = .nearest
+        pointDescriptor.sAddressMode = .clampToEdge
+        pointDescriptor.tAddressMode = .clampToEdge
+        guard let pointSampler = device.makeSamplerState(descriptor: pointDescriptor)
+        else { return nil }
+        self.pointSampler = pointSampler
         guard let placeholder = Self.makeWhitePixel(device: device) else { return nil }
         self.placeholder = placeholder
 
@@ -158,6 +215,59 @@ final class EffectChain {
         descriptor.storageMode = .private
         return device.makeTexture(descriptor: descriptor)
     }
+
+    /// 체인 입구·출구에서 쓰는 작은 셰이더.
+    ///
+    /// **왜 필요한가.** 창작마당 그림은 완전 투명한 텍셀에 아무 색이나 들어 있다
+    /// (자홍색이 흔하다 — "여기는 절대 안 보인다"는 뜻이다). 컴포지터는 그 텍셀을
+    /// 1:1로 그려서 알파 0으로 사라지지만, 이펙트는 **선형 필터로 좌표를 옮겨 가며**
+    /// 다시 샘플링하므로 그 색이 이웃한 불투명 텍셀에 섞여 든다. 알파는 1로 남고
+    /// RGB만 오염되어 자홍 자국이 남는다.
+    ///
+    /// 입구에서 **투명한 텍셀의 RGB만 0으로 지운다.** 번져도 검정이 섞일 뿐이라
+    /// 자홍색보다 훨씬 눈에 안 띈다. 입구 패스는 점 필터로 1:1 복사라 그 자체로는
+    /// 번지지 않는다.
+    ///
+    /// 알파를 미리 곱했다가 출구에서 되돌리는 방법도 해 봤는데 **더 나빴다.**
+    /// 이펙트가 알파를 직접 정하는 경우가 많아서(마스크·합성), 그 알파로 나누면
+    /// 색이 밝아져 화면이 하얘진다. 알파의 의미를 건드리지 않는 쪽이 안전하다.
+    private static let alphaShaders = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct Varyings {
+        float4 position [[position]];
+        float2 uv;
+    };
+
+    vertex Varyings alphaVertex(uint id [[vertex_id]]) {
+        const float2 positions[4] = {
+            float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1)
+        };
+        const float2 uvs[4] = {
+            float2(0, 1), float2(1, 1), float2(0, 0), float2(1, 0)
+        };
+        Varyings out;
+        out.position = float4(positions[id], 0, 1);
+        out.uv = uvs[id];
+        return out;
+    }
+
+    fragment float4 cleanFragment(Varyings in [[stage_in]],
+                                  texture2d<float> source [[texture(0)]],
+                                  sampler nearest [[sampler(0)]]) {
+        float4 color = source.sample(nearest, in.uv);
+        // 완전히 투명한 텍셀의 색은 아무 뜻이 없다. 지워 두면 이후 패스가
+        // 선형 필터로 번져도 검정만 섞인다.
+        return color.a > 0.004 ? color : float4(0);
+    }
+
+    fragment float4 copyFragment(Varyings in [[stage_in]],
+                                 texture2d<float> source [[texture(0)]],
+                                 sampler nearest [[sampler(0)]]) {
+        return source.sample(nearest, in.uv);
+    }
+    """
 
     private enum CompileError: Error { case failed(String) }
 
@@ -296,16 +406,19 @@ final class EffectChain {
             }
             return
         }
-        var previous = source
-        var back = scratch
-        var front = output
+        // 체인 입구에서 투명 텍셀의 색을 지운다. 이후 패스가 선형 필터로 번져도
+        // 검정만 섞인다. 이 패스는 점 필터로 1:1 복사라 그 자체로는 번지지 않는다.
+        blit(source, into: bufferA, with: clean, commandBuffer: commandBuffer)
 
-        for (index, pass) in passes.enumerated() {
-            let isLast = index == passes.count - 1
+        // 두 버퍼를 번갈아 쓴다. 패스가 자기가 읽는 텍스처에 쓰면 결과가 미정이다.
+        var previous = bufferA
+        var back = bufferB
+        var front = bufferA
+        _ = front
+
+        for pass in passes {
             // 이름 붙은 타깃이 있으면 거기 그리고, 없으면 번갈아 쓰는 쪽에 그린다.
-            // 마지막 패스는 반드시 `output`에 남아야 레이어가 그것을 본다.
-            let destination: MTLTexture = isLast
-                ? front : (pass.target.flatMap { targets[$0] } ?? back)
+            let destination: MTLTexture = pass.target.flatMap { targets[$0] } ?? back
 
             let descriptor = MTLRenderPassDescriptor()
             descriptor.colorAttachments[0].texture = destination
@@ -341,18 +454,40 @@ final class EffectChain {
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             encoder.endEncoding()
 
-            previous = destination
-            // 이름 붙은 타깃에 그렸으면 번갈아 쓰는 짝은 그대로 둔다.
-            if pass.target == nil, !isLast { swap(&back, &front) }
-        }
-        // 마지막 결과가 `output`이 아니면(이름 붙은 타깃으로 끝난 경우) 복사한다.
-        if previous !== output {
-            if let blit = commandBuffer.makeBlitCommandEncoder(),
-               previous.width == output.width, previous.height == output.height {
-                blit.copy(from: previous, to: output)
-                blit.endEncoding()
+            // `previous`는 **이름 없는 타깃에 그린 결과**만 이어받는다.
+            // `_rt_*`는 곁버퍼라 그리로 그렸다고 "직전 결과"가 바뀌지 않는다.
+            //
+            // 블러가 이 구분을 요구한다: 축소 → 가로 → 세로까지는 전부 곁버퍼에
+            // 그리고, 마지막 합치기 패스가 **흐린 곁버퍼와 원본을 함께** 읽는다.
+            // 이걸 무시하면 합치기가 원본 대신 곁버퍼를 두 번 읽어 화면이 하얘진다
+            // (실물 Star Wars 씬에서 확인).
+            if pass.target == nil {
+                previous = destination
+                swap(&back, &front)
             }
         }
+        // 마지막 결과를 출력으로 옮긴다. 어느 버퍼에 남았든 상관없어진다.
+        blit(previous, into: output, with: copy, commandBuffer: commandBuffer)
+    }
+
+    /// 전체 화면 사각형 하나로 텍스처를 옮긴다. 입구·출구 패스에만 쓴다.
+    private func blit(
+        _ source: MTLTexture, into destination: MTLTexture,
+        with pipeline: MTLRenderPipelineState, commandBuffer: MTLCommandBuffer
+    ) {
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = destination
+        descriptor.colorAttachments[0].loadAction = .clear
+        descriptor.colorAttachments[0].clearColor = MTLClearColor(
+            red: 0, green: 0, blue: 0, alpha: 0)
+        descriptor.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor)
+        else { return }
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentTexture(source, index: 0)
+        encoder.setFragmentSamplerState(pointSampler, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
     }
 
     private func bindUniforms(

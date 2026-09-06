@@ -335,6 +335,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 확인했다(슬롯에 흰색을 묶으면 흰색이, 샘플링을 상수로 바꾸면 그 색이
     /// 화면 전체에 제대로 나온다). 원인은 그 사이 어딘가다.
     ///
+    /// 지금 상태(2026-09-06):
+    /// - **패스가 하나인 이펙트는 맞다.** `foliagesway`가 걸린 씬을 미리보기와
+    ///   비교해 확인했다.
+    /// - **패스가 여럿이고 곁버퍼(`_rt_*`)를 쓰는 체인은 화면이 하얘진다.**
+    ///   블러 계열이 여기 해당한다. 원인을 아직 못 찾았다.
+    ///
     /// 배경화면은 매일 쓰는 것이라, 고치는 중인 기능이 보이는 결함을 남기면 안 된다.
     /// `WALLFLOW_EFFECTS=1`로 켜서 마저 고친다.
     static var effectsEnabled: Bool {
@@ -617,7 +623,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                         let texture = try compositor.makeTexture(from: decoded)
                         // 이펙트가 걸려 있으면 그 결과를 대신 그린다. 컴파일이 안 되면
                         // 체인이 nil이라 원본을 그대로 쓴다 — 레이어를 버리지 않는다.
-                        if !layer.effects.isEmpty, Self.effectsEnabled,
+                        // 씬 전체 예산을 넘으면 더 걸지 않는다. 레이어는 원본으로 그린다.
+                        let effectBudgetLeft = chains.reduce(0) { $0 + $1.chain.textureBytes }
+                            < EffectChain.maxSceneTextureBytes
+                        if !layer.effects.isEmpty, Self.effectsEnabled, effectBudgetLeft,
                            let chain = EffectChain(
                             device: device,
                             effects: layer.effects.map(\.definition),
@@ -630,6 +639,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                             drawable.append((quad, .dynamic { [weak chain] in chain?.texture }))
                         } else {
                             if !layer.effects.isEmpty, Self.effectsEnabled {
+                                if !effectBudgetLeft {
+                                    degraded.append(
+                                        "\(layer.name): 씬의 이펙트 텍스처 예산을 넘어 "
+                                            + "원본 그대로 그린다")
+                                }
                                 degraded.append(
                                     "\(layer.name): 이펙트 \(layer.effects.count)개를 걸지 못해 "
                                         + "원본 그대로 그린다")
@@ -773,6 +787,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
         self.layerList = drawable
         self.displays = displayStates
+        if !chains.isEmpty {
+            let bytes = chains.reduce(0) { $0 + $1.chain.textureBytes }
+            FileHandle.standardError.write(Data(
+                "이펙트 체인 \(chains.count)개, 텍스처 \(bytes / 1_000_000)MB\n".utf8))
+        }
         self.effectChains = chains
         self.effectStartTime = nil
         // 이펙트는 컴포지터가 레이어를 합성하기 전에 자기 텍스처를 그려야 한다.
