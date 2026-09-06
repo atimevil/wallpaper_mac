@@ -174,10 +174,18 @@ final class MetalCompositor {
         self.layers = layers
     }
 
+    /// 레이어를 합성하기 **전에** 부른다. 이펙트 체인이 여기서 자기 텍스처를 그린다.
+    ///
+    /// 같은 커맨드 버퍼에 넣어야 순서가 보장된다 — 따로 제출하면 이번 프레임의
+    /// 이펙트 결과가 다음 프레임에야 보이거나, 반쯤 그려진 것이 합성될 수 있다.
+    var prepare: ((MTLCommandBuffer) -> Void)?
+
     func draw(in view: MTKView) {
         guard let descriptor = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
               let commands = queue.makeCommandBuffer() else { return }
+
+        prepare?(commands)
 
         descriptor.colorAttachments[0].clearColor = clearColor
         descriptor.colorAttachments[0].loadAction = .clear

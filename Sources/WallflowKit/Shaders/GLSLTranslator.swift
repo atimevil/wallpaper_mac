@@ -48,6 +48,11 @@ public enum GLSLTranslator {
         public let name: String
         /// `g_Texture0` → 0. 재질의 `textures` 배열 순서와 맞물린다.
         public let index: Int
+        /// 주석의 `default`. `util/noise` 같은 기본 텍스처 경로다.
+        ///
+        /// **모든 슬롯에 무엇이든 묶어야 한다.** Metal에서 안 묶인 텍스처를
+        /// 샘플링하면 쓰레기가 나온다 — 화면에 자홍색 블록으로 보인다.
+        public let defaultPath: String?
     }
 
     public struct Result: Equatable, Sendable {
@@ -331,7 +336,9 @@ public enum GLSLTranslator {
             case "uniform" where type.hasPrefix("sampler"):
                 // 샘플러는 버퍼가 아니라 텍스처 인자다. 이름 규칙이
                 // `texSample2D` 매크로와 맞물린다(`<이름>Sampler`).
-                parsed.textures.append(Texture(name: name, index: textureIndex))
+                parsed.textures.append(Texture(
+                    name: name, index: textureIndex,
+                    defaultPath: annotations[name].flatMap { stringValue($0["default"]) }))
                 textureIndex += 1
             case "uniform":
                 let annotation = annotations[name]
@@ -395,10 +402,15 @@ public enum GLSLTranslator {
         out += "\n"
 
         // 단계 사이를 오가는 구조체. 배열은 성분으로 펼친다.
+        //
+        // 정점과 프래그먼트는 **따로 번역해 따로 컴파일한다**(Metal은 두 함수가 다른
+        // 라이브러리에 있어도 된다). 그래서 두 구조체가 필드 순서로 맞물리면 안 된다 —
+        // 같은 varying이 `.vert`와 `.frag`에서 다른 순서로 선언될 수 있고, 그러면
+        // 값이 조용히 뒤바뀐다. `[[user(이름)]]`으로 **이름으로** 맞물리게 한다.
         out += "struct Varyings {\n    float4 position [[position]];\n"
         for varying in parsed.varyings {
             for name in flattenedNames(varying.name, count: varying.count) {
-                out += "    \(varying.type) \(name);\n"
+                out += "    \(varying.type) \(name) [[user(\(name))]];\n"
             }
         }
         out += "};\n\n"

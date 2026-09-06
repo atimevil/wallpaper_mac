@@ -219,6 +219,18 @@ public struct DisplayScript: Equatable, Sendable {
     }
 }
 
+/// 레이어에 걸린 이펙트 하나와, 그 파일이 있던 폴더.
+/// 폴더를 같이 들고 다녀야 재질과 셰이더의 상대 경로가 풀린다.
+public struct LayerEffect: Equatable, Sendable {
+    public let definition: EffectDefinition
+    public let base: String
+
+    public init(definition: EffectDefinition, base: String) {
+        self.definition = definition
+        self.base = base
+    }
+}
+
 /// 씬의 레이어 하나. origin은 오브젝트의 중심이고 직교 공간 좌표다.
 public struct SceneLayer: Equatable, Sendable {
     public let id: Int
@@ -243,6 +255,8 @@ public struct SceneLayer: Equatable, Sendable {
     /// 음수면 반대로 밀려 앞뒤 느낌을 만든다.
     public let parallaxDepth: Double
     public let content: LayerContent
+    /// 이 레이어에 걸린 이펙트들. 순서대로 이어서 건다.
+    public let effects: [LayerEffect]
     /// `visible`/`alpha`에 붙은 스크립트 본문들. 미디어 위젯이 여기서 스스로 숨는다.
     public let displayScripts: [DisplayScript]
     /// 스크립트가 붙어 있지만 우리가 아직 돌리지 못하는 속성 이름들.
@@ -255,6 +269,7 @@ public struct SceneLayer: Equatable, Sendable {
     public init(
         id: Int, name: String, visible: Bool, origin: Vec3, size: Vec2,
         content: LayerContent, unrunScripts: [String] = [],
+        effects: [LayerEffect] = [],
         alpha: Double = 1, tint: Vec3 = Vec3(x: 1, y: 1, z: 1),
         rotation: Double = 0, displayScripts: [DisplayScript] = [],
         scale: Vec3 = Vec3(x: 1, y: 1, z: 1),
@@ -272,6 +287,7 @@ public struct SceneLayer: Equatable, Sendable {
         self.origin = origin
         self.size = size
         self.content = content
+        self.effects = effects
         self.unrunScripts = unrunScripts
     }
 
@@ -279,8 +295,8 @@ public struct SceneLayer: Equatable, Sendable {
     public func replacingContent(_ content: LayerContent) -> SceneLayer {
         SceneLayer(
             id: id, name: name, visible: visible, origin: origin, size: size,
-            content: content, unrunScripts: unrunScripts, alpha: alpha, tint: tint,
-            rotation: rotation, displayScripts: displayScripts, scale: scale,
-            parallaxDepth: parallaxDepth)
+            content: content, unrunScripts: unrunScripts, effects: effects,
+            alpha: alpha, tint: tint, rotation: rotation, displayScripts: displayScripts,
+            scale: scale, parallaxDepth: parallaxDepth)
     }
 }

@@ -33,6 +33,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 한 번만 돌려서는 안 된다. 실물 음악 위젯의 진행 막대는 0.5초짜리 타이머가
     /// 끝나야 "재생 중인 음악이 없다"로 판단해 숨는다 — 처음에는 보이라고 답한다.
     private var displays: [DisplayState] = []
+    /// 레이어에 걸린 이펙트 체인들. 매 프레임 컴포지터보다 먼저 그린다.
+    private var effectChains: [(chain: EffectChain, source: MTLTexture)] = []
+    /// 이펙트가 쓰는 `g_Time`. 씬을 켠 뒤 흐른 시간이다.
+    private var effectStartTime: CFTimeInterval?
     /// 스크립트를 마지막으로 돌린 시각. 시계는 초 단위로 바뀌므로 1초에 한 번이면 된다.
     private var lastScriptTime: CFTimeInterval?
     /// 스크립트를 다시 돌리는 주기.
@@ -324,6 +328,66 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         }
     }
 
+    /// 이펙트 체인을 켤지. **기본은 꺼짐이다.**
+    ///
+    /// 번역기·이펙트 해석·유니폼 배치는 검증됐지만, 패스가 소스 텍스처를 샘플링한
+    /// 결과에 아직 자홍색 블록이 섞인다. 파이프라인·바인딩·합성은 정상임을
+    /// 확인했다(슬롯에 흰색을 묶으면 흰색이, 샘플링을 상수로 바꾸면 그 색이
+    /// 화면 전체에 제대로 나온다). 원인은 그 사이 어딘가다.
+    ///
+    /// 배경화면은 매일 쓰는 것이라, 고치는 중인 기능이 보이는 결함을 남기면 안 된다.
+    /// `WALLFLOW_EFFECTS=1`로 켜서 마저 고친다.
+    static var effectsEnabled: Bool {
+        ProcessInfo.processInfo.environment["WALLFLOW_EFFECTS"] != nil
+    }
+
+    /// 이펙트 체인을 그린다. 컴포지터의 커맨드 버퍼에 같이 실린다.
+    ///
+    /// 움직이지 않는 이펙트는 **한 번만** 그린다. 배경화면은 상시 구동이라,
+    /// 결과가 같은 그림을 매 프레임 다시 그리는 것은 그대로 낭비다.
+    private func renderEffects(into commands: MTLCommandBuffer) {
+        guard !effectChains.isEmpty else { return }
+        let now = CACurrentMediaTime()
+        let start = effectStartTime ?? now
+        let isFirstFrame = effectStartTime == nil
+        effectStartTime = start
+        let time = Float(now - start)
+        for entry in effectChains where entry.chain.isAnimated || isFirstFrame {
+            entry.chain.render(commandBuffer: commands, source: entry.source, time: time)
+        }
+    }
+
+    /// 셰이더가 `#include`로 부르는 헤더들을 모은다.
+    ///
+    /// 헤더는 pkg에도 assets에도 있다. 한쪽만 보면 `ApplyBlending` 같은 공용 함수를
+    /// 못 찾아 그 셰이더가 통째로 컴파일에 실패한다 — 실물에서 13개가 이 때문에
+    /// 떨어졌다. 이름은 마지막 경로 조각과 전체 경로 둘 다로 등록한다.
+    private static func collectShaderHeaders(
+        reader: PkgReader, assets: AssetsStore?
+    ) -> [String: String] {
+        var includes: [String: String] = [:]
+        if let assets {
+            let root = assets.root.appendingPathComponent("shaders")
+            if let walker = FileManager.default.enumerator(atPath: root.path) {
+                for case let path as String in walker where path.hasSuffix(".h") {
+                    guard let body = try? String(
+                        contentsOf: root.appendingPathComponent(path), encoding: .utf8)
+                    else { continue }
+                    includes[(path as NSString).lastPathComponent] = body
+                    includes[path] = body
+                }
+            }
+        }
+        // pkg의 헤더가 assets의 같은 이름을 이긴다. 씬이 가져온 것이 그 씬의 것이다.
+        for name in reader.names where name.hasSuffix(".h") {
+            guard let data = try? reader.data(for: name),
+                  let body = String(data: data, encoding: .utf8) else { continue }
+            includes[(name as NSString).lastPathComponent] = body
+            includes[name] = body
+        }
+        return includes
+    }
+
     /// 표시 스크립트를 다시 돌려 알파를 갱신한다.
     ///
     /// 렌더 스레드에서 돈다. 글자 스크립트와 달리 결과가 한 실수뿐이라 굽는 비용이
@@ -447,6 +511,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         }
 
         let resolver = ReferenceResolver(pkg: reader, assets: assets)
+        // 셰이더가 `#include "common.h"` 하는 헤더들. pkg와 assets 양쪽에 있다.
+        // 안 모으면 `ApplyBlending` 같은 공용 함수를 못 찾아 컴파일이 통째로 실패한다.
+        let shaderIncludes = Self.collectShaderHeaders(reader: reader, assets: assets)
+        var chains: [(chain: EffectChain, source: MTLTexture)] = []
 
         var videos: [VideoTexture] = []
         var particles: [(system: ParticleSystem, renderer: ParticleRenderer,
@@ -547,7 +615,27 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                         drawable.append((quad, .dynamic { [weak video] in video?.currentTexture() }))
                     } else {
                         let texture = try compositor.makeTexture(from: decoded)
-                        drawable.append((quad, .fixed(texture)))
+                        // 이펙트가 걸려 있으면 그 결과를 대신 그린다. 컴파일이 안 되면
+                        // 체인이 nil이라 원본을 그대로 쓴다 — 레이어를 버리지 않는다.
+                        if !layer.effects.isEmpty, Self.effectsEnabled,
+                           let chain = EffectChain(
+                            device: device,
+                            effects: layer.effects.map(\.definition),
+                            effectBases: layer.effects.map(\.base),
+                            source: texture, resolver: resolver,
+                            includes: shaderIncludes,
+                            makeTexture: { try compositor.makeTexture(from: $0) },
+                            diagnostics: &degraded) {
+                            chains.append((chain, texture))
+                            drawable.append((quad, .dynamic { [weak chain] in chain?.texture }))
+                        } else {
+                            if !layer.effects.isEmpty, Self.effectsEnabled {
+                                degraded.append(
+                                    "\(layer.name): 이펙트 \(layer.effects.count)개를 걸지 못해 "
+                                        + "원본 그대로 그린다")
+                            }
+                            drawable.append((quad, .fixed(texture)))
+                        }
                     }
                 } catch {
                     skipped.append("\(layer.name): 텍스처 로드 실패 \(error)")
@@ -685,11 +773,20 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
         self.layerList = drawable
         self.displays = displayStates
+        self.effectChains = chains
+        self.effectStartTime = nil
+        // 이펙트는 컴포지터가 레이어를 합성하기 전에 자기 텍스처를 그려야 한다.
+        compositor.prepare = { [weak self] commands in
+            MainActor.assumeIsolated { self?.renderEffects(into: commands) }
+        }
         compositor.setLayers(drawable)
         self.compositor = compositor
 
         // 비디오·파티클·텍스트는 모두 시간에 따라 바뀐다.
-        if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty {
+        // 시간을 쓰는 이펙트(`g_Time`)도 마찬가지다 — 빼면 빛줄기가 첫 프레임에
+        // 멈춘 채로 남는다. 움직이지 않는 이펙트는 여기 해당하지 않는다.
+        let hasAnimatedEffect = chains.contains { $0.chain.isAnimated }
+        if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty || hasAnimatedEffect {
             view.isPaused = false
             view.enableSetNeedsDisplay = false
             // 전력 정책이 30fps를 지시한다. 60fps 소스라도 그 이상 그리지 않는다.
@@ -740,6 +837,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         compositor = nil
         layerList = []
         displays = []
+        effectChains = []
+        effectStartTime = nil
         view?.delegate = nil
     }
 }

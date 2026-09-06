@@ -317,6 +317,20 @@ public struct SceneDocument: Sendable {
             }
         }
 
+        // 레이어에 걸린 이펙트. 못 읽는 것은 조용히 빠진다 — 이펙트 하나 때문에
+        // 레이어를 버리면 그림이 통째로 사라진다.
+        var effects: [LayerEffect] = []
+        for case let raw as [String: Any] in (object["effects"] as? [Any] ?? []) {
+            guard let file = raw["file"] as? String else { continue }
+            // `visible: false`인 이펙트는 편집기에서 꺼 둔 것이다.
+            if let visible = boolValue(raw["visible"]), !visible { continue }
+            let scenePasses = (raw["passes"] as? [Any] ?? []).compactMap { $0 as? [String: Any] }
+            guard let definition = EffectDefinition.load(
+                path: file, scenePasses: scenePasses, resolver: resolver) else { continue }
+            effects.append(LayerEffect(
+                definition: definition, base: (file as NSString).deletingLastPathComponent))
+        }
+
         func unsupported(_ reason: String) -> SceneLayer {
             SceneLayer(
                 id: id, name: name, visible: visible,
@@ -406,7 +420,7 @@ public struct SceneDocument: Sendable {
         return SceneLayer(
             id: id, name: name, visible: visible,
             origin: origin, size: size,
-            content: content, unrunScripts: unrun, alpha: alpha, tint: tint,
+            content: content, unrunScripts: unrun, effects: effects, alpha: alpha, tint: tint,
             rotation: rotation, displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth
         )
     }

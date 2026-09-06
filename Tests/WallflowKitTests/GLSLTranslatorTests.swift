@@ -48,8 +48,10 @@ final class GLSLTranslatorTests: XCTestCase {
         varying vec2 v_TexCoord[3];
         void main() { gl_FragColor = vec4(v_TexCoord[2], 0.0, 1.0); }
         """)
-        XCTAssertTrue(result.source.contains("    vec2 v_TexCoord_0;"), result.source)
-        XCTAssertTrue(result.source.contains("    vec2 v_TexCoord_2;"))
+        XCTAssertTrue(
+            result.source.contains("    vec2 v_TexCoord_0 [[user(v_TexCoord_0)]];"),
+            result.source)
+        XCTAssertTrue(result.source.contains("    vec2 v_TexCoord_2 [[user(v_TexCoord_2)]];"))
         XCTAssertTrue(result.source.contains("    vec2 v_TexCoord[3];"), "안에서는 배열")
         XCTAssertTrue(result.source.contains("context.v_TexCoord[2] = varyingsIn.v_TexCoord_2;"))
     }
@@ -68,7 +70,7 @@ final class GLSLTranslatorTests: XCTestCase {
         void main() { gl_FragColor = vec4(v_TexCoord[0], 0.0, 1.0); }
         """)
         XCTAssertTrue(result.source.contains("    vec2 v_TexCoord[13];"), result.source)
-        XCTAssertTrue(result.source.contains("    vec2 v_TexCoord_12;"))
+        XCTAssertTrue(result.source.contains("    vec2 v_TexCoord_12 [[user(v_TexCoord_12)]];"))
     }
 
     /// 콤보는 `#if`에만 쓰이는 게 아니라 `ApplyBlending(BLENDMODE, ...)`처럼
@@ -291,6 +293,30 @@ final class GLSLTranslatorTests: XCTestCase {
                 // 결과가 무엇이든 좋다. 죽지만 않으면 된다.
                 _ = try? GLSLTranslator.translate(source, stage: stage, entryPoint: "main0")
             }
+        }
+    }
+
+    /// 정점과 프래그먼트는 **따로 컴파일된다**(Metal은 두 함수가 다른 라이브러리에
+    /// 있어도 된다). 필드 순서로 맞물리면, 같은 varying이 `.vert`와 `.frag`에서
+    /// 다른 순서로 선언될 때 값이 조용히 뒤바뀐다. 이름으로 맞물려야 한다.
+    func testVaryingsAreMatchedByNameNotOrder() throws {
+        let vertexSource = """
+        attribute vec3 a_Position;
+        varying vec2 v_A;
+        varying vec4 v_B;
+        void main() { gl_Position = vec4(a_Position, 1.0); v_A = vec2(0.0); v_B = vec4(0.0); }
+        """
+        // 프래그먼트는 순서가 반대다. 실물에서도 순서가 다른 짝이 있다.
+        let fragmentSource = """
+        varying vec4 v_B;
+        varying vec2 v_A;
+        void main() { gl_FragColor = v_B + vec4(v_A, 0.0, 0.0); }
+        """
+        let vertex = try translate(vertexSource, stage: .vertex)
+        let fragment = try translate(fragmentSource)
+        for source in [vertex.source, fragment.source] {
+            XCTAssertTrue(source.contains("v_A [[user(v_A)]]"), source)
+            XCTAssertTrue(source.contains("v_B [[user(v_B)]]"))
         }
     }
 }

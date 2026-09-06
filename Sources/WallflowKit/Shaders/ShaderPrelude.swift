@@ -125,7 +125,11 @@ public enum ShaderPrelude {
     /// `g_Texture0`과 샘플러 `g_Texture0Sampler` 둘로 쪼개고, 이 매크로가 둘을
     /// 다시 묶는다. 인자 이름 규칙이 매크로와 번역기 양쪽에 걸려 있다.
     public static let sampling = """
+    #ifdef WF_FORCE_GREEN
+    #define texSample2D(tex, uv) float4(0.0, 1.0, 0.0, 1.0)
+    #else
     #define texSample2D(tex, uv) tex.sample(tex##Sampler, (uv))
+    #endif
     #define texSample2DLod(tex, uv, lod) tex.sample(tex##Sampler, (uv), level(lod))
     #define texSample2DCompare(tex, uv, z) tex.sample(tex##Sampler, (uv))
     """
