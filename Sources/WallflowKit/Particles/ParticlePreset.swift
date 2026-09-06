@@ -1,10 +1,46 @@
 import Foundation
 
+/// 이미터가 파티클에 주는 초기 조건.
+///
+/// 이름과 위치 말고도 둘이 더 있다. 실물에서 이 둘이 없으면 **불꽃놀이가 아예
+/// 안 터진다** — 그 프리셋은 `rate: 0`이고 속도 초기화자도 없어서, 터뜨리는
+/// 것도 날리는 것도 전부 이미터가 한다.
+public struct ParticleEmitterBurst: Equatable, Sendable {
+    /// 시스템이 만들어질 때 **한꺼번에** 생기는 개수.
+    /// 공식 문서: "The number of particles which are created instantly when the
+    /// particle system is created." `rate`가 0이면 이것만 나오고 끝난다.
+    public var count: Int
+    /// 이미터가 주는 초기 속력의 범위. 방향은 이미터가 뿌린 자리에서 바깥쪽이다.
+    /// 공식 문서: "The minimum/maximum particle speed in conjunction with a
+    /// movement Operator."
+    public var speedMin: Double
+    public var speedMax: Double
+
+    public init(count: Int = 0, speedMin: Double = 0, speedMax: Double = 0) {
+        self.count = count
+        self.speedMin = speedMin
+        self.speedMax = speedMax
+    }
+
+    public static let none = ParticleEmitterBurst()
+    public var isEmpty: Bool { count == 0 && speedMax == 0 && speedMin == 0 }
+}
+
 public enum ParticleEmitter: Equatable, Sendable {
     case sphereRandom(rate: Double, origin: Vec3, directions: Vec3,
-                      distanceMin: Double, distanceMax: Double)
+                      distanceMin: Double, distanceMax: Double,
+                      burst: ParticleEmitterBurst = .none)
     case boxRandom(rate: Double, origin: Vec3, directions: Vec3,
-                   distanceMin: Vec3, distanceMax: Vec3)
+                   distanceMin: Vec3, distanceMax: Vec3,
+                   burst: ParticleEmitterBurst = .none)
+
+    /// 시작할 때 한꺼번에 만들 개수와 초기 속력.
+    public var burst: ParticleEmitterBurst {
+        switch self {
+        case .sphereRandom(_, _, _, _, _, let burst): return burst
+        case .boxRandom(_, _, _, _, _, let burst): return burst
+        }
+    }
 
     /// 씬의 조정값을 얹는다. **방출 주기만** 바꾼다.
     ///
@@ -16,12 +52,12 @@ public enum ParticleEmitter: Equatable, Sendable {
     /// 원본 반경 1024가 0.65배로 줄어 가로의 3분의 2에만 비가 왔다.
     func scaled(rate factor: Double) -> ParticleEmitter {
         switch self {
-        case .sphereRandom(let r, let o, let d, let lo, let hi):
+        case .sphereRandom(let r, let o, let d, let lo, let hi, let burst):
             return .sphereRandom(rate: r * factor, origin: o, directions: d,
-                                 distanceMin: lo, distanceMax: hi)
-        case .boxRandom(let r, let o, let d, let lo, let hi):
+                                 distanceMin: lo, distanceMax: hi, burst: burst)
+        case .boxRandom(let r, let o, let d, let lo, let hi, let burst):
             return .boxRandom(rate: r * factor, origin: o, directions: d,
-                              distanceMin: lo, distanceMax: hi)
+                              distanceMin: lo, distanceMax: hi, burst: burst)
         }
     }
 }
@@ -406,12 +442,25 @@ public struct ParticlePreset: Equatable, Sendable {
               let directions = vec(dict, "directions", Vec3(x: 1, y: 1, z: 0))
         else { return nil }
 
+        // 시작할 때의 한꺼번에 방출과 초기 속력. 둘 다 파일에서 오는 값이라
+        // 말이 안 되면 없는 것으로 본다.
+        let burst = ParticleEmitterBurst(
+            // 파일이 1e9을 줄 수도 있다. 버퍼 상한으로 죈다 — 그 이상은 어차피
+            // 빈 자리가 없어 무시되지만, 큰 수로 도는 반복문을 만들 이유가 없다.
+            count: Swift.min(
+                Swift.max(0, saturatingInt(num(dict, "instantaneous", 0) ?? 0) ?? 0),
+                maxAllowedCount),
+            speedMin: (num(dict, "speedmin", 0) ?? 0).isFinite
+                ? Swift.max(0, num(dict, "speedmin", 0) ?? 0) : 0,
+            speedMax: (num(dict, "speedmax", 0) ?? 0).isFinite
+                ? Swift.max(0, num(dict, "speedmax", 0) ?? 0) : 0)
+
         switch name {
         case "sphererandom":
             guard let lo = num(dict, "distancemin", 0), let hi = num(dict, "distancemax", 0)
             else { return nil }
             return .sphereRandom(rate: rate, origin: origin, directions: directions,
-                                 distanceMin: lo, distanceMax: hi)
+                                 distanceMin: lo, distanceMax: hi, burst: burst)
 
         case "boxrandom":
             // 상자는 distancemin~distancemax 사이를 채운다. distancemin이 없으면 0이다 —
@@ -420,7 +469,7 @@ public struct ParticlePreset: Equatable, Sendable {
                   let hi = vec(dict, "distancemax", zero)
             else { return nil }
             return .boxRandom(rate: rate, origin: origin, directions: directions,
-                              distanceMin: lo, distanceMax: hi)
+                              distanceMin: lo, distanceMax: hi, burst: burst)
 
         default:
             return nil

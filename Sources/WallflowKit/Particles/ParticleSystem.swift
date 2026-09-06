@@ -40,6 +40,8 @@ public final class ParticleSystem {
     private var numAlive: Int = 0
     /// Indices of dead slots available for reuse.
     private var deadSlots: [Int] = []
+    /// 시작할 때의 한꺼번에 방출을 이미 했는지. 한 번만 한다.
+    private var didBurst = false
     /// 이미터별 방출 크레딧. 못 내보낸 몫이 쌓이지 않는지는 aliveCount로 관찰할 수 없어서
     /// (슬롯 수가 구조적 상한이라 항상 통과한다) 테스트가 이 값을 직접 본다.
     var emissionCredits: [Double] = []
@@ -108,6 +110,12 @@ public final class ParticleSystem {
         // Remove dead particles from alive tracking
         removeDeadParticles()
 
+        // 시작할 때 한꺼번에 뿌리는 몫. 첫 update에서 한 번만 한다.
+        if !didBurst {
+            didBurst = true
+            emitBurst()
+        }
+
         // Emit new particles
         emitParticles(dt: dt)
 
@@ -128,14 +136,37 @@ public final class ParticleSystem {
         }
     }
 
+    /// 이미터의 `instantaneous` 몫을 한꺼번에 뿌린다.
+    ///
+    /// **이걸 안 하면 `rate: 0`인 이미터가 아무것도 안 뿌린다.** 실물 불꽃놀이가
+    /// 그렇다 — 터뜨리는 것도(150개 한꺼번에), 날리는 것도(이미터 속력) 전부
+    /// 이미터가 하고 `rate`는 0이다. 그래서 불꽃이 통째로 안 보였다.
+    private func emitBurst() {
+        for emitter in preset.emitters {
+            let count = emitter.burst.count
+            guard count > 0 else { continue }
+            for _ in 0..<count {
+                guard let slot = deadSlots.popLast() else { break }
+                var particle = emitParticle(from: emitter)
+                guard isValidParticle(particle) else {
+                    deadSlots.append(slot)
+                    continue
+                }
+                particle.age = 0
+                particleBuffer[slot] = particle
+                numAlive += 1
+            }
+        }
+    }
+
     private func emitParticles(dt: Double) {
         for (emitterIndex, emitter) in preset.emitters.enumerated() {
             // Accumulate emission credit
             let rate: Double
             switch emitter {
-            case .sphereRandom(let r, _, _, _, _):
+            case .sphereRandom(let r, _, _, _, _, _):
                 rate = r
-            case .boxRandom(let r, _, _, _, _):
+            case .boxRandom(let r, _, _, _, _, _):
                 rate = r
             }
 
@@ -191,24 +222,27 @@ public final class ParticleSystem {
 
         // Apply emitter position and velocity
         switch emitter {
-        case .sphereRandom(_, let origin, let directions, let distanceMin, let distanceMax):
+        case .sphereRandom(_, let origin, let directions, let distanceMin, let distanceMax, _):
             particle.position = origin
             // Random direction within cone
             let theta = random.next() * 2 * .pi
             let phi = acos(2 * random.next() - 1)
             let distance = distanceMin + random.next() * (distanceMax - distanceMin)
-            let offset = Vec3(
-                x: distance * sin(phi) * cos(theta) * directions.x,
-                y: distance * sin(phi) * sin(theta) * directions.y,
-                z: distance * cos(phi) * directions.z
+            // 방향은 거리와 따로 둔다. 뿌리는 반경이 0이어도(불꽃이 그렇다)
+            // 날아가는 방향은 있어야 하기 때문이다.
+            let unit = Vec3(
+                x: sin(phi) * cos(theta) * directions.x,
+                y: sin(phi) * sin(theta) * directions.y,
+                z: cos(phi) * directions.z
             )
             particle.position = Vec3(
-                x: origin.x + offset.x,
-                y: origin.y + offset.y,
-                z: origin.z + offset.z
+                x: origin.x + unit.x * distance,
+                y: origin.y + unit.y * distance,
+                z: origin.z + unit.z * distance
             )
+            applyEmitterSpeed(emitter.burst, direction: unit, to: &particle)
 
-        case .boxRandom(_, let origin, let directions, let distanceMin, let distanceMax):
+        case .boxRandom(_, let origin, let directions, let distanceMin, let distanceMax, _):
             let offset = Vec3(
                 x: (distanceMin.x + random.next() * (distanceMax.x - distanceMin.x)) * directions.x,
                 y: (distanceMin.y + random.next() * (distanceMax.y - distanceMin.y)) * directions.y,
@@ -219,6 +253,7 @@ public final class ParticleSystem {
                 y: origin.y + offset.y,
                 z: origin.z + offset.z
             )
+            applyEmitterSpeed(emitter.burst, direction: offset, to: &particle)
         }
 
         // Apply initializers
@@ -227,6 +262,27 @@ public final class ParticleSystem {
         }
 
         return particle
+    }
+
+    /// 이미터가 주는 초기 속력을 얹는다. 방향은 뿌린 자리에서 바깥쪽이다.
+    ///
+    /// **초기화자보다 먼저** 얹는다. `velocityrandom`이 있으면 그것이 이기고,
+    /// 없으면(불꽃이 그렇다) 이 속력이 유일한 운동원이다.
+    private func applyEmitterSpeed(
+        _ burst: ParticleEmitterBurst, direction: Vec3, to particle: inout Particle
+    ) {
+        guard burst.speedMax > 0 || burst.speedMin > 0 else { return }
+        let length = (direction.x * direction.x + direction.y * direction.y
+            + direction.z * direction.z).squareRoot()
+        // 방향이 없으면 속력을 줄 곳도 없다.
+        guard length > 1e-9, length.isFinite else { return }
+        let speed = burst.speedMin + random.next() * (burst.speedMax - burst.speedMin)
+        guard speed.isFinite else { return }
+        particle.velocity = Vec3(
+            x: direction.x / length * speed,
+            y: direction.y / length * speed,
+            z: direction.z / length * speed
+        )
     }
 
     private func applyInitializer(_ initializer: ParticleInitializer, to particle: inout Particle) {

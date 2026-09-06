@@ -45,7 +45,7 @@ final class ParticleOverrideTests: XCTestCase {
         var o = ParticleOverride()
         o.rate = 0.5; o.size = 2; o.speed = 3; o.lifetime = 0.5
         let p = preset().applying(o)
-        guard case .sphereRandom(let rate, _, _, let lo, let hi) = p.emitters[0] else {
+        guard case .sphereRandom(let rate, _, _, let lo, let hi, _) = p.emitters[0] else {
             return XCTFail("sphererandom이어야 한다")
         }
         XCTAssertEqual(rate, 10, accuracy: 0.001)
