@@ -49,9 +49,14 @@ final class ParticleOverrideTests: XCTestCase {
             return XCTFail("sphererandom이어야 한다")
         }
         XCTAssertEqual(rate, 10, accuracy: 0.001)
-        // 뿌리는 범위도 크기 배율을 따른다.
-        XCTAssertEqual(lo, 20, accuracy: 0.001)
-        XCTAssertEqual(hi, 200, accuracy: 0.001)
+        // **뿌리는 범위는 배율을 따르지 않는다.** 공식 문서가 못박고 있다 —
+        // "All factors are multiplied with the initializers and operators of your
+        // particle system"(IParticleSystemInstance). 이미터는 그 목록에 없다.
+        //
+        // 한동안 크기 배율을 범위에까지 곱했는데, 그러면 비가 화면 일부에만 내린다
+        // (실물에서 반경 1024가 0.65배로 줄어 가로 3분의 2에만 왔다).
+        XCTAssertEqual(lo, 10, accuracy: 0.001)
+        XCTAssertEqual(hi, 100, accuracy: 0.001)
         guard case .lifetimeRandom(let la, let lb) = p.initializers[0],
               case .sizeRandom(let sa, let sb) = p.initializers[1],
               case .velocityRandom(let va, _) = p.initializers[2] else {

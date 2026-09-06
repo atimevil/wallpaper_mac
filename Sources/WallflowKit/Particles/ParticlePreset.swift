@@ -6,17 +6,22 @@ public enum ParticleEmitter: Equatable, Sendable {
     case boxRandom(rate: Double, origin: Vec3, directions: Vec3,
                    distanceMin: Vec3, distanceMax: Vec3)
 
-    /// 씬의 조정값을 얹는다. 방출 주기는 rate로, 뿌리는 범위는 크기 배율로 조절한다.
-    func scaled(rate factor: Double, distance: Double) -> ParticleEmitter {
+    /// 씬의 조정값을 얹는다. **방출 주기만** 바꾼다.
+    ///
+    /// 뿌리는 범위는 건드리지 않는다. 공식 문서가 못박고 있다 —
+    /// "All factors are multiplied with the initializers and operators of your
+    /// particle system"(IParticleSystemInstance). 이미터는 그 목록에 없다.
+    ///
+    /// 크기 배율을 범위에까지 곱했더니 비가 화면 일부에만 내렸다. 실물에서
+    /// 원본 반경 1024가 0.65배로 줄어 가로의 3분의 2에만 비가 왔다.
+    func scaled(rate factor: Double) -> ParticleEmitter {
         switch self {
         case .sphereRandom(let r, let o, let d, let lo, let hi):
             return .sphereRandom(rate: r * factor, origin: o, directions: d,
-                                 distanceMin: lo * distance, distanceMax: hi * distance)
+                                 distanceMin: lo, distanceMax: hi)
         case .boxRandom(let r, let o, let d, let lo, let hi):
-            return .boxRandom(
-                rate: r * factor, origin: o, directions: d,
-                distanceMin: Vec3(x: lo.x * distance, y: lo.y * distance, z: lo.z * distance),
-                distanceMax: Vec3(x: hi.x * distance, y: hi.y * distance, z: hi.z * distance))
+            return .boxRandom(rate: r * factor, origin: o, directions: d,
+                              distanceMin: lo, distanceMax: hi)
         }
     }
 }
@@ -206,7 +211,7 @@ public struct ParticlePreset: Equatable, Sendable {
             maxCount: scaledCount,
             startTime: startTime,
             materialPath: materialPath,
-            emitters: emitters.map { $0.scaled(rate: override.rate, distance: override.size) },
+            emitters: emitters.map { $0.scaled(rate: override.rate) },
             initializers: initializers.map {
                 $0.scaled(size: override.size, speed: override.speed,
                           lifetime: override.lifetime, alpha: override.alpha,
