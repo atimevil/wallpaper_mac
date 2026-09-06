@@ -337,6 +337,31 @@ public struct ParticleChild: Equatable, Sendable {
     }
 }
 
+/// 프리셋이 정의하는 제어점 하나.
+///
+/// 연산자들이 번호로 이걸 가리킨다. `flags`의 1번 비트가 **마우스를 따라가라**는
+/// 뜻이다 — 실물 `examplecursoravoid`(이름 그대로 커서를 피하는 예제)의 1번
+/// 제어점이 `flags: 1`이고, `fireflies`·`vapor0`처럼 상호작용 프리셋들이 전부
+/// 같은 꼴이다. 나머지 값(2·4·16)은 무엇에 묶이는지 근거가 없어 그대로 둔다.
+public struct ParticleControlPoint: Equatable, Sendable {
+    /// 마우스를 따라간다는 비트.
+    public static let followsCursorFlag = 1
+
+    public let id: Int
+    public let offset: Vec3
+    public let flags: Int
+
+    public init(id: Int, offset: Vec3, flags: Int) {
+        self.id = id
+        self.offset = offset
+        self.flags = flags
+    }
+
+    public var followsCursor: Bool { flags & Self.followsCursorFlag != 0 }
+    /// 우리가 모르는 묶임이 있는지. 있으면 그 제어점을 쓰는 연산자를 보고한다.
+    public var hasUnknownBinding: Bool { flags & ~Self.followsCursorFlag != 0 }
+}
+
 public struct ParticlePreset: Equatable, Sendable {
     /// maxcount는 파일에서 온 값이고 시뮬레이션 버퍼 크기를 정한다.
     /// 실물 프리셋의 최대가 300이므로 8192는 충분히 관대하다.
@@ -372,6 +397,8 @@ public struct ParticlePreset: Equatable, Sendable {
     public let operators: [ParticleOperator]
     /// 인식하지 못한 이름들. 무엇이 빠졌는지 사용자에게 말할 수 있게 남긴다.
     public let unsupportedNames: [String]
+    /// 프리셋이 정의하는 제어점들. 연산자가 번호로 가리킨다.
+    public let controlPoints: [ParticleControlPoint]
     /// 이름은 아는데 필드가 깨져서 버린 엔트리가 있는 이름들.
     /// 이름 단위라서 개수는 담지 못한다 — 같은 이름이 여러 번 나오고 그중 일부만
     /// 깨졌으면, 나머지가 정상 동작하는 중에도 그 이름이 여기 들어간다.
@@ -394,8 +421,10 @@ public struct ParticlePreset: Equatable, Sendable {
         operators: [ParticleOperator], unsupportedNames: [String],
         malformedNames: [String] = [], animationMode: ParticleAnimationMode = .sequence,
         childReferences: [ParticleChildReference] = [],
-        children: [ParticleChild] = []
+        children: [ParticleChild] = [],
+        controlPoints: [ParticleControlPoint] = []
     ) {
+        self.controlPoints = controlPoints
         self.maxCount = maxCount
         self.startTime = startTime
         self.materialPath = materialPath
@@ -433,7 +462,7 @@ public struct ParticlePreset: Equatable, Sendable {
             malformedNames: malformedNames,
             animationMode: animationMode,
             childReferences: childReferences,
-            children: children)
+            children: children, controlPoints: controlPoints)
     }
 
     /// 읽어 온 자식들을 붙인 사본.
@@ -443,7 +472,7 @@ public struct ParticlePreset: Equatable, Sendable {
             emitters: emitters, initializers: initializers, operators: operators,
             unsupportedNames: unsupportedNames, malformedNames: malformedNames,
             animationMode: animationMode, childReferences: childReferences,
-            children: children)
+            children: children, controlPoints: controlPoints)
     }
 
     /// 총량 예산에 맞추기 위한 축소 배율. 줄일 필요가 없으면 1이다.
@@ -589,8 +618,23 @@ public struct ParticlePreset: Equatable, Sendable {
             unsupportedNames: Array(unsupportedNames).sorted(),
             malformedNames: Array(malformedNames).sorted(),
             animationMode: ParticleAnimationMode.parse(json["animationmode"]),
-            childReferences: parseChildren(json["children"])
+            childReferences: parseChildren(json["children"]),
+            controlPoints: parseControlPoints(json["controlpoint"])
         )
+    }
+
+    /// `controlpoint` 항목을 읽는다. 번호가 없으면 가리킬 수 없으므로 버린다.
+    static func parseControlPoints(_ raw: Any?) -> [ParticleControlPoint] {
+        var out: [ParticleControlPoint] = []
+        for case let point as [String: Any] in (raw as? [Any] ?? []) {
+            guard let id = (point["id"] as? NSNumber)?.intValue, id >= 0 else { continue }
+            out.append(ParticleControlPoint(
+                id: id,
+                offset: (point["offset"] as? String).flatMap(Vec3.parse)
+                    ?? Vec3(x: 0, y: 0, z: 0),
+                flags: (point["flags"] as? NSNumber)?.intValue ?? 0))
+        }
+        return out
     }
 
     /// `children` 항목을 읽는다. 이름이 없는 것은 버린다 — 가리킬 파일이 없다.

@@ -262,3 +262,80 @@ extension ParticleOperatorTests {
         XCTAssertGreaterThan(Set(speeds.map { Int($0 / 10) }).count, 3, "전부 같은 속도다")
     }
 }
+
+/// 제어점 — 프리셋이 정의하고 연산자가 번호로 가리킨다.
+///
+/// `flags`의 1번 비트가 **마우스를 따라가라**는 뜻이다. 실물
+/// `examplecursoravoid`(이름 그대로 커서를 피하는 예제)의 1번 제어점이
+/// `flags: 1`이고, `fireflies`·`vapor0` 같은 상호작용 프리셋이 전부 같은 꼴이다.
+extension ParticleOperatorTests {
+    private func preset(controlPoints: String, operators: String) throws -> ParticlePreset {
+        let json = """
+        {"maxcount": 8, "material": "m.json",
+         "emitter": [{"name": "sphererandom", "rate": 0, "instantaneous": 1,
+                      "distancemin": 100, "distancemax": 100}],
+         "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100},
+                         {"name": "sizerandom", "min": 10, "max": 10}],
+         "controlpoint": \(controlPoints),
+         "operator": \(operators)}
+        """
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(json.utf8)) as? [String: Any])
+        return try XCTUnwrap(ParticlePreset.parse(object))
+    }
+
+    func testParsesControlPoints() throws {
+        let preset = try preset(
+            controlPoints: #"[{"id": 0, "offset": "0 0 0", "flags": 0}, {"id": 1, "offset": "50 0 0", "flags": 1}]"#,
+            operators: "[]")
+        XCTAssertEqual(preset.controlPoints.count, 2)
+        XCTAssertFalse(preset.controlPoints[0].followsCursor)
+        XCTAssertTrue(preset.controlPoints[1].followsCursor)
+        XCTAssertEqual(preset.controlPoints[1].offset, Vec3(x: 50, y: 0, z: 0))
+    }
+
+    /// 커서를 따라가는 제어점은 커서 자리로 간다. 못 받았으면 시스템 자리다.
+    func testCursorControlPointFollowsTheMouse() throws {
+        let preset = try preset(
+            controlPoints: #"[{"id": 1, "offset": "0 0 0", "flags": 1}]"#, operators: "[]")
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        XCTAssertEqual(system.controlPointPosition(1), Vec3(x: 0, y: 0, z: 0),
+                       "커서를 못 받았으면 시스템 자리")
+        system.cursorPosition = Vec3(x: 300, y: 200, z: 0)
+        XCTAssertEqual(system.controlPointPosition(1), Vec3(x: 300, y: 200, z: 0))
+    }
+
+    /// 커서를 피한다. 실물 `fireflies`가 `scale: -50`으로 이렇게 흩어진다.
+    func testParticlesAvoidTheCursor() throws {
+        let preset = try preset(
+            controlPoints: #"[{"id": 1, "offset": "0 0 0", "flags": 1}]"#,
+            operators: """
+            [{"name": "movement", "gravity": "0 0 0", "drag": 0},
+             {"name": "controlpointattract", "controlpoint": 1,
+              "scale": -2000, "threshold": 400}]
+            """)
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        system.update(deltaTime: 1.0 / 60)
+        let before = try XCTUnwrap(system.particles.first).position
+        // 커서를 파티클 쪽에 둔다. 밀려나야 한다.
+        system.cursorPosition = before
+        for _ in 0..<60 { system.update(deltaTime: 1.0 / 60) }
+        let after = try XCTUnwrap(system.particles.first).position
+        let moved = ((after.x - before.x) * (after.x - before.x)
+            + (after.y - before.y) * (after.y - before.y)).squareRoot()
+        XCTAssertGreaterThan(moved, 10, "커서에서 밀려나야 한다")
+        XCTAssertTrue(system.unimplementedOperators.isEmpty, "이제 이 조합은 다 한다")
+    }
+
+    /// 우리가 모르는 묶임(2·4·16)은 손대지 않고 번호와 함께 남긴다.
+    func testUnknownControlPointBindingIsReported() throws {
+        let preset = try preset(
+            controlPoints: #"[{"id": 1, "offset": "0 0 0", "flags": 4}]"#,
+            operators: """
+            [{"name": "controlpointattract", "controlpoint": 1, "scale": 100, "threshold": 100}]
+            """)
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        XCTAssertEqual(system.unimplementedOperators, ["controlpointattract(제어점 1)"])
+        XCTAssertNil(system.controlPointPosition(1))
+    }
+}

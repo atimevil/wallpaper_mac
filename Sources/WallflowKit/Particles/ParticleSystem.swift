@@ -86,6 +86,9 @@ public final class ParticleSystem {
     private let hasColorCurve: Bool
     /// 시스템이 살아 있은 시간. 잡음과 소용돌이가 시간에 따라 흐른다.
     private var elapsed: Double = 0
+    /// 마우스 커서의 자리(이 시스템의 좌표계). 매 프레임 렌더러가 넣어 준다.
+    /// 없으면 커서를 따라가는 제어점이 시스템 자리에 머문다.
+    public var cursorPosition: Vec3?
 
     public init(preset: ParticlePreset, random: RandomSource) {
         self.preset = preset
@@ -115,9 +118,10 @@ public final class ParticleSystem {
         // 안 움직이는지 알 수 없다.
         var unimplemented = Set<String>()
         for op in preset.operators {
-            // 0번 제어점(시스템 자신의 자리)은 한다. 다른 번호는 씬이 자리를
-            // 정해 주는데 우리 모델에 그 데이터가 없다.
-            if case .controlPointAttract(let point, _, _, _) = op, point != 0 {
+            // 제어점은 프리셋이 정의한다. 우리가 못 푸는 묶임(마우스가 아닌
+            // 다른 무엇)이면 그 사실을 번호와 함께 남긴다.
+            if case .controlPointAttract(let point, _, _, _) = op,
+               Self.unresolvableControlPoint(point, in: preset) {
                 unimplemented.insert("controlpointattract(제어점 \(point))")
             }
             // 우리가 안 넣는 출력은 이름과 함께 남긴다.
@@ -286,6 +290,8 @@ public final class ParticleSystem {
                         instance.isRetiring = true
                     }
                 }
+                // 자식도 같은 커서를 본다. 안 넘기면 꼬리가 손끝을 무시한다.
+                instance.system.cursorPosition = cursorPosition
                 instance.system.update(deltaTime: dt)
             }
             childInstances[index].removeAll {
@@ -753,10 +759,10 @@ public final class ParticleSystem {
             // 얹는다. **다른 번호는 씬이 자리를 따로 정해 주는데 우리 모델에
             // 그 데이터가 없다** — 그때는 여기서 아무것도 하지 않고
             // `unimplementedOperators`로 보고한다.
-            guard controlPoint == 0 else { return }
-            let target = Vec3(x: originOffset.x + origin.x,
-                              y: originOffset.y + origin.y,
-                              z: originOffset.z + origin.z)
+            guard let point = controlPointPosition(controlPoint) else { return }
+            let target = Vec3(x: point.x + origin.x,
+                              y: point.y + origin.y,
+                              z: point.z + origin.z)
             let delta = Vec3(x: target.x - particle.position.x,
                              y: target.y - particle.position.y,
                              z: target.z - particle.position.z)
@@ -780,6 +786,32 @@ public final class ParticleSystem {
                 particleBuffer[i].age += dt
             }
         }
+    }
+
+    /// 제어점의 자리. 못 풀면 nil이다.
+    ///
+    /// 0번은 시스템 자신의 자리다. 프리셋이 정의한 제어점은 그 자리에 자기
+    /// `offset`을 얹고, `flags`에 마우스 비트가 있으면 커서를 따라간다 —
+    /// 반딧불이 손끝을 피해 흩어지는 것이 이것이다. 커서를 아직 못 받은
+    /// 프레임에는 시스템 자리에 둔다(가만히 있는 편이 튀는 것보다 낫다).
+    func controlPointPosition(_ id: Int) -> Vec3? {
+        guard let point = preset.controlPoints.first(where: { $0.id == id }) else {
+            // 프리셋에 없는 번호라도 0번은 시스템 자신의 자리로 본다.
+            return id == 0 ? originOffset : nil
+        }
+        if point.hasUnknownBinding { return nil }
+        let base = point.followsCursor ? (cursorPosition ?? originOffset) : originOffset
+        return Vec3(x: base.x + point.offset.x,
+                    y: base.y + point.offset.y,
+                    z: base.z + point.offset.z)
+    }
+
+    /// 그 번호를 못 푸는지. 생성자에서 보고할지 정하는 데 쓴다.
+    static func unresolvableControlPoint(_ id: Int, in preset: ParticlePreset) -> Bool {
+        guard let point = preset.controlPoints.first(where: { $0.id == id }) else {
+            return id != 0
+        }
+        return point.hasUnknownBinding
     }
 
     /// 파티클마다 고정된 0~1 난수. `salt`로 용도를 나눈다.

@@ -23,7 +23,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var videos: [VideoTexture] = []
     /// 파티클 레이어마다 시뮬레이션과 렌더러 한 쌍. 매 프레임 전진시킨다.
     private var particles: [(system: ParticleSystem,
-                             groups: [String: (ParticleRenderer, Float)])] = []
+                             groups: [String: (ParticleRenderer, Float)],
+                             layerOrigin: SIMD2<Float>)] = []
     /// 직전 프레임 시각. 첫 프레임에는 없다.
     private var lastFrameTime: CFTimeInterval?
     /// 텍스트 레이어마다 스크립트와 구운 글자. 값이 바뀔 때만 다시 굽는다.
@@ -284,6 +285,20 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         // 지수 평활. 프레임률이 달라져도 비슷한 속도로 따라간다.
         parallaxOffset += (target - parallaxOffset) * 0.12
         compositor?.setParallax(parallaxOffset)
+    }
+
+    /// 마우스 커서를 씬의 직교 좌표로 옮긴다. 화면 밖이면 가장자리로 죈다.
+    ///
+    /// 씬 좌표는 y가 위로 증가하고 `NSEvent.mouseLocation`도 그러므로 부호를
+    /// 그대로 쓴다. 파티클 좌표계는 레이어 기준이라 부르는 쪽에서 원점을 뺀다.
+    private func sceneCursorPosition(in view: MTKView) -> SIMD2<Float>? {
+        guard let screen = view.window?.screen ?? NSScreen.main else { return nil }
+        let frame = screen.frame
+        guard frame.width > 0, frame.height > 0 else { return nil }
+        let mouse = NSEvent.mouseLocation
+        let nx = Float(min(max((mouse.x - frame.minX) / frame.width, 0), 1))
+        let ny = Float(min(max((mouse.y - frame.minY) / frame.height, 0), 1))
+        return SIMD2(nx * ortho.x, ny * ortho.y)
     }
 
     /// 글자를 굽고 텍스처와 쿼드 크기를 갱신한다.
@@ -738,7 +753,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
         var videos: [VideoTexture] = []
         var particles: [(system: ParticleSystem,
-                         groups: [String: (ParticleRenderer, Float)])] = []
+                         groups: [String: (ParticleRenderer, Float)],
+                         layerOrigin: SIMD2<Float>)] = []
         var texts: [TextState] = []
         var sounds: [(player: AVAudioPlayer, sceneVolume: Float)] = []
         var drawable: [(QuadInstance, LayerSource)] = []
@@ -945,7 +961,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     // 만든 순서대로 그린다 — 부모가 먼저, 자식이 그 위에.
                     drawable.append((quad, .particles(entry.renderer)))
                 }
-                particles.append((system, groups))
+                // 레이어 원점을 함께 들고 있는다. 커서를 이 시스템의 좌표계로
+                // 옮기려면 필요하다 — 파티클 좌표는 레이어 기준 상대 좌표다.
+                particles.append((system, groups,
+                                  SIMD2(Float(layer.origin.x), Float(layer.origin.y))))
 
             case .sound(let sound):
                 // 그리지 않는다. 소리만 준비해 둔다.
@@ -1181,7 +1200,16 @@ extension SceneRenderer: MTKViewDelegate {
             // 첫 프레임에는 직전 시각이 없다. 0을 넘기면 시뮬레이션이 그냥 넘어간다.
             let dt = lastFrameTime.map { now - $0 } ?? 0
             lastFrameTime = now
+            // 커서를 씬 좌표로 옮긴다. 제어점이 마우스를 따라가는 프리셋이
+            // 이걸 본다 — 반딧불이 손끝을 피해 흩어지는 것이 그것이다.
+            let cursor = sceneCursorPosition(in: view)
             for entry in particles {
+                if let cursor {
+                    entry.system.cursorPosition = Vec3(
+                        x: Double(cursor.x - entry.layerOrigin.x),
+                        y: Double(cursor.y - entry.layerOrigin.y),
+                        z: 0)
+                }
                 entry.system.update(deltaTime: dt)
                 // 자식이 아직 안 생겼거나 이미 사라진 그룹은 목록에 없다.
                 // 그 렌더러는 비워 둬야 마지막 프레임이 화면에 남지 않는다.
