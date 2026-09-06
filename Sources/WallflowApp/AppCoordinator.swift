@@ -120,7 +120,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             }
         } catch {
             // 배경화면은 항상 켜져 있어야 한다. 실패해도 앱을 죽이지 않는다.
-            FileHandle.standardError.write(Data("배경화면 적용 실패: \(error)\n".utf8))
+            // 다만 **이유는 반드시 남긴다** — 조용히 검은 화면이 되면 사용자는
+            // 자기가 받은 것이 왜 안 뜨는지 알 수 없다.
+            if case RendererError.unopenable(let reason) = error {
+                FileHandle.standardError.write(Data(
+                    "\(item.title): 이 배경화면은 열 수 없다 — \(reason)\n".utf8))
+            } else {
+                FileHandle.standardError.write(Data(
+                    "\(item.title): 배경화면 적용 실패: \(error)\n".utf8))
+            }
         }
     }
 }

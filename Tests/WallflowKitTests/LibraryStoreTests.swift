@@ -68,14 +68,45 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertEqual(try WallpaperItem.load(from: dir).title, "444")
     }
 
-    func testMissingFileFieldThrows() throws {
+    /// 열 수 없는 항목도 **목록에는 남는다.** 조용히 빼면 사용자는 자기가 받은
+    /// 것이 왜 안 보이는지 알 수 없다. 대신 이유를 들고 있다가 말해 준다.
+    func testMissingFileFieldIsListedWithReason() throws {
         let dir = try makeItem(id: "555", json: #"{"type":"video","title":"V"}"#)
-        XCTAssertThrowsError(try WallpaperItem.load(from: dir)) { error in
-            guard case WallpaperError.missingField(let f) = error else {
-                return XCTFail("expected missingField, got \(error)")
-            }
-            XCTAssertEqual(f, "file")
-        }
+        let item = try WallpaperItem.load(from: dir)
+        XCTAssertEqual(item.title, "V", "이름은 그대로 보여야 한다")
+        XCTAssertEqual(item.type, .unsupported)
+        XCTAssertEqual(item.unsupportedReason, "project.json에 file이 없다")
+    }
+
+    /// `type`이 없는 것도 마찬가지다.
+    func testMissingTypeIsListedWithReason() throws {
+        let dir = try makeItem(id: "556", json: #"{"file":"bg.mp4","title":"T"}"#)
+        let item = try WallpaperItem.load(from: dir)
+        XCTAssertEqual(item.type, .unsupported)
+        XCTAssertEqual(item.unsupportedReason, "project.json에 type이 없다")
+    }
+
+    /// 실물 "Project Zomboid pixel"이 이 꼴이다 — `dependency`만 있고 `file`이
+    /// 없다. 알맹이가 다른 창작마당 항목에 있어서 이 폴더만으로는 못 연다.
+    /// 예전에는 목록에서 통째로 사라져, 검은 화면만 남고 이유가 없었다.
+    func testDependencyPresetIsListedWithReason() throws {
+        let dir = try makeItem(
+            id: "557",
+            json: #"{"dependency":"3122339805","title":"Zomboid","preset":{"a":1}}"#)
+        let item = try WallpaperItem.load(from: dir)
+        XCTAssertEqual(item.title, "Zomboid")
+        XCTAssertEqual(item.type, .unsupported)
+        XCTAssertEqual(
+            item.unsupportedReason,
+            "다른 창작마당 항목(3122339805)에 딸린 프리셋이다. 그 항목도 받아야 한다")
+    }
+
+    /// 열 수 있는 것은 이유가 없어야 한다. 전부 이유를 달면 구별이 안 된다.
+    func testOpenableItemHasNoReason() throws {
+        let dir = try makeItem(
+            id: "558", json: #"{"type":"video","file":"bg.mp4","title":"V"}"#,
+            files: ["bg.mp4"])
+        XCTAssertNil(try WallpaperItem.load(from: dir).unsupportedReason)
     }
 
     func testScanReturnsItemsSortedByTitle() throws {

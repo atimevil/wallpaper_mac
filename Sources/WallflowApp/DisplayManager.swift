@@ -110,8 +110,10 @@ final class DisplayManager {
         case .scene:
             renderer = SceneRenderer(item: item)
         case .unsupported:
+            // 미리보기라도 띄운다. 검은 화면보다는 낫고, 이유는 함께 알린다.
             showPreview(item, in: window)
-            throw RendererError.unsupportedType(item.type)
+            throw item.unsupportedReason.map { RendererError.unopenable($0) }
+                ?? RendererError.unsupportedType(item.type)
         }
 
         window.setContent(renderer.makeView())

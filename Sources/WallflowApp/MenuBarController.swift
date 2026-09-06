@@ -50,8 +50,14 @@ final class MenuBarController {
             menu.addItem(empty)
         } else {
             for (index, item) in items.enumerated() {
+                // 열 수 없는 것은 그렇다고 적는다. 목록에서 빼면 사용자는 자기가
+                // 받은 것이 왜 안 보이는지 알 수 없고, 아무 표시 없이 두면
+                // 골랐을 때 왜 안 바뀌는지 알 수 없다.
+                let label = item.unsupportedReason == nil
+                    ? "\(item.title)  (\(item.type.rawValue))"
+                    : "\(item.title)  (열 수 없음)"
                 let menuItem = NSMenuItem(
-                    title: "\(item.title)  (\(item.type.rawValue))",
+                    title: label,
                     action: #selector(select(_:)),
                     keyEquivalent: ""
                 )
@@ -59,6 +65,9 @@ final class MenuBarController {
                 menuItem.tag = index
                 // 씬은 M2부터 이미지 레이어를 그린다. 못 그리면 preview로 폴백한다.
                 menuItem.isEnabled = (item.type != .unsupported)
+                // 왜 못 여는지는 마우스를 올리면 보인다. 메뉴 이름에 다 적으면
+                // 목록이 읽기 어려워진다.
+                menuItem.toolTip = item.unsupportedReason
                 menu.addItem(menuItem)
             }
         }

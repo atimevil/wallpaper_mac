@@ -3,6 +3,9 @@ import WallflowKit
 
 enum RendererError: Error {
     case unsupportedType(WallpaperType)
+    /// 열 수 없는 배경화면. 이유를 함께 들고 있는다 — 조용히 검은 화면을
+    /// 내놓으면 사용자는 자기가 받은 것이 왜 안 뜨는지 알 수 없다.
+    case unopenable(String)
     case contentMissing(URL)
     /// 씬은 열렸지만 그릴 수 있는 레이어가 하나도 없다. Metal 자체가 없는
     /// unsupportedType(.scene)과는 원인이 달라 구분한다.
