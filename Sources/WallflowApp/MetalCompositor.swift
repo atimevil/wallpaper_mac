@@ -57,7 +57,8 @@ enum LayerSource {
 /// 씬의 레이어 순서가 그리는 순서다.
 @MainActor
 final class MetalCompositor {
-    private let device: MTLDevice
+    /// 이펙트 체인이 자기 파이프라인을 만들려면 같은 장치가 필요하다.
+    let device: MTLDevice
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
     private let solidPipeline: MTLRenderPipelineState
@@ -180,6 +181,28 @@ final class MetalCompositor {
     /// 이펙트 결과가 다음 프레임에야 보이거나, 반쯤 그려진 것이 합성될 수 있다.
     var prepare: ((MTLCommandBuffer) -> Void)?
 
+    /// 합성이 **끝난 화면**을 받아 후처리한 결과를 돌려준다.
+    ///
+    /// 후처리 레이어는 자기 그림이 없고 그 아래까지 합성된 화면을 입력으로 받는다.
+    /// 그래서 레이어를 화면에 바로 그리지 않고 별도 텍스처에 그린 뒤, 이 손잡이가
+    /// 돌려준 것을 화면에 옮긴다. nil을 돌려주면 원래 화면을 그대로 쓴다.
+    var postProcess: (@MainActor (MTLCommandBuffer, MTLTexture) -> MTLTexture?)?
+
+    /// 후처리가 있을 때 레이어를 모아 그리는 곳.
+    private var frameTexture: MTLTexture?
+
+    private func frame(width: Int, height: Int) -> MTLTexture? {
+        if let frameTexture, frameTexture.width == width, frameTexture.height == height {
+            return frameTexture
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+        descriptor.usage = [.shaderRead, .renderTarget]
+        descriptor.storageMode = .private
+        frameTexture = device.makeTexture(descriptor: descriptor)
+        return frameTexture
+    }
+
     func draw(in view: MTKView) {
         guard let descriptor = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
@@ -187,6 +210,13 @@ final class MetalCompositor {
 
         prepare?(commands)
 
+        // 후처리가 있으면 화면이 아니라 텍스처에 모아 그린다.
+        let offscreen = postProcess == nil
+            ? nil : frame(width: drawable.texture.width, height: drawable.texture.height)
+        if let offscreen {
+            descriptor.colorAttachments[0].texture = offscreen
+            descriptor.colorAttachments[0].storeAction = .store
+        }
         descriptor.colorAttachments[0].clearColor = clearColor
         descriptor.colorAttachments[0].loadAction = .clear
 
@@ -231,6 +261,23 @@ final class MetalCompositor {
         }
 
         encoder.endEncoding()
+
+        if let offscreen {
+            // 후처리 결과를 화면으로 옮긴다. 후처리가 실패하면 원래 화면을 쓴다.
+            let result = postProcess?(commands, offscreen) ?? offscreen
+            if let blit = commands.makeBlitCommandEncoder() {
+                if result.width == drawable.texture.width,
+                   result.height == drawable.texture.height {
+                    blit.copy(from: result, to: drawable.texture)
+                } else {
+                    // 후처리는 작업 해상도를 죄므로 크기가 다를 수 있다.
+                    // 그때는 후처리를 버리고 원래 화면을 낸다 — 늘려 그리는 것보다
+                    // 원본이 낫고, 이 경로는 예산 상한에 걸렸을 때만 온다.
+                    blit.copy(from: offscreen, to: drawable.texture)
+                }
+                blit.endEncoding()
+            }
+        }
         commands.present(drawable)
         commands.commit()
     }

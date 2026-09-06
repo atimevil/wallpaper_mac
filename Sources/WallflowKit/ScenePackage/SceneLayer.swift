@@ -200,6 +200,10 @@ public enum LayerContent: Equatable, Sendable {
     /// 소리. 그리지 않는다.
     case sound(SoundLayer)
     /// 그리지 못하는 레이어. 이유를 남겨 나중에 무엇을 만들지 알 수 있게 한다.
+    /// 화면 전체에 거는 후처리 레이어. 자기 그림이 없고, **그 아래까지 합성된
+    /// 화면**을 받아 이펙트를 건다. 실물 씬 하나가 마지막 레이어로 filmgrain·vhs·
+    /// waterripple·chromaticaberration을 이렇게 건다.
+    case postProcess
     case unsupported(reason: String)
 }
 

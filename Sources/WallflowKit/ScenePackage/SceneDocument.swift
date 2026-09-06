@@ -96,7 +96,8 @@ public struct SceneDocument: Sendable {
         let rawLayers = objects.enumerated().map { index, object in
             let id = object["id"] as? Int ?? index
             return makeLayer(object, fallbackID: index, resolver: resolver,
-                             transform: transforms[id] ?? .identity)
+                             transform: transforms[id] ?? .identity,
+                             canvas: Vec2(x: Double(width), y: Double(height)))
         }
         let layers = applyingParticleBudget(rawLayers)
         let scriptModules = loadScriptModules(objects: objects, resolver: resolver)
@@ -264,7 +265,7 @@ public struct SceneDocument: Sendable {
     /// 그릴 수 없는 것은 이유를 달아 unsupported로 남긴다.
     private static func makeLayer(
         _ object: [String: Any], fallbackID: Int, resolver: ReferenceResolver,
-        transform: LayerTransform
+        transform: LayerTransform, canvas: Vec2
     ) -> SceneLayer {
         let id = object["id"] as? Int ?? fallbackID
         let name = object["name"] as? String ?? "object\(fallbackID)"
@@ -423,8 +424,20 @@ public struct SceneDocument: Sendable {
             // origin과 size가 아예 없고 effects만 있으면 후처리 레이어다.
             // 실물 "Couche de post-traitement"가 이 경우인데, 스크립트 탓이라고
             // 말하면 사용자를 엉뚱한 원인으로 보낸다.
+            // 화면 전체에 거는 후처리 레이어. `fullscreenlayer` 모델을 쓰고
+            // origin도 size도 없다 — 화면이 곧 그 크기다.
             if object["origin"] == nil, object["size"] == nil, object["effects"] != nil {
-                return unsupported("화면 전체에 거는 후처리 레이어라 M6의 이펙트 체인이 필요하다")
+                guard !effects.isEmpty else {
+                    return unsupported("후처리 레이어인데 걸 이펙트가 없다")
+                }
+                return SceneLayer(
+                    id: id, name: name, visible: visible,
+                    origin: Vec3(x: 0, y: 0, z: 0),
+                    size: canvas,
+                    content: .postProcess, unrunScripts: unrun, effects: effects,
+                    alpha: alpha, tint: tint, rotation: rotation,
+                    displayScripts: displayScripts, scale: transform.scale,
+                    parallaxDepth: depth)
             }
             return unsupported("origin이나 size를 읽을 수 없다")
         }

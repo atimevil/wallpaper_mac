@@ -37,6 +37,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var effectChains: [(chain: EffectChain, source: MTLTexture)] = []
     /// 이펙트가 쓰는 `g_Time`. 씬을 켠 뒤 흐른 시간이다.
     private var effectStartTime: CFTimeInterval?
+    /// 화면 전체 후처리. 입력이 "합성이 끝난 화면"이라 첫 프레임에야 만들 수 있다.
+    private var postEffects: EffectChain?
+    private var postEffectSource: SceneLayer?
+    private var postShaderIncludes: [String: String] = [:]
+    private var postResolver: ReferenceResolver?
     /// 스크립트를 마지막으로 돌린 시각. 시계는 초 단위로 바뀌므로 1초에 한 번이면 된다.
     private var lastScriptTime: CFTimeInterval?
     /// 스크립트를 다시 돌리는 주기.
@@ -377,6 +382,45 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         }
     }
 
+    /// 합성이 끝난 화면에 후처리를 건다.
+    ///
+    /// 체인은 입력 텍스처가 있어야 만들 수 있는데 화면 크기는 그릴 때 정해진다.
+    /// 그래서 첫 프레임에 만든다. 실패하면 nil을 돌려 원래 화면을 그대로 쓴다.
+    private func renderPostProcess(
+        _ commands: MTLCommandBuffer, frame: MTLTexture
+    ) -> MTLTexture? {
+        guard let layer = postEffectSource, let resolver = postResolver,
+              let device = compositor?.device else { return nil }
+        if postEffects == nil {
+            var ignored: [String] = []
+            postEffects = EffectChain(
+                device: device,
+                effects: layer.effects.map(\.definition),
+                effectBases: layer.effects.map(\.base),
+                source: frame, resolver: resolver, includes: postShaderIncludes,
+                makeTexture: { [weak self] in
+                    guard let compositor = self?.compositor else {
+                        throw RendererError.noDrawableLayers
+                    }
+                    return try compositor.makeTexture(from: $0)
+                },
+                diagnostics: &ignored)
+            if postEffects == nil {
+                // 한 번 실패하면 매 프레임 다시 시도하지 않는다.
+                postEffectSource = nil
+                FileHandle.standardError.write(Data(
+                    "후처리 레이어의 이펙트를 걸지 못해 화면을 그대로 낸다\n".utf8))
+                return nil
+            }
+        }
+        guard let chain = postEffects else { return nil }
+        let now = CACurrentMediaTime()
+        let start = effectStartTime ?? now
+        effectStartTime = start
+        chain.render(commandBuffer: commands, source: frame, time: Float(now - start))
+        return chain.texture
+    }
+
     /// 이펙트가 그림을 그릴 흰 판. 도형 레이어에는 원본 그림이 없다.
     ///
     /// 크기는 레이어 크기를 따르되 상한을 지킨다 — 상시 구동 앱에서 큰 판을
@@ -561,6 +605,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var sounds: [(player: AVAudioPlayer, sceneVolume: Float)] = []
         var drawable: [(QuadInstance, LayerSource)] = []
         var displayStates: [DisplayState] = []
+        var postLayers: [SceneLayer] = []
         // 스크립트가 화면·캔버스 크기를 물어본다(실물에서 `engine.screenResolution` 13회).
         // 없으면 참조 오류로 스크립트가 통째로 죽는다.
         let screen = view.window?.screen ?? NSScreen.main
@@ -617,6 +662,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             }
 
             switch layer.content {
+            case .postProcess:
+                // 화면 전체 후처리. 다른 레이어처럼 그리지 않는다 — 합성이 끝난
+                // 화면을 입력으로 받아야 해서, 컴포지터가 마지막에 따로 부른다.
+                postLayers.append(layer)
+
             case .solidColor(let c):
                 // 도형 레이어는 그림이 없고 이펙트가 그림을 만든다(실물 빛줄기).
                 // 흰 판을 만들어 체인에 넣고 그 결과를 그린다.
@@ -847,9 +897,26 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         }
         self.effectChains = chains
         self.effectStartTime = nil
+        self.postEffects = nil
+        if let post = postLayers.first, Self.effectsEnabled {
+            if postLayers.count > 1 {
+                degraded.append("후처리 레이어가 \(postLayers.count)개다. 첫 번째만 건다")
+            }
+            // 체인은 입력 텍스처가 있어야 만들어진다. 화면 크기는 그릴 때 정해지므로
+            // 여기서는 만들지 않고, 첫 프레임에 실제 화면 텍스처로 만든다.
+            self.postEffectSource = post
+            self.postShaderIncludes = shaderIncludes
+            self.postResolver = resolver
+        }
         // 이펙트는 컴포지터가 레이어를 합성하기 전에 자기 텍스처를 그려야 한다.
         compositor.prepare = { [weak self] commands in
             MainActor.assumeIsolated { self?.renderEffects(into: commands) }
+        }
+        if postEffectSource != nil {
+            // 손잡이가 이미 메인 격리라 `assumeIsolated`가 필요 없다.
+            compositor.postProcess = { [weak self] commands, frame in
+                self?.renderPostProcess(commands, frame: frame)
+            }
         }
         compositor.setLayers(drawable)
         self.compositor = compositor
@@ -911,6 +978,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         displays = []
         effectChains = []
         effectStartTime = nil
+        postEffects = nil
+        postEffectSource = nil
         view?.delegate = nil
     }
 }

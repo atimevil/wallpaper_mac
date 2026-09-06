@@ -819,4 +819,37 @@ extension SceneDocumentTests {
             return XCTFail("모르는 도형을 그리면 안 된다: \(layer.content)")
         }
     }
+
+    /// 화면 전체 후처리 레이어. 자기 그림이 없고 origin도 size도 없다 —
+    /// **그 아래까지 합성된 화면**이 입력이고, 화면이 곧 크기다.
+    /// 실물 씬 하나가 마지막 레이어로 filmgrain·vhs·waterripple·색수차를 이렇게 건다.
+    func testFullscreenPostProcessLayerTakesTheCanvasSize() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}},
+             "objects": [{"id": 1, "name": "Post-processing Layer",
+                          "image": "models/util/fullscreenlayer.json",
+                          "effects": [{"file": "effects/grain/effect.json"}]}]}
+            """,
+            extras: [
+                "effects/grain/effect.json": #"{"passes": [{"material": "materials/g.json"}]}"#,
+                "effects/grain/materials/g.json": #"{"passes": [{"shader": "effects/grain"}]}"#,
+            ])).layers.first)
+        XCTAssertEqual(layer.content, .postProcess)
+        XCTAssertEqual(layer.size, Vec2(x: 1920, y: 1080))
+        XCTAssertEqual(layer.effects.count, 1)
+    }
+
+    /// 걸 이펙트가 없는 후처리 레이어는 화면을 그대로 베끼는 일만 한다.
+    /// 그리지 않는 편이 낫다 — 화면 크기 텍스처를 괜히 하나 더 잡는다.
+    func testPostProcessLayerWithoutEffectsIsSkipped() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "Post", "image": "models/util/fullscreenlayer.json",
+                      "effects": []}]}
+        """)).layers.first)
+        guard case .unsupported = layer.content else {
+            return XCTFail("이펙트 없는 후처리는 건너뛴다: \(layer.content)")
+        }
+    }
 }
