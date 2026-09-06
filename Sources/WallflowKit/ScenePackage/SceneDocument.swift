@@ -97,11 +97,15 @@ public struct SceneDocument: Sendable {
         var scale: Vec3
         /// 화면 평면 회전(라디안). 실물에서 z 말고는 쓰이지 않는다.
         var rotation: Double
+        /// 부모의 투명도가 곱해진 값.
+        var alpha: Double
+        /// 부모가 하나라도 숨겨져 있으면 false.
+        var visible: Bool
 
         static let identity = LayerTransform(
             origin: Vec3(x: 0, y: 0, z: 0),
             scale: Vec3(x: 1, y: 1, z: 1),
-            rotation: 0)
+            rotation: 0, alpha: 1, visible: true)
     }
 
     /// 오브젝트마다 부모 사슬을 따라 올라가며 변환을 합친다.
@@ -125,7 +129,9 @@ public struct SceneDocument: Sendable {
                     ?? Vec3(x: 0, y: 0, z: 0),
                 scale: scalarOrScripted(object["scale"]).flatMap(Vec3.parse)
                     ?? Vec3(x: 1, y: 1, z: 1),
-                rotation: scalarOrScripted(object["angles"]).flatMap(Vec3.parse)?.z ?? 0)
+                rotation: scalarOrScripted(object["angles"]).flatMap(Vec3.parse)?.z ?? 0,
+                alpha: doubleValue(object["alpha"]).map { Swift.min(Swift.max($0, 0), 1) } ?? 1,
+                visible: boolValue(object["visible"]) ?? true)
         }
 
         /// 부모 변환 안에 놓인 자식의 화면 변환.
@@ -142,7 +148,11 @@ public struct SceneDocument: Sendable {
                     x: parent.scale.x * child.scale.x,
                     y: parent.scale.y * child.scale.y,
                     z: parent.scale.z * child.scale.z),
-                rotation: parent.rotation + child.rotation)
+                rotation: parent.rotation + child.rotation,
+                // 그룹의 투명도는 자식에게 곱해진다. 전파하지 않으면 숨겨진 음악
+                // 재생기 UI가 흰 막대로 화면에 남는다(실물에서 확인).
+                alpha: parent.alpha * child.alpha,
+                visible: parent.visible && child.visible)
         }
 
         var resolved: [Int: LayerTransform] = [:]
@@ -180,9 +190,10 @@ public struct SceneDocument: Sendable {
         // visible이 {"script": ..., "value": 0} 객체인 레이어가 많다. Bool 캐스트만
         // 시도하면 실패해 기본값 true가 되고, 숨겨야 할 레이어가 화면에 남는다.
         // 실물 "flowery"가 value 0인데 그려지고 있었다.
-        let visible = Self.boolValue(object["visible"]) ?? true
+        // 부모 사슬의 표시 상태가 이미 합쳐져 있다. 그룹이 숨으면 자식도 숨는다.
+        let visible = transform.visible
         // alpha와 color를 무시하면 반투명하게 설계된 UI가 불투명한 검은 상자가 된다.
-        let alpha = Self.doubleValue(object["alpha"]).map { Swift.min(Swift.max($0, 0), 1) } ?? 1
+        let alpha = transform.alpha
         let tint = Self.scalarOrScripted(object["color"]).flatMap(Vec3.parse)
             ?? Vec3(x: 1, y: 1, z: 1)
         let rotation = transform.rotation.isFinite ? transform.rotation : 0

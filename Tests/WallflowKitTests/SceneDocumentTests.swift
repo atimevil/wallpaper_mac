@@ -520,3 +520,47 @@ extension SceneDocumentTests {
         XCTAssertEqual(SceneDocument.sceneEntryName(in: reader), "myscene.json")
     }
 }
+
+extension SceneDocumentTests {
+    /// 그룹의 투명도는 자식에게 곱해진다.
+    /// 실물 음악 재생기 UI가 부모 alpha 0으로 숨는데, 전파하지 않으면
+    /// 흰 막대가 배경화면에 그대로 남는다.
+    func testParentAlphaPropagatesToChildren() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 1, "name": "그룹", "origin": "0 0 0", "size": "10 10", "alpha": 0},
+           {"id": 2, "name": "자식", "parent": 1, "origin": "0 0 0", "size": "10 10"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        let child = try XCTUnwrap(doc.layers.first { $0.name == "자식" })
+        XCTAssertEqual(child.alpha, 0, "부모의 투명도가 자식에게 곱해져야 한다")
+    }
+
+    /// 반투명끼리는 곱해진다.
+    func testParentAlphaMultiplies() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 1, "name": "그룹", "origin": "0 0 0", "size": "10 10", "alpha": 0.5},
+           {"id": 2, "name": "자식", "parent": 1, "origin": "0 0 0", "size": "10 10", "alpha": 0.5}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        let child = try XCTUnwrap(doc.layers.first { $0.name == "자식" })
+        XCTAssertEqual(child.alpha, 0.25, accuracy: 0.001)
+    }
+
+    /// 부모가 숨겨져 있으면 자식도 숨는다.
+    func testParentVisibilityPropagates() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 1, "name": "그룹", "origin": "0 0 0", "size": "10 10",
+            "visible": {"value": 0}},
+           {"id": 2, "name": "자식", "parent": 1, "origin": "0 0 0", "size": "10 10"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        let child = try XCTUnwrap(doc.layers.first { $0.name == "자식" })
+        XCTAssertFalse(child.visible, "부모가 숨으면 자식도 숨어야 한다")
+    }
+}

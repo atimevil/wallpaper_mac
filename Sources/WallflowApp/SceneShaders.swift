@@ -37,10 +37,13 @@ enum SceneShaders {
         // 회전이 0이면 cos=1, sin=0이라 그대로다. 분기하지 않는다.
         float c = cos(u.rotation), s = sin(u.rotation);
         float2 rotated = float2(scaled.x * c - scaled.y * s, scaled.x * s + scaled.y * c);
-        float2 world = u.origin + rotated;
+        // 씬의 직교 공간은 원점이 좌하단이고 Y가 위로 증가한다. 화면은 반대다.
+        // **원점만** 뒤집는다 — NDC 자체를 뒤집으면 쿼드의 로컬 좌표까지 뒤집혀
+        // 그림과 글자가 상하로 뒤집힌다.
+        float2 world = float2(u.origin.x, u.projection.y - u.origin.y) + rotated;
         // 직교 공간 원점은 좌상단, Y는 아래로 증가한다.
         float2 ndc = float2(
-             (world.x / u.projection.x) * 2.0 - 1.0,
+            (world.x / u.projection.x) * 2.0 - 1.0,
             1.0 - (world.y / u.projection.y) * 2.0
         );
         VertexOut out;
@@ -120,8 +123,11 @@ enum SceneShaders {
             + p.size * right * (corner.x - 0.5)
             - p.size * up * (corner.y - 0.5) * u.textureRatio;
 
+        // 파티클 위치 계산은 씬 좌표계(Y가 위로 증가)에서 이뤄진다. 중력이 -Y인
+        // 것도 그래서다. 그래서 여기서는 화면 좌표로 한 번만 뒤집으면 된다 —
+        // 빌보드의 up 벡터도 함께 뒤집혀 스프라이트가 바로 선다.
         float2 ndc = float2((world.x / u.projection.x) * 2.0 - 1.0,
-                            1.0 - (world.y / u.projection.y) * 2.0);
+                            (world.y / u.projection.y) * 2.0 - 1.0);
         // 스프라이트 시트면 코너를 그 프레임의 칸으로 옮긴다. 안 그러면 파티클
         // 하나가 시트 전체(꽃잎 5장)를 한 칸에 뭉개 그린다.
         float col = fmod(p.frame, u.framesPerRow);
