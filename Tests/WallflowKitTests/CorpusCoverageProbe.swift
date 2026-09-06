@@ -22,6 +22,9 @@ final class CorpusCoverageProbe: XCTestCase {
             root: URL(fileURLWithPath: NSString(string: assetsPath).expandingTildeInPath))
 
         var scenes = 0, layers = 0
+        var notScenes: [String] = []
+        var unreadable: [String] = []
+        var unopened: [String] = []
         var kinds: [String: Int] = [:]
         var reasons: [String: Int] = [:]
         var operators: [String: Int] = [:]
@@ -33,9 +36,20 @@ final class CorpusCoverageProbe: XCTestCase {
             for dir in (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [] {
                 let pkg = root.appendingPathComponent(dir).appendingPathComponent("scene.pkg")
                 guard let data = try? Data(contentsOf: pkg),
-                      let reader = try? PkgReader(data: data),
-                      let document = try? SceneDocument.load(from: reader, assets: assets)
-                else { continue }
+                      let reader = try? PkgReader(data: data) else {
+                    // 씬이 아닌 폴더(비디오·웹·딸린 프리셋)와 못 읽는 것을 나눠 센다.
+                    // 뭉뚱그리면 "몇 개를 봤는지"가 늘 그럴듯해 보인다.
+                    if FileManager.default.fileExists(atPath: pkg.path) {
+                        unreadable.append(dir)
+                    } else {
+                        notScenes.append(dir)
+                    }
+                    continue
+                }
+                guard let document = try? SceneDocument.load(from: reader, assets: assets) else {
+                    unopened.append(dir)
+                    continue
+                }
                 scenes += 1
 
                 // 원본 JSON도 함께 본다. 우리가 아예 안 읽는 키는 모델에 안 남는다.
@@ -86,6 +100,16 @@ final class CorpusCoverageProbe: XCTestCase {
             }
         }
         print("씬 \(scenes)개 · 레이어 \(layers)개")
+        if !notScenes.isEmpty {
+            print("— 씬이 아닌 폴더 \(notScenes.count)개(비디오·웹·딸린 프리셋): "
+                + notScenes.sorted().joined(separator: ", "))
+        }
+        if !unreadable.isEmpty {
+            print("— pkg를 못 읽은 폴더: " + unreadable.sorted().joined(separator: ", "))
+        }
+        if !unopened.isEmpty {
+            print("— 열지 못한 씬(원근 투영 등): " + unopened.sorted().joined(separator: ", "))
+        }
         report("레이어 종류", kinds)
         report("못 그리는 이유", reasons)
         report("아직 없는 파티클 연산자", operators)

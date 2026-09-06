@@ -741,8 +741,16 @@ public struct ParticlePreset: Equatable, Sendable {
         _ dict: [String: Any], _ key: String, _ fallback: Vec3
     ) -> Vec3? {
         guard let raw = dict[key] else { return fallback }
-        guard let text = raw as? String, let parsed = Vec3.parse(text) else { return nil }
-        return parsed
+        if let text = raw as? String, let parsed = Vec3.parse(text) { return parsed }
+        // 벡터 자리에 수 하나를 적은 프리셋이 있다(`light_shafts_1`의
+        // `"min": -0.4`). GLSL의 `vec3(x)`와 같은 뜻으로 세 성분에 같은 값을
+        // 넣는다 — 버리면 그 프리셋의 초기화자가 통째로 사라진다.
+        if let number = raw as? NSNumber, !(raw is String) {
+            let value = number.doubleValue
+            guard value.isFinite else { return nil }
+            return Vec3(x: value, y: value, z: value)
+        }
+        return nil
     }
 
     /// 수 필드 하나. 규칙은 `vec`과 같다.
@@ -938,7 +946,18 @@ public struct ParticlePreset: Equatable, Sendable {
                 speedOuter: getDouble(dict["speedouter"]) ?? 0)
 
         case "controlpointattract":
-            guard let controlPoint = getInt(dict["controlpoint"]) else { return nil }
+            // 번호를 **안 적으면** 0번, 곧 시스템 자신의 자리다. 실물 9곳이
+            // 그렇게 적혀 있어서, 필수로 두면 그 프리셋들의 끌기가 통째로
+            // 사라진다. 적혀 있는데 읽을 수 없으면(1e20 같은 값) 버린다 —
+            // 그건 없는 것과 다르고, 0번으로 바꿔치기하면 엉뚱한 데로 당긴다.
+            let controlPoint: Int
+            if dict["controlpoint"] == nil {
+                controlPoint = 0
+            } else if let parsed = getInt(dict["controlpoint"]) {
+                controlPoint = parsed
+            } else {
+                return nil
+            }
             // origin, scale, threshold는 선택 (기본값 설정)
             let origin: Vec3
             if let originStr = dict["origin"] as? String, let originVec = Vec3.parse(originStr) {

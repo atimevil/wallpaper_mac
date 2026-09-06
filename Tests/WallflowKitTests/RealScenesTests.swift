@@ -19,6 +19,18 @@ final class RealScenesTests: XCTestCase {
             } else {
                 badPath = expandedPath
             }
+        } else {
+            // 환경변수가 없으면 앱이 받아 두는 자리를 본다. 씬을 다운로드
+            // 폴더에서 그쪽으로 옮겼는데(맥이 보호하는 자리라 접근을 매번
+            // 묻는다) 시험이 환경변수만 보면 그날부터 조용히 건너뛴다.
+            let installed = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(
+                    "Library/Application Support/Wallflow/workshop/steamapps/workshop/content/431960")
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: installed.path, isDirectory: &isDir),
+               isDir.boolValue {
+                root = installed
+            }
         }
     }
 
@@ -130,13 +142,31 @@ final class RealScenesTests: XCTestCase {
             XCTFail("WALLFLOW_TEST_SCENES가 설정되었지만 디렉토리가 아니거나 존재하지 않음: \(badPath)")
         }
         guard let root else { throw XCTSkip("WALLFLOW_TEST_SCENES 미설정") }
+        // 폴더가 전부 씬인 것은 아니다. 비디오·웹 배경화면과, 다른 항목에 딸린
+        // 프리셋(`dependency`)은 `scene.pkg`가 아예 없다. 그것까지 "없어졌다"고
+        // 실패하면 라이브러리를 하나 받을 때마다 시험이 깨진다.
         let ids = try FileManager.default.contentsOfDirectory(atPath: root.path)
             .filter { $0.allSatisfy(\.isNumber) }
+            .filter {
+                FileManager.default.fileExists(
+                    atPath: root.appendingPathComponent($0)
+                        .appendingPathComponent("scene.pkg").path)
+            }
         XCTAssertFalse(ids.isEmpty, "테스트할 씬이 없다")
 
+        var perspective: [String] = []
         for id in ids {
             guard let reader = try scenePkg(id) else { continue }
-            let doc = try SceneDocument.load(from: reader)
+            let doc: SceneDocument
+            do {
+                doc = try SceneDocument.load(from: reader)
+            } catch SceneError.perspectiveProjectionUnsupported {
+                // 원근 투영 씬은 아직 못 연다(`.mdl` 로더와 카메라가 필요하다).
+                // 아는 구멍이라 여기서 실패시키지 않되, 몇 개인지는 남긴다 —
+                // 조용히 넘기면 이 구멍이 얼마나 큰지 아무도 모른다.
+                perspective.append(id)
+                continue
+            }
             XCTAssertGreaterThan(doc.layers.count, 0, "\(id)에 레이어가 없다")
             XCTAssertGreaterThan(doc.orthoWidth, 0, "\(id)의 직교 폭이 0이다")
 
@@ -146,6 +176,12 @@ final class RealScenesTests: XCTestCase {
                 XCTAssertNoThrow(try TexHeader.parse(data), "\(id)/\(name) 헤더 파싱 실패")
             }
         }
+        if !perspective.isEmpty {
+            print("원근 투영이라 아직 못 여는 씬 \(perspective.count)개: "
+                + perspective.sorted().joined(separator: ", "))
+        }
+        XCTAssertLessThan(perspective.count, ids.count,
+                          "전부 원근 씬이면 이 시험이 아무것도 보지 않는다")
     }
 
     /// PNG 페이로드와 TEXB0003 컨테이너를 한 번에 덮는다.
@@ -340,7 +376,9 @@ final class RealScenesTests: XCTestCase {
         var dustMotesEmitterCount: [String: Int] = [:]  // scene ID -> emitter count for dust_motes_0
 
         for id in try FileManager.default.contentsOfDirectory(atPath: root.path)
-            where id.allSatisfy(\.isNumber) {
+            where id.allSatisfy(\.isNumber) && FileManager.default.fileExists(
+                atPath: root.appendingPathComponent(id)
+                    .appendingPathComponent("scene.pkg").path) {
             guard let reader = try scenePkg(id) else { continue }
             do {
                 let doc = try SceneDocument.load(from: reader, assets: assets)

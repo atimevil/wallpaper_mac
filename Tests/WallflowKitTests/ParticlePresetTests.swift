@@ -246,6 +246,39 @@ final class ParticlePresetTests: XCTestCase {
         XCTAssertEqual(p.operators.count, 0, "범위 밖 controlpoint는 엔트리를 버린다")
     }
 
+    /// 번호를 **안 적은** controlpointattract는 0번(시스템 자신의 자리)이다.
+    /// 실물 프리셋 9곳이 그렇게 적혀 있어서, 필수로 두면 그 끌기가 사라진다.
+    func testMissingControlPointDefaultsToTheSystemsOwn() throws {
+        let json: [String: Any] = [
+            "material": "m.json", "maxcount": 10,
+            "operator": [["name": "controlpointattract", "scale": 1.0, "threshold": 100]],
+        ]
+        let preset = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertEqual(preset.operators.count, 1)
+        XCTAssertTrue(preset.malformedNames.isEmpty, "버리면 안 된다")
+        guard case .controlPointAttract(let point, _, _, _) = preset.operators[0] else {
+            return XCTFail("controlpointattract여야 한다")
+        }
+        XCTAssertEqual(point, 0)
+    }
+
+    /// 벡터 자리에 수 하나를 적은 프리셋이 있다(`light_shafts_1`의 `"min": -0.4`).
+    /// GLSL의 `vec3(x)`처럼 세 성분에 같은 값을 넣는다 — 버리면 그 초기화자가
+    /// 통째로 사라져 빛줄기가 전부 같은 각으로 선다.
+    func testScalarInVectorFieldFillsAllComponents() throws {
+        let json: [String: Any] = [
+            "material": "m.json", "maxcount": 10,
+            "initializer": [["name": "rotationrandom", "min": -0.4, "max": -0.3]],
+        ]
+        let preset = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertTrue(preset.malformedNames.isEmpty, "버리면 안 된다")
+        guard case .rotationRandom(let lo, let hi) = preset.initializers[0] else {
+            return XCTFail("rotationrandom이어야 한다")
+        }
+        XCTAssertEqual(lo, Vec3(x: -0.4, y: -0.4, z: -0.4))
+        XCTAssertEqual(hi, Vec3(x: -0.3, y: -0.3, z: -0.3))
+    }
+
     /// name 키가 없는 emitter 엔트리는 조용히 사라지지 않고 진단에 남는다.
     func testEmitterWithoutNameIsRecordedNotSilentlyDropped() throws {
         let json: [String: Any] = [
