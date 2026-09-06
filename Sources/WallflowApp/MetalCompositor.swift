@@ -34,6 +34,8 @@ struct QuadInstance {
     var color: SIMD4<Float> = SIMD4(1, 1, 1, 1)
     /// 화면 평면 회전(라디안).
     var rotation: Float = 0
+    /// 마우스 시차에서 이 레이어가 밀리는 정도.
+    var parallaxDepth: Float = 0
 }
 
 /// 레이어가 무엇으로 칠해지는지.
@@ -66,6 +68,8 @@ final class MetalCompositor {
     private var projection = SIMD2<Float>(1, 1)
     private var layers: [(QuadInstance, LayerSource)] = []
     private var clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+    /// 지금 프레임의 시차 밀림(직교 단위). 레이어마다 깊이를 곱해 쓴다.
+    private var parallax = SIMD2<Float>(0, 0)
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -157,6 +161,11 @@ final class MetalCompositor {
         projection = SIMD2(Float(width), Float(height))
     }
 
+    /// 마우스 시차 밀림을 정한다. 매 프레임 바뀐다.
+    func setParallax(_ offset: SIMD2<Float>) {
+        parallax = offset.x.isFinite && offset.y.isFinite ? offset : .zero
+    }
+
     func setClearColor(_ color: MTLClearColor) {
         clearColor = color
     }
@@ -180,7 +189,8 @@ final class MetalCompositor {
 
         for (quad, source) in layers {
             var uniforms = QuadUniforms(
-                origin: quad.origin, size: quad.size, projection: projection,
+                origin: quad.origin + parallax * quad.parallaxDepth,
+                size: quad.size, projection: projection,
                 color: quad.color, rotation: quad.rotation)
 
             switch source {

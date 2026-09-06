@@ -32,6 +32,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var lastScriptTime: CFTimeInterval?
     /// 스크립트를 다시 돌리는 주기.
     private static let scriptInterval: CFTimeInterval = 1.0
+    /// 씬이 정한 시차 강도. 0이면 이 씬은 시차를 쓰지 않는다.
+    private var parallaxAmount: Double = 0
+    /// 부드럽게 따라가는 현재 밀림. 마우스로 바로 튀면 눈에 거슬린다.
+    private var parallaxOffset = SIMD2<Float>(0, 0)
+    /// 씬의 직교 공간 크기. 시차 밀림을 그 단위로 계산한다.
+    private var ortho = SIMD2<Float>(1, 1)
     /// 이 씬의 소리들. 사용자가 켤 때만 실제로 난다.
     private var sounds: [AVAudioPlayer] = []
     /// 전력 정책이 재생을 멈췄는지.
@@ -185,6 +191,26 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 
+    /// 마우스 위치를 따라 레이어를 조금씩 민다.
+    ///
+    /// 화면 중심에서 얼마나 떨어졌는지를 -1~1로 재고, 씬이 정한 강도와 레이어의
+    /// 깊이를 곱한다. 바로 따라가면 눈에 거슬려서 프레임마다 조금씩 좁힌다.
+    private func updateParallax(in view: MTKView) {
+        guard parallaxAmount > 0, let window = view.window,
+              let screen = window.screen ?? NSScreen.main else { return }
+        let frame = screen.frame
+        guard frame.width > 0, frame.height > 0 else { return }
+        let mouse = NSEvent.mouseLocation
+        // 화면 중심 기준 -1~1. 화면 밖이면 가장자리로 죈다.
+        let nx = Float(min(max((mouse.x - frame.midX) / (frame.width / 2), -1), 1))
+        // 마우스 y는 위가 크고 씬 좌표도 위가 크므로 부호를 그대로 쓴다.
+        let ny = Float(min(max((mouse.y - frame.midY) / (frame.height / 2), -1), 1))
+        let target = SIMD2(nx, ny) * Float(parallaxAmount) * ortho * 0.05
+        // 지수 평활. 프레임률이 달라져도 비슷한 속도로 따라간다.
+        parallaxOffset += (target - parallaxOffset) * 0.12
+        compositor?.setParallax(parallaxOffset)
+    }
+
     /// 글자를 굽고 텍스처와 쿼드 크기를 갱신한다.
     /// 직교 공간과 픽셀이 1:1이라 구운 이미지 크기를 그대로 쿼드 크기로 쓴다.
     private func rasterize(_ state: TextState, compositor: MetalCompositor) {
@@ -316,6 +342,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
         let compositor = try MetalCompositor(device: device)
         compositor.setProjection(width: document.orthoWidth, height: document.orthoHeight)
+        parallaxAmount = document.parallaxAmount
+        ortho = SIMD2(Float(document.orthoWidth), Float(document.orthoHeight))
         if document.clearEnabled {
             compositor.setClearColor(MTLClearColor(
                 red: document.clearColor.x, green: document.clearColor.y,
@@ -353,7 +381,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 size: SIMD2(Float(layer.size.x), Float(layer.size.y)),
                 color: SIMD4(Float(layer.tint.x), Float(layer.tint.y), Float(layer.tint.z),
                              Float(layer.alpha)),
-                rotation: Float(layer.rotation))
+                rotation: Float(layer.rotation),
+                parallaxDepth: Float(layer.parallaxDepth))
 
             switch layer.content {
             case .solidColor(let c):
@@ -488,7 +517,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 drawable.append((QuadInstance(
                     origin: state.origin, size: state.size,
                     color: SIMD4(1, 1, 1, Float(layer.alpha)),
-                    rotation: Float(layer.rotation)),
+                    rotation: Float(layer.rotation),
+                    parallaxDepth: Float(layer.parallaxDepth)),
                     .dynamic { [weak state] in state?.texture }))
 
             case .unsupported(let reason):
@@ -590,6 +620,7 @@ extension SceneRenderer: MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        updateParallax(in: view)
         if !texts.isEmpty {
             let now = CACurrentMediaTime()
             if lastScriptTime.map({ now - $0 >= Self.scriptInterval }) ?? true {

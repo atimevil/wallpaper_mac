@@ -24,6 +24,11 @@ public struct SceneDocument: Sendable {
     public let clearColor: Vec3
     public let clearEnabled: Bool
     public let layers: [SceneLayer]
+    /// 마우스를 따라 레이어를 조금씩 미는 정도. 0이면 끈 것이다.
+    ///
+    /// WE의 특징적인 움직임이라 없으면 씬이 납작해 보인다. 레이어마다
+    /// `parallaxDepth`가 있고 화면 중심에서 마우스가 떨어진 만큼 곱해 민다.
+    public let parallaxAmount: Double
 
     public static func load(from reader: PkgReader) throws -> SceneDocument {
         try load(from: reader, assets: nil)
@@ -84,10 +89,14 @@ public struct SceneDocument: Sendable {
                              transform: transforms[id] ?? .identity)
         }
 
+        // cameraparallax가 꺼져 있으면 강도를 0으로 본다.
+        let parallaxOn = boolValue(general["cameraparallax"]) ?? false
+        let amount = doubleValue(general["cameraparallaxamount"]) ?? 0
         return SceneDocument(
             orthoWidth: width, orthoHeight: height,
             clearColor: clearColor, clearEnabled: clearEnabled,
-            layers: layers
+            layers: layers,
+            parallaxAmount: parallaxOn && amount.isFinite ? Swift.min(Swift.max(amount, 0), 2) : 0
         )
     }
 
@@ -201,6 +210,12 @@ public struct SceneDocument: Sendable {
         let tint = Self.scalarOrScripted(object["color"]).flatMap(Vec3.parse)
             ?? Vec3(x: 1, y: 1, z: 1)
         let rotation = transform.rotation.isFinite ? transform.rotation : 0
+        // 실물은 문자열("0.2 0.2")이거나 수다. 앞 성분만 쓴다 — 축별로 다른 씬을 못 봤다.
+        let depth: Double = {
+            if let n = doubleValue(object["parallaxDepth"]) { return n }
+            if let s = object["parallaxDepth"] as? String, let v = Vec2.parse(s) { return v.x }
+            return 0
+        }()
 
         // origin/size가 문자열이 아니라 {"script": ..., "value": ...} 객체인 씬이 있다.
         // 그 객체에도 `value`가 있고 그게 편집기에서 마지막으로 정해진 좌표다.
@@ -241,7 +256,7 @@ public struct SceneDocument: Sendable {
                 size: size ?? Vec2(x: 0, y: 0),
                 content: .unsupported(reason: reason), unrunScripts: unrun,
                 alpha: alpha, tint: tint, rotation: rotation,
-                displayScripts: displayScripts, scale: transform.scale
+                displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth
             )
         }
 
@@ -256,7 +271,7 @@ public struct SceneDocument: Sendable {
                 id: id, name: name, visible: visible,
                 origin: origin, size: particleSize,
                 content: content, unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation,
-                displayScripts: displayScripts, scale: transform.scale
+                displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth
             )
         }
 
@@ -274,7 +289,7 @@ public struct SceneDocument: Sendable {
                     origin: origin, size: size ?? Vec2(x: 0, y: 0),
                     content: .text(makeTextLayer(text, object: object)),
                     unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation,
-                    displayScripts: displayScripts, scale: transform.scale)
+                    displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth)
             }
             if let sound = makeSoundLayer(object) {
                 // 소리는 화면을 차지하지 않는다. origin이 없어도 상관없다.
@@ -284,7 +299,7 @@ public struct SceneDocument: Sendable {
                     size: size ?? Vec2(x: 0, y: 0),
                     content: .sound(sound), unrunScripts: unrun,
                     alpha: alpha, tint: tint, rotation: rotation,
-                    displayScripts: displayScripts, scale: transform.scale)
+                    displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth)
             }
             if object["sound"] != nil { return unsupported("소리 파일 목록을 읽지 못했다") }
             // 도형 레이어. 실물에서 빛줄기(Rayons lumineux)가 이 형태인데,
@@ -309,7 +324,7 @@ public struct SceneDocument: Sendable {
             id: id, name: name, visible: visible,
             origin: origin, size: size,
             content: content, unrunScripts: unrun, alpha: alpha, tint: tint,
-            rotation: rotation, displayScripts: displayScripts, scale: transform.scale
+            rotation: rotation, displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth
         )
     }
 

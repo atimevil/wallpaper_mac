@@ -618,3 +618,31 @@ extension SceneDocumentTests {
         XCTAssertEqual(ignores.scale.x, 1, accuracy: 0.001)
     }
 }
+
+extension SceneDocumentTests {
+    /// 시차는 씬이 꺼 둘 수 있다. cameraparallax가 0이면 강도도 0이다 —
+    /// 실물 Lost Valley가 그렇다. 이걸 무시하면 안 움직여야 할 씬이 움직인다.
+    func testParallaxRespectsSceneToggle() throws {
+        func amount(on: Int, value: Double) throws -> Double {
+            let reader = try makeScenePkg(scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100},
+                         "cameraparallax": \(on), "cameraparallaxamount": \(value)},
+             "objects": []}
+            """)
+            return try SceneDocument.load(from: reader, assets: nil).parallaxAmount
+        }
+        XCTAssertEqual(try amount(on: 1, value: 0.5), 0.5, accuracy: 0.001)
+        XCTAssertEqual(try amount(on: 0, value: 0.5), 0, "꺼져 있으면 움직이지 않는다")
+    }
+
+    /// 레이어별 깊이를 읽는다. 실물 값이 -0.67~0.5이고 음수면 반대로 밀린다.
+    func testParallaxDepthIsRead() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "L", "origin": "0 0 0", "size": "10 10",
+                      "parallaxDepth": -0.67, "image": "models/x.json"}]}
+        """)
+        let layer = try XCTUnwrap(try SceneDocument.load(from: reader, assets: nil).layers.first)
+        XCTAssertEqual(layer.parallaxDepth, -0.67, accuracy: 0.001)
+    }
+}
