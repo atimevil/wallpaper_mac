@@ -119,6 +119,29 @@ public enum ParticleOperator: Equatable, Sendable {
                            phaseMin: Double, phaseMax: Double)
     case oscillateAlpha(frequencyMin: Double, frequencyMax: Double,
                         scaleMin: Double, scaleMax: Double)
+    /// 수명에 따라 색에 곱하는 값. `sizechange`의 색 판이다(실물 32곳).
+    ///
+    /// 곱한다고 보는 근거: 편집기가 기본값을 안 적어서 `{"starttime": 0.5}`만
+    /// 적힌 것이 있는데, 갈아끼운다고 보면 그런 프리셋이 흰색으로 튄다.
+    /// 곱하기로 보면 기본값(1 1 1)이 아무것도 안 바꾼다.
+    case colorChange(startTime: Double, endTime: Double,
+                     startValue: Vec3, endValue: Vec3)
+    /// 크기를 주기적으로 흔든다. 반딧불이 커졌다 작아지는 것이 이것이다.
+    case oscillateSize(frequencyMin: Double, frequencyMax: Double,
+                       scaleMin: Double, scaleMax: Double)
+    /// 소용돌이 잡음으로 속도를 흔든다. 실물 22곳에서 쓴다.
+    ///
+    /// **WE의 잡음 함수 자체는 공개돼 있지 않다.** 여기 잡음은 우리 것이고,
+    /// 같은 자리에서 같은 값이 나오는 매끄러운 3차원 잡음이라는 성질만 같다.
+    /// 불티가 흩날리는 모양은 나오지만 픽셀 단위로 같지는 않다.
+    case turbulence(mask: Vec3, scale: Double, speedMin: Double, speedMax: Double,
+                    timeScale: Double, phaseMin: Double, phaseMax: Double)
+    /// 축을 중심으로 돌린다. 안쪽과 바깥쪽 속력을 거리로 섞는다.
+    ///
+    /// `vortex_v2`의 고리(`ringradius`/`ringwidth`/`ringpulldistance`)는 아직
+    /// 모델링하지 않는다. 고리가 적힌 프리셋에서는 그 사실을 보고한다.
+    case vortex(axis: Vec3, distanceInner: Double, distanceOuter: Double,
+                speedInner: Double, speedOuter: Double)
     case controlPointAttract(controlPoint: Int, origin: Vec3, scale: Double, threshold: Double)
 }
 
@@ -391,8 +414,9 @@ public struct ParticlePreset: Equatable, Sendable {
             "colorrandom", "rotationrandom", "angularvelocityrandom", "turbulentvelocityrandom"
         ])
         let knownOperatorNames = Set<String>([
-            "movement", "angularmovement", "alphafade", "sizechange",
-            "oscillateposition", "oscillatealpha", "controlpointattract"
+            "movement", "angularmovement", "alphafade", "sizechange", "colorchange",
+            "oscillateposition", "oscillatealpha", "oscillatesize", "turbulence",
+            "vortex", "vortex_v2", "controlpointattract"
         ])
 
         // Parse maxCount with clamping
@@ -470,6 +494,13 @@ public struct ParticlePreset: Equatable, Sendable {
             for opDict in opArray {
                 if let op = parseOperator(opDict) {
                     operators.append(op)
+                    // 다 하지 못한 것은 이름을 남긴다. 소용돌이의 고리는 아직
+                    // 모델링하지 않았고, 조용히 넘어가면 왜 다르게 보이는지
+                    // 알 수 없다.
+                    if case .vortex = op,
+                       opDict["ringradius"] != nil || opDict["ringpulldistance"] != nil {
+                        unsupportedNames.insert("vortex_v2(고리)")
+                    }
                 } else if let name = opDict["name"] as? String {
                     if knownOperatorNames.contains(name) {
                         malformedNames.insert(name)
@@ -739,14 +770,50 @@ public struct ParticlePreset: Equatable, Sendable {
                                      frequencyMin: frequencyMin, frequencyMax: frequencyMax,
                                      phaseMin: phaseMin, phaseMax: phaseMax)
 
-        case "oscillatealpha":
-            // frequencymin/frequencymax와 scalemin/scalemax 필수. phasemin/phasemax는 없음.
-            guard let frequencyMin = getDouble(dict["frequencymin"]) else { return nil }
-            guard let frequencyMax = getDouble(dict["frequencymax"]) else { return nil }
-            guard let scaleMin = getDouble(dict["scalemin"]) else { return nil }
-            guard let scaleMax = getDouble(dict["scalemax"]) else { return nil }
+        case "oscillatealpha", "oscillatesize":
+            // 편집기가 기본값을 안 적는다. 전부 필수로 두면 실물이 떨어진다 —
+            // `fireworks2hit`은 `scalemin`만 적고, `magic_color_sparkle`은
+            // 진동수만 적는다. `scalemin`만 적힌 것이 뜻을 가지려면
+            // `scalemax`의 기본이 1이어야 한다.
+            let frequencyMin = getDouble(dict["frequencymin"]) ?? 1
+            let frequencyMax = getDouble(dict["frequencymax"]) ?? frequencyMin
+            let scaleMin = getDouble(dict["scalemin"]) ?? 0
+            let scaleMax = getDouble(dict["scalemax"]) ?? 1
+            if name == "oscillatesize" {
+                return .oscillateSize(frequencyMin: frequencyMin, frequencyMax: frequencyMax,
+                                      scaleMin: scaleMin, scaleMax: scaleMax)
+            }
             return .oscillateAlpha(frequencyMin: frequencyMin, frequencyMax: frequencyMax,
                                   scaleMin: scaleMin, scaleMax: scaleMax)
+
+        case "colorchange":
+            // 값은 0~1이다(`colorrandom`의 0~255와 다르다).
+            let one = Vec3(x: 1, y: 1, z: 1)
+            return .colorChange(
+                startTime: getDouble(dict["starttime"]) ?? 0,
+                endTime: getDouble(dict["endtime"]) ?? 1,
+                startValue: (dict["startvalue"] as? String).flatMap(Vec3.parse) ?? one,
+                endValue: (dict["endvalue"] as? String).flatMap(Vec3.parse) ?? one)
+
+        case "turbulence":
+            return .turbulence(
+                mask: (dict["mask"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 1, y: 1, z: 1),
+                scale: getDouble(dict["scale"]) ?? 0.01,
+                speedMin: getDouble(dict["speedmin"]) ?? 0,
+                speedMax: getDouble(dict["speedmax"]) ?? (getDouble(dict["speedmin"]) ?? 0),
+                timeScale: getDouble(dict["timescale"]) ?? 0,
+                phaseMin: getDouble(dict["phasemin"]) ?? 0,
+                phaseMax: getDouble(dict["phasemax"]) ?? (getDouble(dict["phasemin"]) ?? 0))
+
+        case "vortex", "vortex_v2":
+            // 고리(`ringradius`/`ringwidth`/`ringpulldistance`)는 아직 모델링하지
+            // 않는다. 적혀 있으면 나머지만 하고, 부르는 쪽이 그 사실을 남긴다.
+            return .vortex(
+                axis: (dict["axis"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 0, y: 0, z: 1),
+                distanceInner: getDouble(dict["distanceinner"]) ?? 0,
+                distanceOuter: getDouble(dict["distanceouter"]) ?? 0,
+                speedInner: getDouble(dict["speedinner"]) ?? 0,
+                speedOuter: getDouble(dict["speedouter"]) ?? 0)
 
         case "controlpointattract":
             guard let controlPoint = getInt(dict["controlpoint"]) else { return nil }

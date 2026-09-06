@@ -263,17 +263,22 @@ final class ParticleSystemTests: XCTestCase {
         }
     }
 
-    /// controlpointattract를 조용히 무시하던 것을 unimplementedOperators로
-    /// 드러냈다. 실물 씬 "Phrolova 4K"가 이 타입을 실제로 쓰는데
+    /// 0번 제어점(시스템 자신의 자리)은 이제 실제로 당긴다. 씬이 자리를 정해
+    /// 주는 다른 번호만 아직 못 하고, 그 사실을 이름에 번호까지 붙여 남긴다 —
     /// 조용하면 렌더러 버그로 오인된다.
-    func testControlPointAttractIsReported() {
-        // controlpointattract가 든 프리셋
-        let withOp = ParticleSystem(
+    func testControlPointAttractReportsOnlyForeignPoints() {
+        let own = ParticleSystem(
             preset: preset(
                 operators: [.controlPointAttract(controlPoint: 0, origin: Vec3(x: 0, y: 0, z: 0), scale: 1.0, threshold: 5.0)]),
             random: FixedRandom([0.5]))
-        XCTAssert(withOp.unimplementedOperators.contains("controlpointattract"),
-                  "unimplementedOperators에 controlpointattract가 있어야 한다")
+        XCTAssertTrue(own.unimplementedOperators.isEmpty, "0번은 이제 한다")
+
+        let foreign = ParticleSystem(
+            preset: preset(
+                operators: [.controlPointAttract(controlPoint: 1, origin: Vec3(x: 0, y: 0, z: 0), scale: 1.0, threshold: 5.0)]),
+            random: FixedRandom([0.5]))
+        XCTAssert(foreign.unimplementedOperators.contains("controlpointattract(제어점 1)"),
+                  "다른 번호는 남겨야 한다")
 
         // controlpointattract가 없는 프리셋
         let noOp = ParticleSystem(

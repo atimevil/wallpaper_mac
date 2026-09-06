@@ -21,6 +21,7 @@ public struct Particle: Equatable, Sendable {
     /// 화면 주사율이 다르면 같은 배경화면이 다르게 보인다.
     public var baseSize: Double = 1
     public var baseAlpha: Double = 1
+    public var baseColor: Vec3 = Vec3(x: 1, y: 1, z: 1)
 
     public var isAlive: Bool {
         age < lifetime
@@ -80,8 +81,11 @@ public final class ParticleSystem {
     /// 나중에 렌더러 버그로 오인된다.
     public private(set) var unimplementedOperators: [String] = []
     /// 매 프레임 기준값으로 되돌릴지. 연산자 목록을 프레임마다 훑지 않으려고 미리 센다.
-    private let hasSizeChange: Bool
-    private let hasAlphaFade: Bool
+    private let hasSizeCurve: Bool
+    private let hasAlphaCurve: Bool
+    private let hasColorCurve: Bool
+    /// 시스템이 살아 있은 시간. 잡음과 소용돌이가 시간에 따라 흐른다.
+    private var elapsed: Double = 0
 
     public init(preset: ParticlePreset, random: RandomSource) {
         self.preset = preset
@@ -107,19 +111,31 @@ public final class ParticleSystem {
         // Initialize emission credits
         self.emissionCredits = Array(repeating: 0.0, count: preset.emitters.count)
 
-        // Detect unimplemented operators
+        // 무엇을 아직 못 하는지 남긴다. 조용히 무시하면 사용자는 레이어가 왜
+        // 안 움직이는지 알 수 없다.
         var unimplemented = Set<String>()
         for op in preset.operators {
-            if case .controlPointAttract = op {
-                unimplemented.insert("controlpointattract")
+            // 0번 제어점(시스템 자신의 자리)은 한다. 다른 번호는 씬이 자리를
+            // 정해 주는데 우리 모델에 그 데이터가 없다.
+            if case .controlPointAttract(let point, _, _, _) = op, point != 0 {
+                unimplemented.insert("controlpointattract(제어점 \(point))")
             }
         }
         self.unimplementedOperators = Array(unimplemented).sorted()
-        self.hasSizeChange = preset.operators.contains {
-            if case .sizeChange = $0 { return true } else { return false }
+        self.hasSizeCurve = preset.operators.contains {
+            switch $0 {
+            case .sizeChange, .oscillateSize: return true
+            default: return false
+            }
         }
-        self.hasAlphaFade = preset.operators.contains {
-            if case .alphaFade = $0 { return true } else { return false }
+        self.hasAlphaCurve = preset.operators.contains {
+            switch $0 {
+            case .alphaFade, .oscillateAlpha: return true
+            default: return false
+            }
+        }
+        self.hasColorCurve = preset.operators.contains {
+            if case .colorChange = $0 { return true } else { return false }
         }
     }
 
@@ -198,6 +214,8 @@ public final class ParticleSystem {
 
         // Emit new particles
         emitParticles(dt: dt)
+
+        elapsed += dt
 
         // Apply operators to alive particles
         applyOperators(dt: dt)
@@ -401,6 +419,7 @@ public final class ParticleSystem {
         // 초기화자가 끝난 값이 기준값이다.
         particle.baseSize = particle.size
         particle.baseAlpha = particle.alpha
+        particle.baseColor = particle.color
 
         return particle
     }
@@ -490,8 +509,9 @@ public final class ParticleSystem {
             // 수명에 따라 곱하는 연산자들은 기준값에서 다시 시작한다.
             // 여러 개가 겹쳐 곱해지되(섬광은 커지는 것과 작아지는 것 둘이다),
             // 프레임을 넘어 쌓이지는 않는다.
-            if hasSizeChange { particleBuffer[i].size = particleBuffer[i].baseSize }
-            if hasAlphaFade { particleBuffer[i].alpha = particleBuffer[i].baseAlpha }
+            if hasSizeCurve { particleBuffer[i].size = particleBuffer[i].baseSize }
+            if hasAlphaCurve { particleBuffer[i].alpha = particleBuffer[i].baseAlpha }
+            if hasColorCurve { particleBuffer[i].color = particleBuffer[i].baseColor }
 
             for op in preset.operators {
                 applyOperator(op, to: &particleBuffer[i], dt: dt)
@@ -593,18 +613,122 @@ public final class ParticleSystem {
             )
 
         case .oscillateAlpha(let frequencyMin, let frequencyMax, let scaleMin, let scaleMax):
-            let frequency = frequencyMin + random.next() * (frequencyMax - frequencyMin)
-            let scale = scaleMin + random.next() * (scaleMax - scaleMin)
+            // 진동수와 위상은 **파티클마다 태어날 때 정해진다.** 프레임마다 새로
+            // 뽑으면 파티클 하나가 매 프레임 다른 주기를 타서, 흔들리는 게 아니라
+            // 무작위로 깜빡인다.
+            let frequency = frequencyMin
+                + Self.hash(particle.frameSeed, 11) * (frequencyMax - frequencyMin)
+            let phase = Self.hash(particle.frameSeed, 12) * 2 * .pi
+            let wave = 0.5 + 0.5 * sin(frequency * particle.age * 2 * .pi + phase)
+            particle.alpha = particle.baseAlpha * (scaleMin + (scaleMax - scaleMin) * wave)
 
-            particle.alpha = scale * abs(sin(frequency * particle.age * 2 * .pi))
+        case .oscillateSize(let frequencyMin, let frequencyMax, let scaleMin, let scaleMax):
+            let frequency = frequencyMin
+                + Self.hash(particle.frameSeed, 21) * (frequencyMax - frequencyMin)
+            let phase = Self.hash(particle.frameSeed, 22) * 2 * .pi
+            let wave = 0.5 + 0.5 * sin(frequency * particle.age * 2 * .pi + phase)
+            particle.size = Swift.max(
+                0, particle.size * (scaleMin + (scaleMax - scaleMin) * wave))
+
+        case .colorChange(let startTime, let endTime, let startValue, let endValue):
+            guard particle.lifetime > 0 else { return }
+            let progress = min(max(particle.age / particle.lifetime, 0), 1)
+            let factor: Vec3
+            if progress <= startTime || endTime <= startTime {
+                factor = progress <= startTime ? startValue : endValue
+            } else if progress >= endTime {
+                factor = endValue
+            } else {
+                let t = (progress - startTime) / (endTime - startTime)
+                factor = Vec3(
+                    x: startValue.x + (endValue.x - startValue.x) * t,
+                    y: startValue.y + (endValue.y - startValue.y) * t,
+                    z: startValue.z + (endValue.z - startValue.z) * t)
+            }
+            particle.color = Vec3(
+                x: particle.color.x * factor.x,
+                y: particle.color.y * factor.y,
+                z: particle.color.z * factor.z)
+
+        case .turbulence(let mask, let scale, let speedMin, let speedMax,
+                         let timeScale, let phaseMin, let phaseMax):
+            let speed = speedMin + Self.hash(particle.frameSeed, 31) * (speedMax - speedMin)
+            guard speed != 0 else { return }
+            let phase = phaseMin + Self.hash(particle.frameSeed, 32) * (phaseMax - phaseMin)
+            // 자리와 시간으로 잡음 마당을 읽는다. 같은 자리면 같은 값이 나와야
+            // 파티클들이 **함께** 흐른다 — 파티클마다 따로 흔들면 지저분해진다.
+            let t = elapsed * timeScale * 0.01 + phase
+            let field = Vec3(
+                x: Self.noise(particle.position.x * scale, particle.position.y * scale,
+                              particle.position.z * scale + t),
+                y: Self.noise(particle.position.y * scale + 19.7,
+                              particle.position.z * scale, particle.position.x * scale + t),
+                z: Self.noise(particle.position.z * scale + 43.3,
+                              particle.position.x * scale, particle.position.y * scale + t))
+            particle.velocity = Vec3(
+                x: particle.velocity.x + field.x * mask.x * speed * dt,
+                y: particle.velocity.y + field.y * mask.y * speed * dt,
+                z: particle.velocity.z + field.z * mask.z * speed * dt)
+
+        case .vortex(let axis, let distanceInner, let distanceOuter,
+                     let speedInner, let speedOuter):
+            // 축은 시스템 원점을 지난다. 파티클을 축에 내린 수선이 반지름이다.
+            let toParticle = Vec3(
+                x: particle.position.x - originOffset.x,
+                y: particle.position.y - originOffset.y,
+                z: particle.position.z - originOffset.z)
+            let axisLength = (axis.x * axis.x + axis.y * axis.y + axis.z * axis.z).squareRoot()
+            guard axisLength > 1e-9 else { return }
+            let unit = Vec3(x: axis.x / axisLength, y: axis.y / axisLength,
+                            z: axis.z / axisLength)
+            let along = toParticle.x * unit.x + toParticle.y * unit.y + toParticle.z * unit.z
+            let radial = Vec3(x: toParticle.x - unit.x * along,
+                              y: toParticle.y - unit.y * along,
+                              z: toParticle.z - unit.z * along)
+            let radius = (radial.x * radial.x + radial.y * radial.y
+                + radial.z * radial.z).squareRoot()
+            guard radius > 1e-6 else { return }
+            // 안쪽 속력에서 바깥쪽 속력으로 섞는다. 두 거리가 같으면 바깥값이다.
+            let span = distanceOuter - distanceInner
+            let ratio = span > 1e-9
+                ? min(max((radius - distanceInner) / span, 0), 1) : 1.0
+            let speed = speedInner + (speedOuter - speedInner) * ratio
+            // 접선 = 축 × 반지름 방향.
+            let tangent = Vec3(
+                x: unit.y * radial.z - unit.z * radial.y,
+                y: unit.z * radial.x - unit.x * radial.z,
+                z: unit.x * radial.y - unit.y * radial.x)
+            let tangentLength = (tangent.x * tangent.x + tangent.y * tangent.y
+                + tangent.z * tangent.z).squareRoot()
+            guard tangentLength > 1e-9 else { return }
+            particle.velocity = Vec3(
+                x: particle.velocity.x + tangent.x / tangentLength * speed * dt,
+                y: particle.velocity.y + tangent.y / tangentLength * speed * dt,
+                z: particle.velocity.z + tangent.z / tangentLength * speed * dt)
 
         case .controlPointAttract(let controlPoint, let origin, let scale, let threshold):
-            // 제어점 데이터가 모델에 없어 구현하지 못했고 unimplementedOperators로 보고한다.
-            // 조용히 무시하면 사용자가 레이어가 안 움직이는 이유를 알 수 없다.
-            _ = controlPoint
-            _ = origin
-            _ = scale
-            _ = threshold
+            // 0번 제어점은 시스템 자신의 자리다. 그 위에 연산자가 적은 `origin`을
+            // 얹는다. **다른 번호는 씬이 자리를 따로 정해 주는데 우리 모델에
+            // 그 데이터가 없다** — 그때는 여기서 아무것도 하지 않고
+            // `unimplementedOperators`로 보고한다.
+            guard controlPoint == 0 else { return }
+            let target = Vec3(x: originOffset.x + origin.x,
+                              y: originOffset.y + origin.y,
+                              z: originOffset.z + origin.z)
+            let delta = Vec3(x: target.x - particle.position.x,
+                             y: target.y - particle.position.y,
+                             z: target.z - particle.position.z)
+            let distance = (delta.x * delta.x + delta.y * delta.y
+                + delta.z * delta.z).squareRoot()
+            guard distance > 1e-6, distance < threshold else { return }
+            // 가까울수록 세게 당긴다. 문턱에서 0이 되게 두어야 파티클이 문턱을
+            // 넘나들 때 속도가 튀지 않는다. 음수 scale이면 밀어낸다(커서 피하기).
+            let falloff = threshold > 0 ? (1 - distance / threshold) : 1
+            let strength = scale * falloff * dt
+            particle.velocity = Vec3(
+                x: particle.velocity.x + delta.x / distance * strength,
+                y: particle.velocity.y + delta.y / distance * strength,
+                z: particle.velocity.z + delta.z / distance * strength)
         }
     }
 
@@ -614,6 +738,40 @@ public final class ParticleSystem {
                 particleBuffer[i].age += dt
             }
         }
+    }
+
+    /// 파티클마다 고정된 0~1 난수. `salt`로 용도를 나눈다.
+    ///
+    /// 프레임마다 `random.next()`를 부르면 같은 파티클이 매 프레임 다른 값을
+    /// 받아, 주기 운동이 무작위 깜빡임이 된다. 씨앗에서 뽑으면 태어날 때
+    /// 정해진 값이 죽을 때까지 간다.
+    static func hash(_ seed: Double, _ salt: Int) -> Double {
+        let x = sin(seed * 127.1 + Double(salt) * 311.7) * 43758.5453
+        return x - x.rounded(.down)
+    }
+
+    /// 매끄러운 3차원 값 잡음. -1~1이다.
+    ///
+    /// **WE의 잡음 함수는 공개돼 있지 않다.** 이건 우리 것이고, 같은 자리에서
+    /// 같은 값이 나오고 자리를 조금 옮기면 값도 조금 바뀐다는 성질만 같다.
+    /// 불티가 흩날리는 모양은 나오지만 실물과 픽셀 단위로 같지는 않다.
+    static func noise(_ x: Double, _ y: Double, _ z: Double) -> Double {
+        func fade(_ t: Double) -> Double { t * t * (3 - 2 * t) }
+        func corner(_ i: Double, _ j: Double, _ k: Double) -> Double {
+            let h = sin(i * 12.9898 + j * 78.233 + k * 37.719) * 43758.5453
+            return (h - h.rounded(.down)) * 2 - 1
+        }
+        let xi = x.rounded(.down), yi = y.rounded(.down), zi = z.rounded(.down)
+        let xf = fade(x - xi), yf = fade(y - yi), zf = fade(z - zi)
+        func lerp(_ a: Double, _ b: Double, _ t: Double) -> Double { a + (b - a) * t }
+        let c000 = corner(xi, yi, zi), c100 = corner(xi + 1, yi, zi)
+        let c010 = corner(xi, yi + 1, zi), c110 = corner(xi + 1, yi + 1, zi)
+        let c001 = corner(xi, yi, zi + 1), c101 = corner(xi + 1, yi, zi + 1)
+        let c011 = corner(xi, yi + 1, zi + 1), c111 = corner(xi + 1, yi + 1, zi + 1)
+        return lerp(
+            lerp(lerp(c000, c100, xf), lerp(c010, c110, xf), yf),
+            lerp(lerp(c001, c101, xf), lerp(c011, c111, xf), yf),
+            zf)
     }
 
     private func isValidParticle(_ particle: Particle) -> Bool {
