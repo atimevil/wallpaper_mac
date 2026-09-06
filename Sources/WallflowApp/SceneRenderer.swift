@@ -28,6 +28,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var lastFrameTime: CFTimeInterval?
     /// 텍스트 레이어마다 스크립트와 구운 글자. 값이 바뀔 때만 다시 굽는다.
     private var texts: [TextState] = []
+    /// `visible`/`alpha` 스크립트를 계속 돌려야 하는 레이어들.
+    ///
+    /// 한 번만 돌려서는 안 된다. 실물 음악 위젯의 진행 막대는 0.5초짜리 타이머가
+    /// 끝나야 "재생 중인 음악이 없다"로 판단해 숨는다 — 처음에는 보이라고 답한다.
+    private var displays: [DisplayState] = []
     /// 스크립트를 마지막으로 돌린 시각. 시계는 초 단위로 바뀌므로 1초에 한 번이면 된다.
     private var lastScriptTime: CFTimeInterval?
     /// 스크립트를 다시 돌리는 주기.
@@ -52,6 +57,27 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     }
     /// 컴포지터에 준 레이어 목록. 글자 크기가 바뀌면 다시 줘야 해서 들고 있는다.
     private var layerList: [(QuadInstance, LayerSource)] = []
+
+    @MainActor
+    /// 표시 스크립트가 붙은 레이어 하나의 살아 있는 상태.
+    /// 엔진을 유지해야 스크립트 안의 타이머와 플래그가 호출 사이에 남는다.
+    private final class DisplayState {
+        let scripts: [(property: DisplayScript.Property, engine: ScriptEngine)]
+        let layerIndex: Int
+        let baseAlpha: Double
+        let baseVisible: Bool
+        /// 마지막으로 화면에 반영한 알파. 안 바뀌면 레이어 목록을 다시 올리지 않는다.
+        var applied: Float
+
+        init(scripts: [(property: DisplayScript.Property, engine: ScriptEngine)],
+             layerIndex: Int, baseAlpha: Double, baseVisible: Bool, applied: Float) {
+            self.scripts = scripts
+            self.layerIndex = layerIndex
+            self.baseAlpha = baseAlpha
+            self.baseVisible = baseVisible
+            self.applied = applied
+        }
+    }
 
     /// 텍스트 레이어 하나의 상태.
     ///
@@ -127,17 +153,31 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var alpha = layer.alpha
         var visible = layer.visible
         var ran = false
-        for source in layer.displayScripts {
-            let engine = ScriptEngine(source: source)
+        for script in layer.displayScripts {
+            let engine = ScriptEngine(source: script.source)
             // 콜백 전용 스크립트에는 update가 없다. 그건 실패가 아니다 —
             // 미디어 위젯은 이벤트로만 동작한다. 본문 평가 실패만 건너뛴다.
             if case .evaluationFailed = engine.failure { continue }
-            guard let state = engine.runLayerCallbacks(
-                initial: LayerScriptState(alpha: layer.alpha, visible: layer.visible))
-            else { continue }
-            alpha = Swift.min(alpha, state.alpha)
-            visible = visible && state.visible
-            ran = true
+            if let state = engine.runLayerCallbacks(
+                initial: LayerScriptState(alpha: layer.alpha, visible: layer.visible)) {
+                alpha = Swift.min(alpha, state.alpha)
+                visible = visible && state.visible
+                ran = true
+            }
+            // 콜백만이 아니라 `update(value)`도 돌린다. 실물 진행 막대는
+            // 콜백이 아니라 update에서 "재생 중이 없으니 숨어라"를 돌려준다.
+            switch script.property {
+            case .visible:
+                if let shown = engine.update(value: layer.visible, frametime: 0) {
+                    visible = visible && shown
+                    ran = true
+                }
+            case .alpha:
+                if let a = engine.update(value: layer.alpha, frametime: 0) {
+                    alpha = Swift.min(alpha, Swift.min(Swift.max(a, 0), 1))
+                    ran = true
+                }
+            }
         }
         guard ran else {
             degraded.append("\(layer.name): 표시 스크립트를 돌리지 못해 저장된 값으로 그린다")
@@ -282,6 +322,41 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         }
     }
 
+    /// 표시 스크립트를 다시 돌려 알파를 갱신한다.
+    ///
+    /// 렌더 스레드에서 돈다. 글자 스크립트와 달리 결과가 한 실수뿐이라 굽는 비용이
+    /// 없고, 1초에 한 번이라 무한 루프 위험도 그만큼 낮다. 대신 결과가 바뀐 것이
+    /// 하나도 없으면 레이어 목록을 다시 올리지 않는다.
+    ///
+    /// - Parameter elapsed: 지난 호출 이후 실제로 흐른 시간(초).
+    ///   스크립트의 타이머가 이 값으로 흐른다.
+    private func runDisplayScripts(elapsed: Double) {
+        guard let compositor, !displays.isEmpty else { return }
+        var changed = false
+        for state in displays where state.layerIndex < layerList.count {
+            var alpha = state.baseAlpha
+            var visible = state.baseVisible
+            for (property, engine) in state.scripts {
+                switch property {
+                case .visible:
+                    if let shown = engine.update(value: state.baseVisible, frametime: elapsed) {
+                        visible = visible && shown
+                    }
+                case .alpha:
+                    if let a = engine.update(value: state.baseAlpha, frametime: elapsed) {
+                        alpha = Swift.min(alpha, Swift.min(Swift.max(a, 0), 1))
+                    }
+                }
+            }
+            let wanted = visible ? Float(alpha) : 0
+            guard abs(wanted - state.applied) > 0.002 else { continue }
+            state.applied = wanted
+            layerList[state.layerIndex].0.color.w = wanted
+            changed = true
+        }
+        if changed { compositor.setLayers(layerList) }
+    }
+
     /// 글자 폭은 글자 수에 따라 바뀐다. 쿼드를 그대로 두면 "9:59"와 "10:00"이
     /// 같은 상자에 늘어나 붙는다. 바뀐 크기를 레이어 목록에 반영해 다시 준다.
     /// 1초에 한 번 남짓이라 비용이 문제되지 않는다.
@@ -377,6 +452,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var texts: [TextState] = []
         var sounds: [AVAudioPlayer] = []
         var drawable: [(QuadInstance, LayerSource)] = []
+        var displayStates: [DisplayState] = []
 
         for rawLayer in document.layers where rawLayer.visible {
             // 표시 스크립트를 먼저 돌린다. 미디어 위젯이 "지금 재생 중이 아니다"를
@@ -401,6 +477,24 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                              Float(layer.alpha)),
                 rotation: Float(layer.rotation),
                 parallaxDepth: Float(layer.parallaxDepth))
+
+            // 표시 스크립트는 한 번으로 끝나지 않는다. 진행 막대는 타이머가 끝나야
+            // 숨기라고 답하므로, 엔진을 살려 두고 주기적으로 다시 묻는다.
+            if !layer.displayScripts.isEmpty {
+                let engines = layer.displayScripts.compactMap {
+                    script -> (property: DisplayScript.Property, engine: ScriptEngine)? in
+                    let engine = ScriptEngine(source: script.source)
+                    if case .evaluationFailed = engine.failure { return nil }
+                    if case .noUpdateFunction = engine.failure { return nil }
+                    return (script.property, engine)
+                }
+                if !engines.isEmpty {
+                    displayStates.append(DisplayState(
+                        scripts: engines, layerIndex: drawable.count,
+                        baseAlpha: layer.alpha, baseVisible: layer.visible,
+                        applied: Float(layer.alpha)))
+                }
+            }
 
             switch layer.content {
             case .solidColor(let c):
@@ -574,6 +668,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         }
 
         self.layerList = drawable
+        self.displays = displayStates
         compositor.setLayers(drawable)
         self.compositor = compositor
 
@@ -628,6 +723,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         lastScriptTime = nil
         compositor = nil
         layerList = []
+        displays = []
         view?.delegate = nil
     }
 }
@@ -639,11 +735,15 @@ extension SceneRenderer: MTKViewDelegate {
 
     func draw(in view: MTKView) {
         updateParallax(in: view)
-        if !texts.isEmpty {
+        if !texts.isEmpty || !displays.isEmpty {
             let now = CACurrentMediaTime()
-            if lastScriptTime.map({ now - $0 >= Self.scriptInterval }) ?? true {
+            let since = lastScriptTime.map { now - $0 }
+            if since.map({ $0 >= Self.scriptInterval }) ?? true {
                 lastScriptTime = now
                 runScripts()
+                // 첫 호출에는 직전 시각이 없다. 0을 주면 스크립트의 타이머가
+                // 영영 안 흐른다 — 진행 막대가 계속 보인다.
+                runDisplayScripts(elapsed: since ?? Self.scriptInterval)
             }
         }
         if !particles.isEmpty {

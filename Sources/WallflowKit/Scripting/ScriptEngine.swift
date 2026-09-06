@@ -70,7 +70,8 @@ public final class ScriptEngine: @unchecked Sendable {
             thrown = value?.toString() ?? "알 수 없는 예외"
         }
 
-        Self.installScriptPropertiesShim(context)
+        Self.installScriptPropertiesShim(context, layerProperties: properties)
+        Self.installEngineShim(context)
         context.evaluateScript(Self.stripModuleSyntax(source))
 
         if let thrown {
@@ -78,9 +79,17 @@ public final class ScriptEngine: @unchecked Sendable {
             return
         }
 
-        // 레이어가 준 값이 스크립트 안의 빌더를 이긴다.
+        // 레이어가 준 값이 스크립트 안의 빌더를 이긴다. 빌더가 만든 객체에 **덮어쓴다** —
+        // 통째로 갈아 끼우면 레이어가 안 준 속성의 기본값까지 같이 사라진다.
         if !properties.isEmpty {
-            context.setObject(properties, forKeyedSubscript: "scriptProperties" as NSString)
+            if let existing = context.objectForKeyedSubscript("scriptProperties"),
+               existing.isObject {
+                for (key, value) in properties {
+                    existing.setObject(value, forKeyedSubscript: key as NSString)
+                }
+            } else {
+                context.setObject(properties, forKeyedSubscript: "scriptProperties" as NSString)
+            }
         }
 
         guard let update = context.objectForKeyedSubscript("update"),
@@ -188,15 +197,94 @@ public final class ScriptEngine: @unchecked Sendable {
 
     /// `createScriptProperties()`는 편집기 UI를 정의하는 빌더다. 값은 레이어가 준다.
     /// 무엇을 부르든 자기 자신을 돌려주기만 하면 스크립트가 끝까지 평가된다.
-    private static func installScriptPropertiesShim(_ context: JSContext) {
+    /// `update(value)`를 불리언으로 부른다. `visible` 속성에 붙은 스크립트용이다.
+    ///
+    /// 실물 음악 위젯의 진행 막대는 이렇게 스스로 숨는다:
+    /// ```js
+    /// let timer = scriptProperties.duration;  // 0.5초
+    /// let a = false;                          // 썸네일이 생기면 true가 된다
+    /// export function update(value) {
+    ///     if (timer > 0) { timer -= engine.frametime; return !a }
+    ///     else { return a }
+    /// }
+    /// ```
+    /// 시간이 지나면 `false`를 돌려준다 — 재생 중인 음악이 없으니 숨으라는 뜻이다.
+    /// 이걸 안 돌리면 저장된 `visible: true`로 그려져 흰 상자가 화면에 남는다.
+    ///
+    /// - Parameter frametime: 지난 호출 이후 실제로 흐른 시간(초).
+    ///   스크립트를 매 프레임이 아니라 1초에 한 번 돌리므로, 프레임 간격이 아니라
+    ///   진짜 경과 시간을 줘야 시간 기반 로직이 맞게 흐른다.
+    public func update(value: Bool, frametime: Double) -> Bool? {
+        guard let result = callUpdate(value, frametime: frametime) else { return nil }
+        return result.toBool()
+    }
+
+    /// `update(value)`를 실수로 부른다. `alpha` 속성에 붙은 스크립트용이다.
+    public func update(value: Double, frametime: Double) -> Double? {
+        guard let result = callUpdate(value, frametime: frametime),
+              result.isNumber, result.toDouble().isFinite else { return nil }
+        return result.toDouble()
+    }
+
+    private func callUpdate(_ value: Any, frametime: Double) -> JSValue? {
+        guard let updateFunction else { return nil }
+        var thrown: String?
+        context.exceptionHandler = { _, value in
+            thrown = value?.toString() ?? "알 수 없는 예외"
+        }
+        // 시간이 흘렀다고 스크립트에 알린다. 없으면 `engine.frametime`이 undefined라
+        // 뺄셈이 NaN이 되고 타이머가 영영 안 끝난다.
+        context.objectForKeyedSubscript("engine")?
+            .setObject(frametime, forKeyedSubscript: "frametime" as NSString)
+        let result = updateFunction.call(withArguments: [value])
+        if let thrown {
+            failure = .updateFailed(thrown)
+            return nil
+        }
+        guard let result, !result.isUndefined, !result.isNull else { return nil }
+        failure = nil
+        return result
+    }
+
+    /// 스크립트가 기대하는 `engine` 전역. 없으면 참조하는 스크립트가 통째로 죽는다.
+    /// 값은 매 호출마다 `callUpdate`가 채운다.
+    private static func installEngineShim(_ context: JSContext) {
+        context.evaluateScript("var engine = { frametime: 0, time: 0 };")
+    }
+
+    /// `createScriptProperties()` 흉내.
+    ///
+    /// 빌더는 편집기 UI 정의지만 **기본값도 함께 들고 있다**(`{name, value}`).
+    /// 그 기본값을 빌더 객체에 얹어야 스크립트가 본문 최상위에서 읽을 수 있다:
+    /// ```js
+    /// let timer = scriptProperties.duration;   // ← 여기서 이미 읽는다
+    /// export function update(value) { ... }
+    /// ```
+    /// 평가가 끝난 뒤에 값을 넣어 주면 이 줄에는 이미 늦었다 — `timer`가 undefined가
+    /// 되어 `timer > 0`이 처음부터 거짓이 되고, 진행 막대가 숨어야 할 때를 스스로
+    /// 못 정한다. 레이어가 준 값은 여기서 기본값을 이긴다.
+    private static func installScriptPropertiesShim(
+        _ context: JSContext, layerProperties: [String: Any]
+    ) {
+        context.setObject(layerProperties,
+                          forKeyedSubscript: "__wallflowLayerProperties" as NSString)
         context.evaluateScript("""
         function createScriptProperties() {
+            var layer = __wallflowLayerProperties || {};
             var builder = {};
-            var handler = function () { return builder; };
+            var handler = function (spec) {
+                if (spec && spec.name !== undefined && spec.name !== null) {
+                    builder[spec.name] = Object.prototype.hasOwnProperty.call(layer, spec.name)
+                        ? layer[spec.name] : spec.value;
+                }
+                return builder;
+            };
             var names = ['addCheckbox', 'addSlider', 'addTextInput', 'addCombo',
                          'addColorPicker', 'addFilePicker', 'addText', 'addSeparator',
-                         'addSpinner', 'addVec2', 'addVec3', 'finish'];
+                         'addSpinner', 'addVec2', 'addVec3'];
             for (var i = 0; i < names.length; i++) { builder[names[i]] = handler; }
+            // `.finish()`를 부르지 않는 스크립트가 있어서 빌더 자체가 값 노릇을 한다.
+            builder.finish = function () { return builder; };
             return builder;
         }
         """)

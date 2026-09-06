@@ -203,6 +203,22 @@ public enum LayerContent: Equatable, Sendable {
     case unsupported(reason: String)
 }
 
+/// 레이어 속성에 붙은 스크립트. 어느 속성인지 알아야 결과를 어떻게 읽을지 정해진다 —
+/// `visible`은 불리언, `alpha`는 0~1 실수다.
+public struct DisplayScript: Equatable, Sendable {
+    public enum Property: String, Equatable, Sendable {
+        case visible
+        case alpha
+    }
+    public let property: Property
+    public let source: String
+
+    public init(property: Property, source: String) {
+        self.property = property
+        self.source = source
+    }
+}
+
 /// 씬의 레이어 하나. origin은 오브젝트의 중심이고 직교 공간 좌표다.
 public struct SceneLayer: Equatable, Sendable {
     public let id: Int
@@ -228,7 +244,7 @@ public struct SceneLayer: Equatable, Sendable {
     public let parallaxDepth: Double
     public let content: LayerContent
     /// `visible`/`alpha`에 붙은 스크립트 본문들. 미디어 위젯이 여기서 스스로 숨는다.
-    public let displayScripts: [String]
+    public let displayScripts: [DisplayScript]
     /// 스크립트가 붙어 있지만 우리가 아직 돌리지 못하는 속성 이름들.
     ///
     /// 조용히 무시하면 사용자는 레이어가 왜 안 움직이는지 알 수 없다. 실물에서
@@ -240,7 +256,7 @@ public struct SceneLayer: Equatable, Sendable {
         id: Int, name: String, visible: Bool, origin: Vec3, size: Vec2,
         content: LayerContent, unrunScripts: [String] = [],
         alpha: Double = 1, tint: Vec3 = Vec3(x: 1, y: 1, z: 1),
-        rotation: Double = 0, displayScripts: [String] = [],
+        rotation: Double = 0, displayScripts: [DisplayScript] = [],
         scale: Vec3 = Vec3(x: 1, y: 1, z: 1),
         parallaxDepth: Double = 0
     ) {

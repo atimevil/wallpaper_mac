@@ -211,3 +211,111 @@ extension ScriptEngineTests {
         }
     }
 }
+
+extension ScriptEngineTests {
+    /// 실물 음악 위젯 진행 막대의 `visible` 스크립트를 줄인 것.
+    /// 타이머가 끝나면 "재생 중인 음악이 없으니 숨어라"를 돌려준다.
+    private var progressBarVisibleScript: String {
+        """
+        'use strict';
+        export var scriptProperties = createScriptProperties()
+            .addSlider({ name: 'duration', value: 0.5, min: 0, max: 3 })
+            .finish();
+        let timer = scriptProperties.duration;
+        let a = false;
+        export function update(value) {
+            if (timer > 0) { timer -= engine.frametime; return !a }
+            else { value = a; return a }
+        }
+        """
+    }
+
+    /// 시간이 흐르면 스스로 숨어야 한다. 이걸 안 돌리면 저장된 `visible: true`로
+    /// 그려져 배경화면 위에 흰 상자가 남는다(실물에서 확인).
+    func testVisibleScriptHidesItselfOnceTimerExpires() throws {
+        let engine = ScriptEngine(source: progressBarVisibleScript,
+                                  properties: ["duration": 0.5])
+        XCTAssertNil(engine.failure, "\(String(describing: engine.failure))")
+        XCTAssertEqual(engine.update(value: true, frametime: 1.0), true,
+                       "타이머가 도는 동안은 보인다")
+        XCTAssertEqual(engine.update(value: true, frametime: 1.0), false,
+                       "타이머가 끝나면 숨어야 한다")
+    }
+
+    /// 시간을 안 주면 타이머가 영영 안 끝난다. 프레임 간격이 아니라 진짜 경과
+    /// 시간을 넘겨야 하는 이유가 이것이다.
+    func testTimerDoesNotAdvanceWithoutElapsedTime() {
+        let engine = ScriptEngine(source: progressBarVisibleScript,
+                                  properties: ["duration": 0.5])
+        for _ in 0..<20 {
+            XCTAssertEqual(engine.update(value: true, frametime: 0), true)
+        }
+    }
+
+    /// `engine` 전역이 없으면 `engine.frametime`이 예외를 던져 스크립트가 통째로
+    /// 죽고, 레이어는 저장된 값으로 남는다.
+    func testEngineGlobalExists() throws {
+        let engine = ScriptEngine(source: """
+        export function update(value) { return typeof engine.frametime; }
+        """)
+        XCTAssertEqual(engine.update(value: ""), "number")
+    }
+
+    /// alpha 스크립트는 실수를 돌려준다. 비유한값은 값을 안 바꾼다 —
+    /// NaN 알파가 셰이더까지 흘러가면 레이어가 통째로 사라진다.
+    func testAlphaScriptReturnsNumberAndRejectsNonFinite() {
+        XCTAssertEqual(
+            ScriptEngine(source: "export function update(v) { return 0.25; }")
+                .update(value: 1.0, frametime: 0), 0.25)
+        XCTAssertNil(
+            ScriptEngine(source: "export function update(v) { return 0/0; }")
+                .update(value: 1.0, frametime: 0))
+        XCTAssertNil(
+            ScriptEngine(source: "export function update(v) { return 'hi'; }")
+                .update(value: 1.0, frametime: 0))
+    }
+
+    /// 빌더의 기본값을 본문 최상위에서 읽을 수 있어야 한다.
+    /// 평가 뒤에 값을 넣으면 이 줄에는 이미 늦다.
+    func testBuilderDefaultsAreReadableAtTopLevel() {
+        let engine = ScriptEngine(source: """
+        export var scriptProperties = createScriptProperties()
+            .addSlider({ name: 'duration', value: 0.5 })
+            .finish();
+        let captured = scriptProperties.duration;
+        export function update(value) { return String(captured); }
+        """)
+        XCTAssertEqual(engine.update(value: ""), "0.5")
+    }
+
+    /// 레이어 값이 빌더 기본값을 이긴다.
+    func testLayerValueBeatsBuilderDefaultAtTopLevel() {
+        let engine = ScriptEngine(
+            source: """
+            export var scriptProperties = createScriptProperties()
+                .addSlider({ name: 'duration', value: 0.5 })
+                .finish();
+            let captured = scriptProperties.duration;
+            export function update(value) { return String(captured); }
+            """,
+            properties: ["duration": 2])
+        XCTAssertEqual(engine.update(value: ""), "2")
+    }
+
+    /// 레이어가 일부만 줘도 나머지 기본값이 남아야 한다.
+    /// 통째로 갈아 끼우면 안 준 속성이 undefined가 된다.
+    func testPartialLayerPropertiesKeepOtherDefaults() {
+        let engine = ScriptEngine(
+            source: """
+            export var scriptProperties = createScriptProperties()
+                .addSlider({ name: 'a', value: 1 })
+                .addSlider({ name: 'b', value: 7 })
+                .finish();
+            export function update(value) {
+                return scriptProperties.a + "," + scriptProperties.b;
+            }
+            """,
+            properties: ["a": 9])
+        XCTAssertEqual(engine.update(value: ""), "9,7")
+    }
+}

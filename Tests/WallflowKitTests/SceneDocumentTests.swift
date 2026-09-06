@@ -52,6 +52,138 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(layer.content, .image(texturePath: "materials/HFRvNK5aIAA7Q24.tex"))
     }
 
+    /// origin이 **없는 것**과 **읽히지 않는 것**은 다르다.
+    /// 실물 음악 위젯의 진행 막대(`Internal Progress Bar`)는 부모에 붙어 있고
+    /// origin이 아예 없다 — "부모와 같은 자리"라는 뜻이다. 둘을 같이 버려서
+    /// 이 레이어가 통째로 사라졌다.
+    func testMissingOriginOnChildMeansParentPosition() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 2048, "height": 1164}},
+             "objects": [{"id": 7, "name": "parent", "image": "models/m.json",
+                          "origin": "700.00000 300.00000 0.00000", "size": "10.00000 10.00000"},
+                         {"id": 8, "name": "child", "parent": 7, "image": "models/m.json",
+                          "size": "512.00000 16.00000"}]}
+            """,
+            extras: [
+                "models/m.json": #"{"material": "materials/m.json"}"#,
+                "materials/m.json":
+                    #"{"passes": [{"shader": "genericimage4", "textures": ["t"]}]}"#,
+            ])
+        let child = try XCTUnwrap(SceneDocument.load(from: reader).layers.first { $0.id == 8 })
+        XCTAssertEqual(child.origin, Vec3(x: 700, y: 300, z: 0))
+        guard case .image = child.content else {
+            return XCTFail("부모 자리에 그려야 한다: \(child.content)")
+        }
+    }
+
+    /// 반대로, origin이 **있는데 못 읽는** 경우는 계속 버린다.
+    /// 0,0으로 그리면 파일이 이상한 것을 정상처럼 보이게 한다.
+    func testUnparsableOriginIsStillRejected() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 2048, "height": 1164}},
+             "objects": [{"id": 7, "name": "parent", "image": "models/m.json",
+                          "origin": "700.00000 300.00000 0.00000", "size": "10.00000 10.00000"},
+                         {"id": 8, "name": "child", "parent": 7, "image": "models/m.json",
+                          "origin": "쓰레기", "size": "512.00000 16.00000"}]}
+            """,
+            extras: [
+                "models/m.json": #"{"material": "materials/m.json"}"#,
+                "materials/m.json":
+                    #"{"passes": [{"shader": "genericimage4", "textures": ["t"]}]}"#,
+            ])
+        let child = try XCTUnwrap(SceneDocument.load(from: reader).layers.first { $0.id == 8 })
+        guard case .unsupported = child.content else {
+            return XCTFail("읽히지 않는 origin은 버려야 한다: \(child.content)")
+        }
+    }
+
+    /// 부모가 없고 origin도 없으면 버린다. 화면 구석에 정체불명의 상자가 뜨는 것보다
+    /// 안 그리는 쪽이 정직하다.
+    func testMissingOriginWithoutParentIsRejected() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 3, "name": "orphan", "image": "models/m.json",
+                          "size": "512.00000 16.00000"}]}
+            """,
+            extras: [
+                "models/m.json": #"{"material": "materials/m.json"}"#,
+                "materials/m.json":
+                    #"{"passes": [{"shader": "genericimage4", "textures": ["t"]}]}"#,
+            ])
+        let layer = try XCTUnwrap(SceneDocument.load(from: reader).layers.first)
+        guard case .unsupported = layer.content else {
+            return XCTFail("부모 없는 origin 누락은 버려야 한다: \(layer.content)")
+        }
+    }
+
+    /// 이펙트가 모양을 통째로 만드는 단색 레이어는 그리지 않는다.
+    /// 실물 음악 위젯의 淡化层이 `util/white` 흰 판에 `gradientopacity`를 걸어
+    /// 부드러운 띠를 만드는데, 이펙트 없이 그리면 배경화면 위에 불투명한
+    /// 흰 판이 그대로 남는다(실물 캡처로 확인).
+    func testWhiteSolidLayerShapedByEffectsIsSkipped() throws {
+        // 모델과 재질을 갖춰 둔다. 없으면 참조가 안 풀려서 어차피 unsupported가 되고,
+        // 테스트가 흰 판 규칙이 아니라 그것을 재게 된다.
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "淡化层", "image": "models/m.json",
+                          "origin": "10.00000 10.00000 0.00000", "size": "256.00000 256.00000",
+                          "instance": {"textures": ["util/white"]},
+                          "effects": [{"name": "渐入"}]}]}
+            """,
+            extras: [
+                "models/m.json": #"{"material": "materials/m.json"}"#,
+                "materials/m.json":
+                    #"{"passes": [{"shader": "genericimage4", "textures": ["t"]}]}"#,
+            ])).layers.first)
+        guard case .unsupported = layer.content else {
+            return XCTFail("흰 판을 그대로 그리면 안 된다: \(layer.content)")
+        }
+    }
+
+    /// 이펙트가 없으면 단색 레이어는 그대로 그린다. 이건 씬이 실제로 의도한 판이다.
+    func testWhiteSolidLayerWithoutEffectsIsStillDrawn() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "solid", "image": "models/m.json",
+                          "origin": "10.00000 10.00000 0.00000", "size": "20.00000 20.00000",
+                          "instance": {"textures": ["util/white"]}}]}
+            """,
+            extras: [
+                "models/m.json": #"{"material": "materials/m.json"}"#,
+                "materials/m.json":
+                    #"{"passes": [{"shader": "genericimage4", "textures": ["t"]}]}"#,
+            ])).layers.first)
+        if case .unsupported = layer.content {
+            XCTFail("이펙트가 없으면 그려야 한다")
+        }
+    }
+
+    /// 흰 판이 아니면 이펙트가 붙어 있어도 그린다. 그림 자체가 내용이라,
+    /// 이펙트를 못 걸어도 안 그리는 것보다 그리는 쪽이 씬에 가깝다.
+    func testTexturedLayerWithEffectsIsStillDrawn() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "art", "image": "models/m.json",
+                          "origin": "10.00000 10.00000 0.00000", "size": "20.00000 20.00000",
+                          "instance": {"textures": ["art"]},
+                          "effects": [{"name": "shimmer"}]}]}
+            """,
+            extras: [
+                "models/m.json": #"{"material": "materials/m.json"}"#,
+                "materials/m.json":
+                    #"{"passes": [{"shader": "genericimage4", "textures": ["t"]}]}"#,
+            ])).layers.first)
+        if case .unsupported = layer.content {
+            XCTFail("그림이 있는 레이어는 그려야 한다")
+        }
+    }
+
     func testVisibleDefaultsToTrueAndFalseIsHonored() throws {
         let reader = try makeScenePkg(scene: """
         {"general": {"orthogonalprojection": {"width": 100, "height": 100}},

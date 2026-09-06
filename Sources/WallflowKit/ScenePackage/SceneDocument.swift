@@ -249,7 +249,12 @@ public struct SceneDocument: Sendable {
         // 부모 사슬을 합친 화면 좌표를 쓴다. 자체 origin은 부모 안의 상대값이다.
         // 자체 좌표가 읽히지 않으면(NaN 포함) 레이어를 버린다 — 합친 값이 0이 되어
         // 화면 한복판에 그려지면 파일이 이상한 것을 정상처럼 보이게 한다.
-        let ownOriginParsed = Self.scalarOrScripted(object["origin"]).flatMap(Vec3.parse) != nil
+        // origin이 **없는 것**과 **읽히지 않는 것**은 다르다. 부모가 있는데 origin이
+        // 없으면 "부모와 같은 자리"라는 뜻이고, 부모 사슬을 합친 값이 이미 그 좌표다.
+        // 둘을 같이 버려서 실물 음악 위젯의 진행 막대가 통째로 사라졌다.
+        let originIsRelativeToParent = object["origin"] == nil && object["parent"] != nil
+        let ownOriginParsed = originIsRelativeToParent
+            || Self.scalarOrScripted(object["origin"]).flatMap(Vec3.parse) != nil
         // 부모가 비유한 scale이나 회전을 갖고 있으면 합친 값도 오염된다.
         let composedIsFinite = transform.origin.x.isFinite && transform.origin.y.isFinite
             && transform.scale.x.isFinite && transform.scale.y.isFinite
@@ -260,14 +265,14 @@ public struct SceneDocument: Sendable {
         }
         // 스크립트가 붙어 있는데 우리가 못 돌리는 경우를 사용자에게 알린다.
         var unrun: [String] = []
-        var displayScripts: [String] = []
+        var displayScripts: [DisplayScript] = []
         for key in ["origin", "size", "scale", "alpha", "color", "visible"] {
             guard let script = (object[key] as? [String: Any])?["script"] as? String
             else { continue }
             // alpha와 visible 스크립트는 실제로 돌린다. 미디어 위젯이 여기서
             // "지금 재생 중이 아니다"를 알고 스스로 숨는다.
-            if key == "alpha" || key == "visible" {
-                displayScripts.append(script)
+            if let property = DisplayScript.Property(rawValue: key) {
+                displayScripts.append(DisplayScript(property: property, source: script))
             } else {
                 unrun.append(key)
             }
@@ -346,6 +351,16 @@ public struct SceneDocument: Sendable {
                 return unsupported("화면 전체에 거는 후처리 레이어라 M6의 이펙트 체인이 필요하다")
             }
             return unsupported("origin이나 size를 읽을 수 없다")
+        }
+
+        // 이펙트가 모양을 통째로 만드는 단색 레이어. 실물 음악 위젯의 淡化层/实色层이
+        // `util/white` 흰 판에 `gradientopacity`를 걸어 부드러운 띠를 만든다.
+        // 이펙트를 못 돌리는 채로 그리면 배경화면 위에 불투명한 흰 판이 그대로 남는다 —
+        // 안 그리는 쪽이 정직하다.
+        if object["effects"] != nil,
+           let textures = (object["instance"] as? [String: Any])?["textures"] as? [String],
+           textures.allSatisfy({ $0 == "util/white" }), !textures.isEmpty {
+            return unsupported("이펙트가 모양을 만드는 단색 레이어라 M6의 이펙트 체인이 필요하다")
         }
 
         let content = resolveContent(modelPath: modelPath, object: object, resolver: resolver)
