@@ -87,3 +87,63 @@ final class WorkshopInstallerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: real.path))
     }
 }
+
+/// "지우기"는 링크만 걷는 게 아니라 **받아 둔 원본까지** 지운다.
+///
+/// 링크만 걷어내면 디스크에 수백 MB가 남는데 목록에는 안 보여, 사용자는
+/// 그게 남아 있는지 알 길이 없다. 다만 우리가 받은 자리 안의 폴더만 지운다 —
+/// 사용자가 직접 넣은 폴더를 지우는 것은 배경화면 앱이 할 일이 아니다.
+extension WorkshopInstallerTests {
+    func testRemoveDeletesOurDownload() throws {
+        let source = try makeDownloadedForRemove("777")
+        try installer.link(id: "777")
+        XCTAssertEqual(try installer.remove(id: "777"), .deletedDownload)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path), "원본이 남았다")
+        XCTAssertFalse(installer.isInstalled(id: "777"), "링크가 남았다")
+    }
+
+    /// 링크가 우리 자리 밖을 가리키면 링크만 걷고 원본은 둔다.
+    func testRemoveKeepsForeignFolder() throws {
+        let foreign = temp.appendingPathComponent("elsewhere/888")
+        try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: installer.libraryRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: installer.libraryRoot.appendingPathComponent("888"),
+            withDestinationURL: foreign)
+        XCTAssertEqual(try installer.remove(id: "888"), .unlinkedOnly)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: foreign.path), "남의 폴더를 지웠다")
+        XCTAssertFalse(installer.isInstalled(id: "888"))
+    }
+
+    /// `..`로 우리 자리를 빠져나가는 링크도 밖으로 본다.
+    func testRemoveRefusesEscapingLink() throws {
+        let outside = temp.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: installer.downloadRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: installer.libraryRoot, withIntermediateDirectories: true)
+        let sneaky = installer.downloadRoot.appendingPathComponent("../outside").path
+        try FileManager.default.createSymbolicLink(
+            atPath: installer.libraryRoot.appendingPathComponent("999").path,
+            withDestinationPath: sneaky)
+        XCTAssertEqual(try installer.remove(id: "999"), .unlinkedOnly)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
+    }
+
+    /// 실제 폴더(링크가 아닌 것)는 건드리지 않는다.
+    func testRemoveRefusesRealDirectory() throws {
+        let real = installer.libraryRoot.appendingPathComponent("mine")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        XCTAssertNil(try installer.remove(id: "mine"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: real.path))
+    }
+
+    private func makeDownloadedForRemove(_ id: String) throws -> URL {
+        let folder = installer.downloadedFolder(id: id)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: folder.appendingPathComponent("project.json"))
+        return folder
+    }
+}

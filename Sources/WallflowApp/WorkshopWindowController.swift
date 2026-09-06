@@ -71,7 +71,7 @@ final class WorkshopWindowController: NSWindowController {
     private let prevButton = NSButton(title: "◀", target: nil, action: nil)
     private let nextButton = NSButton(title: "▶", target: nil, action: nil)
     private let pageLabel = NSTextField(labelWithString: "1")
-    private let removeButton = NSButton(title: "라이브러리에서 빼기", target: nil, action: nil)
+    private let removeButton = NSButton(title: "지우기", target: nil, action: nil)
     private let accountField = NSTextField()
     fileprivate let statusLabel = NSTextField(labelWithString: "")
     private let downloadButton = NSButton(title: "받아서 추가", target: nil, action: nil)
@@ -700,17 +700,32 @@ final class WorkshopWindowController: NSWindowController {
     /// 라이브러리에서 링크만 걷는다. 받아 둔 원본은 남겨 다시 받지 않아도 되게 한다.
     @objc private func removeSelected() {
         guard let item = selectedEntry else { return }
+        // 받아 둔 원본까지 지운다. 되돌릴 수 없으니 한 번 묻는다 —
+        // 다시 받으면 되지만 씬 하나가 1GB를 넘기도 한다.
+        let alert = NSAlert()
+        alert.messageText = "\(item.title)을(를) 지울까요?"
+        alert.informativeText = "라이브러리에서 빼고 받아 둔 파일도 지웁니다. "
+            + "필요하면 창작마당에서 다시 받을 수 있습니다."
+        alert.addButton(withTitle: "지우기")
+        alert.addButton(withTitle: "취소")
+        alert.alertStyle = .warning
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
-            if try installer.unlink(id: item.id) {
-                onLibraryChanged()
-                if tab == .library { reloadLibrary() }
-                setBusy(false, status: "\(item.title) 뺐다")
-            } else {
+            switch try installer.remove(id: item.id) {
+            case .deletedDownload:
+                setBusy(false, status: "\(item.title) 지웠다")
+            case .unlinkedOnly:
+                // 우리가 받은 게 아니라 사용자가 직접 넣은 폴더다. 링크만 걷었다.
+                setBusy(false, status: "\(item.title) 뺐다 (직접 넣은 폴더라 파일은 남겼다)")
+            case nil:
                 setBusy(false, status: "라이브러리에 없다")
+                return
             }
+            onLibraryChanged()
+            if tab == .library { reloadLibrary() }
             refreshTable()
         } catch {
-            present(title: "빼지 못했다", message: Self.describe(error))
+            present(title: "지우지 못했다", message: Self.describe(error))
         }
     }
 

@@ -72,4 +72,47 @@ public struct WorkshopInstaller: Sendable {
         try FileManager.default.removeItem(at: destination)
         return true
     }
+
+    /// 라이브러리에서 빼고 **받아 둔 원본도 지운다.**
+    ///
+    /// 링크만 걷어내면 디스크에 수백 MB가 남는데 목록에는 안 보여, 사용자는
+    /// 그게 남아 있는지 알 길이 없다. 뺀다는 건 없앤다는 뜻이다. 창작마당에서
+    /// 언제든 다시 받을 수 있으므로 되돌릴 수 없는 손실은 아니다.
+    ///
+    /// **우리가 받아 둔 자리(`downloadRoot`) 안의 폴더만 지운다.** 링크가 다른
+    /// 곳을 가리키면(사용자가 직접 넣은 폴더) 링크만 걷어내고 원본은 둔다 —
+    /// 남의 폴더를 지우는 것은 배경화면 앱이 할 일이 아니다.
+    ///
+    /// - Returns: 원본까지 지웠으면 `.deletedDownload`, 링크만 걷어냈으면
+    ///   `.unlinkedOnly`, 라이브러리에 없었으면 `nil`.
+    @discardableResult
+    public func remove(id: String) throws -> RemoveOutcome? {
+        let destination = libraryRoot.appendingPathComponent(id)
+        let attributes = try? FileManager.default.attributesOfItem(atPath: destination.path)
+        guard let type = attributes?[.type] as? FileAttributeType else { return nil }
+        guard type == .typeSymbolicLink else {
+            // 실제 폴더는 사용자가 직접 넣은 것이다. 손대지 않는다.
+            return nil
+        }
+        let target = URL(fileURLWithPath: try FileManager.default
+            .destinationOfSymbolicLink(atPath: destination.path))
+        try FileManager.default.removeItem(at: destination)
+
+        // 우리 자리 안인지 경로를 정규화해 견준다. 링크 문자열만 보면
+        // `..`나 대소문자로 빠져나갈 수 있다.
+        let ours = downloadRoot.standardizedFileURL.resolvingSymlinksInPath().path
+        let resolved = target.standardizedFileURL.resolvingSymlinksInPath().path
+        guard resolved.hasPrefix(ours + "/"),
+              resolved.count > ours.count + 1,
+              FileManager.default.fileExists(atPath: resolved) else {
+            return .unlinkedOnly
+        }
+        try FileManager.default.removeItem(atPath: resolved)
+        return .deletedDownload
+    }
+
+    public enum RemoveOutcome: Equatable, Sendable {
+        case deletedDownload
+        case unlinkedOnly
+    }
 }
