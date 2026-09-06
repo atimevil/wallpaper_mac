@@ -480,3 +480,43 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(preset.unsupportedNames, ["mysteryemitter"])
     }
 }
+
+extension SceneDocumentTests {
+    /// 씬 정의 이름이 늘 scene.json인 것은 아니다.
+    /// 실물 창작마당 씬에 gifscene.json인 것이 있다.
+    func testFindsSceneEntryWithDifferentName() throws {
+        let reader = try PkgReader(data: buildPkg(version: "PKGV0023", entries: [
+            ("gifscene.json", Data("""
+            {"general": {"orthogonalprojection": {"width": 10, "height": 10}},
+             "objects": []}
+            """.utf8)),
+        ]))
+        XCTAssertEqual(SceneDocument.sceneEntryName(in: reader), "gifscene.json")
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        XCTAssertEqual(doc.orthoWidth, 10)
+    }
+
+    /// scene.json이 있으면 그것을 먼저 쓴다. 다른 json이 섞여 있어도 흔들리면 안 된다.
+    func testPrefersSceneJSON() throws {
+        let reader = try PkgReader(data: buildPkg(version: "PKGV0023", entries: [
+            ("aaa.json", Data("{}".utf8)),
+            ("scene.json", Data("""
+            {"general": {"orthogonalprojection": {"width": 42, "height": 10}},
+             "objects": []}
+            """.utf8)),
+        ]))
+        XCTAssertEqual(SceneDocument.sceneEntryName(in: reader), "scene.json")
+        XCTAssertEqual(try SceneDocument.load(from: reader, assets: nil).orthoWidth, 42)
+    }
+
+    /// 하위 폴더의 json을 씬 정의로 착각하면 안 된다.
+    func testIgnoresNestedJSON() throws {
+        let reader = try PkgReader(data: buildPkg(version: "PKGV0023", entries: [
+            ("materials/x.json", Data("{}".utf8)),
+            ("myscene.json", Data("""
+            {"general": {"orthogonalprojection": {"width": 7, "height": 7}}, "objects": []}
+            """.utf8)),
+        ]))
+        XCTAssertEqual(SceneDocument.sceneEntryName(in: reader), "myscene.json")
+    }
+}

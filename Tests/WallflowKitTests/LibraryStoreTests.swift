@@ -124,3 +124,38 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertEqual(try LibraryStore(root: missing).scan(), [])
     }
 }
+
+extension LibraryStoreTests {
+    /// project.json의 file이 가리키는 이름으로 .pkg를 찾아야 한다.
+    /// 실물 창작마당 씬에 gifscene.json / gifscene.pkg인 것이 있다.
+    /// scene.pkg로 하드코딩하면 그런 씬은 통째로 열리지 않는다.
+    func testPackageNameFollowsProjectFile() throws {
+        let temp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wf-pkgname-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let dir = temp.appendingPathComponent("123")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(#"{"type":"scene","title":"gif","file":"gifscene.json"}"#.utf8)
+            .write(to: dir.appendingPathComponent("project.json"))
+        try Data("x".utf8).write(to: dir.appendingPathComponent("gifscene.pkg"))
+
+        let items = try LibraryStore(root: temp).scan()
+        let item = try XCTUnwrap(items.first)
+        XCTAssertEqual(item.packageURL.lastPathComponent, "gifscene.pkg")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: item.packageURL.path))
+    }
+
+    /// 평범한 씬은 그대로 scene.pkg다.
+    func testPackageNameDefaultsToScene() throws {
+        let temp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wf-pkgname2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let dir = temp.appendingPathComponent("456")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(#"{"type":"scene","title":"s","file":"scene.json"}"#.utf8)
+            .write(to: dir.appendingPathComponent("project.json"))
+        try Data("x".utf8).write(to: dir.appendingPathComponent("scene.pkg"))
+        let item = try XCTUnwrap(try LibraryStore(root: temp).scan().first)
+        XCTAssertEqual(item.packageURL.lastPathComponent, "scene.pkg")
+    }
+}

@@ -29,10 +29,24 @@ public struct SceneDocument: Sendable {
         try load(from: reader, assets: nil)
     }
 
+    /// 씬 정의가 든 항목 이름.
+    ///
+    /// 보통 `scene.json`이지만 늘 그런 것은 아니다. 실물 창작마당 씬에
+    /// `gifscene.json`인 것이 있다(패키지 이름도 `gifscene.pkg`다). 하드코딩하면
+    /// 그런 씬은 통째로 열리지 않는다. 없으면 최상위의 다른 `.json`을 쓴다 —
+    /// 씬 패키지에는 최상위 json이 하나뿐이다.
+    static func sceneEntryName(in reader: PkgReader) -> String {
+        if reader.contains("scene.json") { return "scene.json" }
+        let candidates = reader.names.filter {
+            $0.hasSuffix(".json") && !$0.contains("/")
+        }.sorted()
+        return candidates.first ?? "scene.json"
+    }
+
     public static func load(
         from reader: PkgReader, assets: AssetsStore?
     ) throws -> SceneDocument {
-        let raw = try reader.data(for: "scene.json")
+        let raw = try reader.data(for: Self.sceneEntryName(in: reader))
         guard let root = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] else {
             throw SceneError.malformedSceneJSON
         }
@@ -258,6 +272,11 @@ public struct SceneDocument: Sendable {
                     displayScripts: displayScripts)
             }
             if object["sound"] != nil { return unsupported("소리 파일 목록을 읽지 못했다") }
+            // 도형 레이어. 실물에서 빛줄기(Rayons lumineux)가 이 형태인데,
+            // 도형 자체가 아니라 거기 붙은 이펙트가 그림을 만든다.
+            if object["shape"] != nil {
+                return unsupported("도형 레이어라 M6의 이펙트 체인이 필요하다")
+            }
             return unsupported("알 수 없는 레이어 종류")
         }
         guard let origin, let size else {

@@ -286,12 +286,13 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             throw RendererError.unsupportedType(.scene)
         }
 
-        // project.json의 file은 scene.json을 가리키지만 실제 데이터는 scene.pkg에 있다.
+        // project.json의 file이 가리키는 이름 그대로 .pkg를 연다. 이름이 늘
+        // scene인 것은 아니다 — 실물에 gifscene.pkg인 씬이 있다.
         // mmap을 쓰지 않는다. 이 파일은 SteamCmdClient가 관리하는 워크숍 콘텐츠라
         // 로딩 도중 업데이트가 덮어써 잘리면 매핑이 SIGBUS로 죽는다 — Swift 오류가
         // 아니라 프로세스 종료라 잡을 수 없다. AssetsStore.data(for:)의 판단과 같다.
         let raw = try Data(
-            contentsOf: item.directory.appendingPathComponent("scene.pkg")
+            contentsOf: item.packageURL
         )
         let reader = try PkgReader(data: raw)
         let assets = Self.defaultAssetsStore()
