@@ -147,8 +147,16 @@ final class ParticleRenderer {
     /// `textureRatio`는 텍스처의 세로/가로 비율이다. 빌보드가 정사각형으로
     /// 찌그러지지 않게 세로를 보정한다.
     func update(from system: ParticleSystem, textureRatio: Float) {
+        update(particles: system.particles, textureRatio: textureRatio)
+    }
+
+    /// 파티클 배열을 그대로 올린다.
+    ///
+    /// 자식 시스템은 여러 벌이 한 렌더러를 함께 쓴다 — 불꽃 하나가 터질 때마다
+    /// 새 시스템이 생기는데, 그때마다 렌더러를 만들면 파이프라인과 버퍼가
+    /// 프레임마다 새로 잡힌다.
+    func update(particles live: [Particle], textureRatio: Float) {
         self.textureRatio = textureRatio
-        let live = system.particles
         let count = min(live.count, capacity)
         let pointer = instanceBuffer.contents().bindMemory(
             to: ParticleInstance.self, capacity: capacity)

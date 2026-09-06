@@ -175,10 +175,77 @@ public enum ParticleAnimationMode: String, Equatable, Sendable {
     }
 }
 
+/// 부모 파티클의 사건에 맞춰 따로 도는 파티클 시스템.
+///
+/// 실물에서 이것 없이는 **불꽃이 안 터지고**(폭발이 전부 `eventdeath` 자식이다),
+/// 반딧불 꼬리와 빗줄기도 없다. 라이브러리 51개 프리셋 중 10개가 쓴다.
+public struct ParticleChildReference: Equatable, Sendable {
+    /// 자식 프리셋 파일 경로.
+    public let name: String
+    public let trigger: ParticleChildTrigger
+    /// 동시에 존재할 수 있는 자식 시스템 수. 없으면 넉넉한 기본값을 쓴다.
+    public let maxCount: Int
+    /// 자식 시스템이 놓이는 자리(부모 기준).
+    public let origin: Vec3
+
+    public init(name: String, trigger: ParticleChildTrigger, maxCount: Int, origin: Vec3) {
+        self.name = name
+        self.trigger = trigger
+        self.maxCount = maxCount
+        self.origin = origin
+    }
+}
+
+/// 자식이 언제 생기는지. 공식 문서의 네 가지 그대로다.
+public enum ParticleChildTrigger: Equatable, Sendable {
+    /// "automatically spawned once at the particle system origin."
+    /// **파일에 `type`이 없으면 이것이다** — 실물의 절반이 이 경우이고,
+    /// 그런 프리셋은 내용 전부가 자식에 들어 있다.
+    case once
+    /// "spawned at the same time particles of this system spawn."
+    case onSpawn
+    /// "spawned when a particle of this system reaches the end of its lifetime
+    /// at its location." 불꽃 폭발이 이것이다.
+    case onDeath
+    /// "created multiple times and follow individual particles of this system."
+    /// 반딧불 꼬리와 빗줄기가 이것이다.
+    case follow
+
+    public static func parse(_ raw: Any?) -> ParticleChildTrigger {
+        switch raw as? String {
+        case "eventspawn": return .onSpawn
+        case "eventdeath": return .onDeath
+        case "eventfollow": return .follow
+        default: return .once
+        }
+    }
+}
+
+/// 파일을 읽어 붙인 자식. 자식은 자기 텍스처와 합성 방식을 따로 가진다 —
+/// 불꽃의 폭발과 잔불이 서로 다른 그림인 것처럼.
+public struct ParticleChild: Equatable, Sendable {
+    public let reference: ParticleChildReference
+    public let preset: ParticlePreset
+    public let texturePath: String
+    public let blend: ParticleBlendMode
+
+    public init(reference: ParticleChildReference, preset: ParticlePreset,
+                texturePath: String, blend: ParticleBlendMode) {
+        self.reference = reference
+        self.preset = preset
+        self.texturePath = texturePath
+        self.blend = blend
+    }
+}
+
 public struct ParticlePreset: Equatable, Sendable {
     /// maxcount는 파일에서 온 값이고 시뮬레이션 버퍼 크기를 정한다.
     /// 실물 프리셋의 최대가 300이므로 8192는 충분히 관대하다.
     public static let maxAllowedCount = 8192
+
+    /// 자식 시스템 하나가 동시에 몇 벌까지 살 수 있는지.
+    /// 부모 파티클마다 한 벌씩 생기는 `follow`가 있어서 상한이 없으면 끝없이 는다.
+    public static let maxAllowedChildSystems = 64
 
     /// 씬 하나가 시뮬레이션할 수 있는 파티클 총량.
     ///
@@ -213,6 +280,11 @@ public struct ParticlePreset: Equatable, Sendable {
     public let malformedNames: [String]
     /// 스프라이트 시트를 훑을지, 한 장을 골라 고정할지.
     public let animationMode: ParticleAnimationMode
+    /// 이 프리셋이 거느리는 자식 시스템들. 경로만 들고 있다 —
+    /// 실제 프리셋은 참조 해석기가 있는 곳(`SceneDocument`)에서 읽어 붙인다.
+    public let childReferences: [ParticleChildReference]
+    /// 실제로 읽어 붙인 자식들. 참조 해석기가 있는 곳에서 채운다.
+    public let children: [ParticleChild]
 
     /// public struct의 memberwise 이니셜라이저는 internal이라 테스트 타깃에서
     /// 쓸 수 없다. Task 3의 시뮬레이션 테스트가 프리셋을 직접 만들어야 하므로
@@ -221,7 +293,9 @@ public struct ParticlePreset: Equatable, Sendable {
         maxCount: Int, startTime: Double, materialPath: String,
         emitters: [ParticleEmitter], initializers: [ParticleInitializer],
         operators: [ParticleOperator], unsupportedNames: [String],
-        malformedNames: [String] = [], animationMode: ParticleAnimationMode = .sequence
+        malformedNames: [String] = [], animationMode: ParticleAnimationMode = .sequence,
+        childReferences: [ParticleChildReference] = [],
+        children: [ParticleChild] = []
     ) {
         self.maxCount = maxCount
         self.startTime = startTime
@@ -232,6 +306,8 @@ public struct ParticlePreset: Equatable, Sendable {
         self.unsupportedNames = unsupportedNames
         self.malformedNames = malformedNames
         self.animationMode = animationMode
+        self.childReferences = childReferences
+        self.children = children
     }
 
     /// 씬의 조정값을 얹은 프리셋을 만든다.
@@ -256,7 +332,19 @@ public struct ParticlePreset: Equatable, Sendable {
             operators: operators,
             unsupportedNames: unsupportedNames,
             malformedNames: malformedNames,
-            animationMode: animationMode)
+            animationMode: animationMode,
+            childReferences: childReferences,
+            children: children)
+    }
+
+    /// 읽어 온 자식들을 붙인 사본.
+    public func withChildren(_ children: [ParticleChild]) -> ParticlePreset {
+        ParticlePreset(
+            maxCount: maxCount, startTime: startTime, materialPath: materialPath,
+            emitters: emitters, initializers: initializers, operators: operators,
+            unsupportedNames: unsupportedNames, malformedNames: malformedNames,
+            animationMode: animationMode, childReferences: childReferences,
+            children: children)
     }
 
     /// 총량 예산에 맞추기 위한 축소 배율. 줄일 필요가 없으면 1이다.
@@ -393,8 +481,27 @@ public struct ParticlePreset: Equatable, Sendable {
             operators: operators,
             unsupportedNames: Array(unsupportedNames).sorted(),
             malformedNames: Array(malformedNames).sorted(),
-            animationMode: ParticleAnimationMode.parse(json["animationmode"])
+            animationMode: ParticleAnimationMode.parse(json["animationmode"]),
+            childReferences: parseChildren(json["children"])
         )
+    }
+
+    /// `children` 항목을 읽는다. 이름이 없는 것은 버린다 — 가리킬 파일이 없다.
+    static func parseChildren(_ raw: Any?) -> [ParticleChildReference] {
+        var out: [ParticleChildReference] = []
+        for case let child as [String: Any] in (raw as? [Any] ?? []) {
+            guard let name = child["name"] as? String, !name.isEmpty else { continue }
+            // 자식 시스템 수의 상한. 파일 값이 없으면 하나로 본다 —
+            // 상시 구동 앱이라 모르는 채로 넉넉히 잡을 이유가 없다.
+            let declared = saturatingInt(getDouble(child["maxcount"]) ?? 1) ?? 1
+            out.append(ParticleChildReference(
+                name: name,
+                trigger: ParticleChildTrigger.parse(child["type"]),
+                maxCount: Swift.min(Swift.max(1, declared), maxAllowedChildSystems),
+                origin: (child["origin"] as? String).flatMap(Vec3.parse)
+                    ?? Vec3(x: 0, y: 0, z: 0)))
+        }
+        return out
     }
 
     /// 파일에서 온 Double을 트랩 없이 Int로 좁힌다.

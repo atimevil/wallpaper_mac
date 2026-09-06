@@ -42,6 +42,30 @@ public final class ParticleSystem {
     private var deadSlots: [Int] = []
     /// 시작할 때의 한꺼번에 방출을 이미 했는지. 한 번만 한다.
     private var didBurst = false
+
+    /// 이 시스템이 놓인 자리. 자식 시스템이 부모 파티클을 따라다닐 때 여기가 바뀐다.
+    /// 방출할 때 파티클 위치에 더해진다.
+    public var originOffset = Vec3(x: 0, y: 0, z: 0)
+
+    /// 이 프리셋이 거느리는 자식들(정의).
+    private let children: [ParticleChild]
+    /// 정의마다 지금 살아 있는 자식 시스템들.
+    private var childInstances: [[ChildInstance]]
+
+    /// 자식 시스템 한 벌.
+    private final class ChildInstance {
+        let system: ParticleSystem
+        /// `follow`일 때 따라다니는 부모 슬롯. 부모가 죽으면 nil이 되고,
+        /// 남은 파티클이 사라질 때까지만 더 산다.
+        var followSlot: Int?
+        /// 부모 사건이 끝나 더는 새로 뿌리지 않는 상태.
+        var isRetiring = false
+
+        init(system: ParticleSystem, followSlot: Int?) {
+            self.system = system
+            self.followSlot = followSlot
+        }
+    }
     /// 이미터별 방출 크레딧. 못 내보낸 몫이 쌓이지 않는지는 aliveCount로 관찰할 수 없어서
     /// (슬롯 수가 구조적 상한이라 항상 통과한다) 테스트가 이 값을 직접 본다.
     var emissionCredits: [Double] = []
@@ -54,6 +78,8 @@ public final class ParticleSystem {
     public init(preset: ParticlePreset, random: RandomSource) {
         self.preset = preset
         self.random = random
+        self.children = preset.children
+        self.childInstances = Array(repeating: [], count: preset.children.count)
 
         let maxCount = max(0, preset.maxCount)
         self.particleBuffer = Array(repeating: Particle(
@@ -94,6 +120,43 @@ public final class ParticleSystem {
         return result
     }
 
+    /// 그릴 것들을 프리셋별로 모아 준다. 자식까지 재귀로 훑는다.
+    ///
+    /// 열쇠는 자식 정의를 따라간 경로다(`"0"`, `"0.1"`). 렌더러를 그 열쇠로
+    /// 붙들어 두면 프레임마다 다시 만들지 않아도 된다.
+    public func renderableGroups(
+        prefix: String = "", depth: Int = 0
+    ) -> [(key: String, preset: ParticlePreset, particles: [Particle])] {
+        var out: [(key: String, preset: ParticlePreset, particles: [Particle])] = [
+            (prefix.isEmpty ? "0" : prefix, preset, particles)
+        ]
+        // 자식의 자식까지는 보되 그 아래로는 내려가지 않는다. 실물에서 두 단계면
+        // 충분하고, 순환 참조가 있어도 여기서 멈춘다.
+        guard depth < 2 else { return out }
+        for (index, instances) in childInstances.enumerated() {
+            guard !instances.isEmpty else { continue }
+            let key = (prefix.isEmpty ? "0" : prefix) + ".\(index)"
+            // 같은 정의에서 나온 여러 벌은 한 렌더러로 함께 그린다.
+            var merged: [Particle] = []
+            var nested: [String: (ParticlePreset, [Particle])] = [:]
+            for instance in instances {
+                for group in instance.system.renderableGroups(prefix: key, depth: depth + 1) {
+                    if group.key == key {
+                        merged.append(contentsOf: group.particles)
+                    } else {
+                        nested[group.key, default: (group.preset, [])].1
+                            .append(contentsOf: group.particles)
+                    }
+                }
+            }
+            out.append((key, children[index].preset, merged))
+            for (key, value) in nested.sorted(by: { $0.key < $1.key }) {
+                out.append((key, value.0, value.1))
+            }
+        }
+        return out
+    }
+
     /// Number of currently alive particles.
     public var aliveCount: Int {
         return numAlive
@@ -114,6 +177,9 @@ public final class ParticleSystem {
         if !didBurst {
             didBurst = true
             emitBurst()
+            // `type`이 없는 자식은 "한 번만, 시스템 원점에"다. 실물의 절반이
+            // 이 경우이고, 그런 프리셋은 내용 전부가 자식에 들어 있다.
+            spawnChildren(on: .once, at: originOffset, slot: nil)
         }
 
         // Emit new particles
@@ -122,6 +188,9 @@ public final class ParticleSystem {
         // Apply operators to alive particles
         applyOperators(dt: dt)
 
+        // 자식 시스템도 같은 시간만큼 굴린다.
+        updateChildren(dt: dt)
+
         // Age particles
         ageParticles(dt: dt)
     }
@@ -129,9 +198,59 @@ public final class ParticleSystem {
     private func removeDeadParticles() {
         for i in 0..<particleBuffer.count {
             if !particleBuffer[i].isAlive && particleBuffer[i].age < Double.infinity {
+                // 죽는 순간이 자식을 낳는 사건이다. 불꽃 폭발이 여기서 일어난다.
+                spawnChildren(on: .onDeath, at: particleBuffer[i].position, slot: i)
                 deadSlots.append(i)
                 particleBuffer[i].age = Double.infinity
                 numAlive -= 1
+            }
+        }
+    }
+
+    /// 부모 사건에 맞춰 자식 시스템을 한 벌 만든다.
+    ///
+    /// 상한을 넘으면 만들지 않는다 — `follow`는 부모 파티클마다 한 벌씩이라
+    /// 상한이 없으면 끝없이 는다.
+    private func spawnChildren(_ trigger: ParticleChildTrigger, at position: Vec3, slot: Int?) {
+        for (index, child) in children.enumerated() where child.reference.trigger == trigger {
+            guard childInstances[index].count < child.reference.maxCount else { continue }
+            let system = ParticleSystem(preset: child.preset, random: random)
+            system.originOffset = Vec3(
+                x: position.x + child.reference.origin.x,
+                y: position.y + child.reference.origin.y,
+                z: position.z + child.reference.origin.z)
+            childInstances[index].append(
+                ChildInstance(system: system, followSlot: trigger == .follow ? slot : nil))
+        }
+    }
+
+    /// `spawnChildren`의 이름 있는 짝. 사건 이름을 앞에 두어 읽기 쉽게 한다.
+    private func spawnChildren(
+        on trigger: ParticleChildTrigger, at position: Vec3, slot: Int?
+    ) {
+        spawnChildren(trigger, at: position, slot: slot)
+    }
+
+    /// 자식 시스템들을 한 프레임 굴린다.
+    ///
+    /// `follow`는 부모 파티클을 따라간다. 부모가 죽으면 더 따라갈 것이 없으므로
+    /// 새로 뿌리는 것만 멈추고, 이미 뿌린 파티클이 사라질 때까지 두었다가 치운다 —
+    /// 바로 지우면 꼬리가 뚝 끊긴다.
+    private func updateChildren(dt: Double) {
+        for index in childInstances.indices {
+            for instance in childInstances[index] {
+                if let slot = instance.followSlot {
+                    if particleBuffer.indices.contains(slot), particleBuffer[slot].isAlive {
+                        instance.system.originOffset = particleBuffer[slot].position
+                    } else {
+                        instance.followSlot = nil
+                        instance.isRetiring = true
+                    }
+                }
+                instance.system.update(deltaTime: dt)
+            }
+            childInstances[index].removeAll {
+                $0.isRetiring && $0.system.aliveCount == 0
             }
         }
     }
@@ -155,6 +274,8 @@ public final class ParticleSystem {
                 particle.age = 0
                 particleBuffer[slot] = particle
                 numAlive += 1
+                spawnChildren(on: .onSpawn, at: particle.position, slot: slot)
+                spawnChildren(on: .follow, at: particle.position, slot: slot)
             }
         }
     }
@@ -192,6 +313,8 @@ public final class ParticleSystem {
                         particle.age = 0
                         particleBuffer[slotIndex] = particle
                         numAlive += 1
+                        spawnChildren(on: .onSpawn, at: particle.position, slot: slotIndex)
+                        spawnChildren(on: .follow, at: particle.position, slot: slotIndex)
                     } else {
                         // Particle is invalid, put slot back
                         deadSlots.append(slotIndex)
@@ -236,9 +359,9 @@ public final class ParticleSystem {
                 z: cos(phi) * directions.z
             )
             particle.position = Vec3(
-                x: origin.x + unit.x * distance,
-                y: origin.y + unit.y * distance,
-                z: origin.z + unit.z * distance
+                x: originOffset.x + origin.x + unit.x * distance,
+                y: originOffset.y + origin.y + unit.y * distance,
+                z: originOffset.z + origin.z + unit.z * distance
             )
             applyEmitterSpeed(emitter.burst, direction: unit, to: &particle)
 
@@ -249,9 +372,9 @@ public final class ParticleSystem {
                 z: (distanceMin.z + random.next() * (distanceMax.z - distanceMin.z)) * directions.z
             )
             particle.position = Vec3(
-                x: origin.x + offset.x,
-                y: origin.y + offset.y,
-                z: origin.z + offset.z
+                x: originOffset.x + origin.x + offset.x,
+                y: originOffset.y + origin.y + offset.y,
+                z: originOffset.z + origin.z + offset.z
             )
             applyEmitterSpeed(emitter.burst, direction: offset, to: &particle)
         }

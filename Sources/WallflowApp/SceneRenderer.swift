@@ -22,8 +22,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 이 씬이 재생 중인 비디오 텍스처들. 렌더러가 소유한다.
     private var videos: [VideoTexture] = []
     /// 파티클 레이어마다 시뮬레이션과 렌더러 한 쌍. 매 프레임 전진시킨다.
-    private var particles: [(system: ParticleSystem, renderer: ParticleRenderer,
-                             textureRatio: Float)] = []
+    private var particles: [(system: ParticleSystem,
+                             groups: [String: (ParticleRenderer, Float)])] = []
     /// 직전 프레임 시각. 첫 프레임에는 없다.
     private var lastFrameTime: CFTimeInterval?
     /// 텍스트 레이어마다 스크립트와 구운 글자. 값이 바뀔 때만 다시 굽는다.
@@ -587,6 +587,58 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 파티클 텍스처가 스프라이트 시트면 그 배치를 읽는다.
     /// `rosepetals.tex`가 512x128에 102x128 프레임 5장이다. 시트인 줄 모르고
     /// uv 0..1로 샘플링하면 꽃잎 하나가 다섯 장을 뭉개 그린다.
+    /// 파티클 하나와 그 자식들의 렌더러를 만든다.
+    ///
+    /// 키는 `ParticleSystem.renderableGroups`와 같은 규칙을 쓴다 — 뿌리가 `"0"`,
+    /// 자식이 `"0.<차례>"`. 두 곳이 같은 규칙을 쓰지 않으면 자식이 조용히
+    /// 안 그려진다. 텍스처를 못 읽은 자식은 건너뛰고 나머지는 그대로 그린다.
+    private static func buildParticleRenderers(
+        preset: ParticlePreset, texturePath: String, blend: ParticleBlendMode,
+        key: String, instances: Int, layer: SceneLayer, compositor: MetalCompositor,
+        resolver: ReferenceResolver,
+        into out: inout [(key: String, renderer: ParticleRenderer, ratio: Float)],
+        skipped: inout [String]
+    ) {
+        guard let raw = resolver.data(for: texturePath) else {
+            skipped.append("\(layer.name): 파티클 텍스처를 찾을 수 없다: \(texturePath)")
+            return
+        }
+        do {
+            let decoded = try TexDecoder.decode(raw)
+            guard case .video = decoded else {
+                let texture = try compositor.makeTexture(from: decoded)
+                // 빌보드가 찌그러지지 않게 세로를 보정한다.
+                let ratio = texture.width > 0
+                    ? Float(texture.height) / Float(texture.width) : 1
+                // 같은 정의에서 나온 여러 벌이 한 렌더러를 함께 쓴다. 그만큼 자리를
+                // 잡아 두지 않으면 나중에 터진 불꽃이 잘려 나간다.
+                let capacity = min(preset.maxCount * max(1, instances),
+                                   ParticlePreset.maxAllowedCount)
+                let renderer = try compositor.makeParticleRenderer(
+                    maxCount: capacity, blend: blend, texture: texture,
+                    layerOrigin: SIMD3(Float(layer.origin.x), Float(layer.origin.y),
+                                       Float(layer.origin.z)),
+                    layerScale: SIMD3(Float(layer.scale.x), Float(layer.scale.y),
+                                      Float(layer.scale.z)),
+                    sheet: Self.spriteSheet(of: raw),
+                    animationMode: preset.animationMode)
+                out.append((key, renderer, ratio))
+                for (index, child) in preset.children.enumerated() {
+                    buildParticleRenderers(
+                        preset: child.preset, texturePath: child.texturePath,
+                        blend: child.blend, key: key + ".\(index)",
+                        instances: instances * max(1, child.reference.maxCount),
+                        layer: layer, compositor: compositor, resolver: resolver,
+                        into: &out, skipped: &skipped)
+                }
+                return
+            }
+            skipped.append("\(layer.name): 파티클 텍스처가 비디오다: \(texturePath)")
+        } catch {
+            skipped.append("\(layer.name): 파티클 텍스처 로드 실패 \(error)")
+        }
+    }
+
     private static func spriteSheet(of raw: Data) -> ParticleSpriteSheet? {
         guard let header = try? TexHeader.parse(raw), let sheet = header.spriteSheet,
               sheet.frameCount > 1,
@@ -664,8 +716,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var chains: [(chain: EffectChain, source: MTLTexture)] = []
 
         var videos: [VideoTexture] = []
-        var particles: [(system: ParticleSystem, renderer: ParticleRenderer,
-                         textureRatio: Float)] = []
+        var particles: [(system: ParticleSystem,
+                         groups: [String: (ParticleRenderer, Float)])] = []
         var texts: [TextState] = []
         var sounds: [(player: AVAudioPlayer, sceneVolume: Float)] = []
         var drawable: [(QuadInstance, LayerSource)] = []
@@ -832,42 +884,35 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 }
 
             case .particle(let preset, let texturePath, let blend):
-                guard let raw = resolver.data(for: texturePath) else {
-                    skipped.append("\(layer.name): 파티클 텍스처를 찾을 수 없다: \(texturePath)")
+                // 자식까지 한 번에 만든다. 자식 파티클은 부모와 **다른 텍스처와
+                // 다른 혼합**을 쓴다(불꽃 잔해는 가산, 빗줄기 꼬리는 반투명) —
+                // 그래서 렌더러가 그룹마다 하나씩 필요하다.
+                var built: [(key: String, renderer: ParticleRenderer, ratio: Float)] = []
+                Self.buildParticleRenderers(
+                    preset: preset, texturePath: texturePath, blend: blend, key: "0",
+                    instances: 1, layer: layer, compositor: compositor, resolver: resolver,
+                    into: &built, skipped: &skipped)
+                guard let root = built.first, root.key == "0" else {
+                    skipped.append("\(layer.name): 파티클 렌더러를 만들지 못했다: \(texturePath)")
                     continue
                 }
-                do {
-                    let decoded = try TexDecoder.decode(raw)
-                    guard case .video = decoded else {
-                        let texture = try compositor.makeTexture(from: decoded)
-                        // 빌보드가 찌그러지지 않게 세로를 보정한다.
-                        let ratio = texture.width > 0
-                            ? Float(texture.height) / Float(texture.width) : 1
-                        let renderer = try compositor.makeParticleRenderer(
-                            maxCount: preset.maxCount, blend: blend, texture: texture,
-                            layerOrigin: SIMD3(Float(layer.origin.x), Float(layer.origin.y),
-                                               Float(layer.origin.z)),
-                            layerScale: SIMD3(Float(layer.scale.x), Float(layer.scale.y),
-                                              Float(layer.scale.z)),
-                            sheet: Self.spriteSheet(of: raw),
-                            animationMode: preset.animationMode)
-                        // 시드를 레이어 id로 나눠 레이어마다 다른 수열을 쓴다.
-                        // 같은 시드를 공유하면 눈과 벚꽃이 똑같이 움직인다.
-                        let system = ParticleSystem(
-                            preset: preset, random: SeededRandom(seed: UInt64(bitPattern: Int64(layer.id))))
-                        if !system.unimplementedOperators.isEmpty {
-                            degraded.append(
-                                "\(layer.name): 아직 처리하지 않는 연산자 "
-                                    + system.unimplementedOperators.joined(separator: ", "))
-                        }
-                        particles.append((system, renderer, ratio))
-                        drawable.append((quad, .particles(renderer)))
-                        break
-                    }
-                    skipped.append("\(layer.name): 파티클 텍스처가 비디오다: \(texturePath)")
-                } catch {
-                    skipped.append("\(layer.name): 파티클 텍스처 로드 실패 \(error)")
+                // 시드를 레이어 id로 나눠 레이어마다 다른 수열을 쓴다.
+                // 같은 시드를 공유하면 눈과 벚꽃이 똑같이 움직인다.
+                let system = ParticleSystem(
+                    preset: preset,
+                    random: SeededRandom(seed: UInt64(bitPattern: Int64(layer.id))))
+                if !system.unimplementedOperators.isEmpty {
+                    degraded.append(
+                        "\(layer.name): 아직 처리하지 않는 연산자 "
+                            + system.unimplementedOperators.joined(separator: ", "))
                 }
+                var groups: [String: (ParticleRenderer, Float)] = [:]
+                for entry in built {
+                    groups[entry.key] = (entry.renderer, entry.ratio)
+                    // 만든 순서대로 그린다 — 부모가 먼저, 자식이 그 위에.
+                    drawable.append((quad, .particles(entry.renderer)))
+                }
+                particles.append((system, groups))
 
             case .sound(let sound):
                 // 그리지 않는다. 소리만 준비해 둔다.
@@ -1098,7 +1143,17 @@ extension SceneRenderer: MTKViewDelegate {
             lastFrameTime = now
             for entry in particles {
                 entry.system.update(deltaTime: dt)
-                entry.renderer.update(from: entry.system, textureRatio: entry.textureRatio)
+                // 자식이 아직 안 생겼거나 이미 사라진 그룹은 목록에 없다.
+                // 그 렌더러는 비워 둬야 마지막 프레임이 화면에 남지 않는다.
+                var seen: Set<String> = []
+                for group in entry.system.renderableGroups() {
+                    guard let target = entry.groups[group.key] else { continue }
+                    seen.insert(group.key)
+                    target.0.update(particles: group.particles, textureRatio: target.1)
+                }
+                for (key, target) in entry.groups where !seen.contains(key) {
+                    target.0.update(particles: [], textureRatio: target.1)
+                }
             }
         }
         compositor?.draw(in: view)

@@ -561,7 +561,7 @@ public struct SceneDocument: Sendable {
     }
 
     /// 파티클 프리셋을 따라가 레이어 내용을 판정한다.
-    private static func resolveParticleContent(
+    static func resolveParticleContent(
         presetPath: String, resolver: ReferenceResolver, override: ParticleOverride
     ) -> LayerContent {
         // 프리셋 JSON을 읽는다
@@ -613,8 +613,49 @@ public struct SceneDocument: Sendable {
 
         // 텍스처 경로를 만든다
         let texturePath = "materials/\(textureName).tex"
-        return .particle(preset: preset.applying(override),
+        // 자식 프리셋을 읽어 붙인다. 여기가 참조 해석기가 있는 유일한 자리다.
+        let withChildren = preset.withChildren(
+            resolveParticleChildren(preset.childReferences, resolver: resolver, depth: 0))
+        return .particle(preset: withChildren.applying(override),
                          texturePath: texturePath, blend: blend)
+    }
+
+    /// 자식 프리셋을 재귀로 읽는다.
+    ///
+    /// 실물에서 두 단계면 충분하다(`rain_screen_4k` → `rain_screen_fast_4k` →
+    /// `rain_screen_fast_child`). 깊이를 막아 두면 서로를 가리키는 파일이 와도
+    /// 여기서 멈춘다 — 창작마당 파일은 신뢰할 수 없는 입력이다.
+    static let maxParticleChildDepth = 2
+
+    static func resolveParticleChildren(
+        _ references: [ParticleChildReference], resolver: ReferenceResolver, depth: Int
+    ) -> [ParticleChild] {
+        guard depth < maxParticleChildDepth else { return [] }
+        var out: [ParticleChild] = []
+        for reference in references {
+            guard let json = resolver.json(for: reference.name),
+                  let child = ParticlePreset.parse(json),
+                  let material = resolver.json(for: child.materialPath),
+                  let passes = material["passes"] as? [[String: Any]],
+                  let pass = passes.first,
+                  let textures = pass["textures"] as? [Any],
+                  let textureName = textures.first as? String
+            else { continue }
+            // 부모와 같은 이유로 굴절 자식은 건너뛴다.
+            let refractOn = ((pass["combos"] as? [String: Any])?["REFRACT"] as? NSNumber)?
+                .intValue ?? 0
+            if refractOn != 0, textures.count >= 2 { continue }
+            let blend: ParticleBlendMode =
+                (pass["blending"] as? String) == "additive" ? .additive : .translucent
+            let nested = resolveParticleChildren(
+                child.childReferences, resolver: resolver, depth: depth + 1)
+            out.append(ParticleChild(
+                reference: reference,
+                preset: child.withChildren(nested),
+                texturePath: "materials/\(textureName).tex",
+                blend: blend))
+        }
+        return out
     }
 
     /// 머티리얼을 읽어 이 레이어가 무엇인지 판정한다.
