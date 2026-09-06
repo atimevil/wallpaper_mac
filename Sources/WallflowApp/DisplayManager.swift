@@ -10,6 +10,11 @@ final class DisplayManager {
     /// 어떤 화면에 어떤 배경화면이 배정됐는지. 재구성 후 복원에 쓴다.
     private var assignments: [CGDirectDisplayID: WallpaperItem] = [:]
     private var lastDirective: PlaybackDirective = .playing(fps: PowerPolicy.normalFPS)
+    /// 모든 화면에 건 배경화면. 새로 연결된 모니터에도 이것을 건다.
+    ///
+    /// 배정 이력이 없는 화면을 빈 채로 두면, 모니터를 꽂았을 때 거기만
+    /// 기본 바탕화면이 보인다. 쓰던 배경화면이 확장되는 것이 기대에 맞다.
+    private var defaultItem: WallpaperItem?
 
     /// 배경 윈도우가 전부 가려졌는지. PowerMonitor가 poll 시점에 읽는다.
     var isOccluded: Bool {
@@ -63,8 +68,9 @@ final class DisplayManager {
             window.orderFront(nil)
             windows[id] = window
 
-            // 이 화면에 배정이 있었으면 복원한다.
-            if let item = assignments[id] {
+            // 이 화면에 배정이 있었으면 그것을, 없으면 지금 쓰는 것을 건다.
+            if let item = assignments[id] ?? defaultItem {
+                assignments[id] = item
                 try? attach(item, to: id)
             }
         }
@@ -72,6 +78,8 @@ final class DisplayManager {
 
     /// 배경화면을 배정한다. displayID가 nil이면 모든 화면에 건다.
     func assign(_ item: WallpaperItem, toDisplay id: CGDirectDisplayID?) throws {
+        // 화면을 특정하지 않았으면 앞으로 연결될 화면에도 이것을 건다.
+        if id == nil { defaultItem = item }
         let targets = id.map { [$0] } ?? Array(windows.keys)
         guard !targets.isEmpty else { return }
         var firstError: Error?
