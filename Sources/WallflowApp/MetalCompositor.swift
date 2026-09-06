@@ -75,6 +75,10 @@ final class MetalCompositor {
     /// 조용히 보통 합성으로 그리면 사용자는 시계가 왜 하얗게 뜨는지 알 수 없다.
     let blendUnavailableReason: String?
     private let solidBlendPipeline: MTLRenderPipelineState?
+    /// 합성 레이어가 읽을 그림을 레이어 좌표계로 떠내는 파이프라인.
+    private let compositionPipeline: MTLRenderPipelineState?
+    /// 그 그림을 담는 텍스처. 레이어마다 크기가 달라 번호로 들고 있는다.
+    private var compositionSources: [Int: MTLTexture] = [:]
     private let solidPipeline: MTLRenderPipelineState
     private let vertexBuffer: MTLBuffer
     private let sampler: MTLSamplerState
@@ -167,6 +171,12 @@ final class MetalCompositor {
         descriptor.fragmentFunction = library.makeFunction(name: "solid_blend_fragment")
         solidBlendPipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
 
+        // 합성 레이어가 읽을 그림을 떠내는 패스. 목적지를 통째로 덮으므로
+        // 블렌딩이 필요 없다.
+        descriptor.colorAttachments[0].isBlendingEnabled = false
+        descriptor.fragmentFunction = library.makeFunction(name: "composition_extract_fragment")
+        compositionPipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
+
         let samplerDescriptor = MTLSamplerDescriptor()
         samplerDescriptor.minFilter = .linear
         samplerDescriptor.magFilter = .linear
@@ -252,6 +262,58 @@ final class MetalCompositor {
     /// 그리는 중인 텍스처를 그대로 읽을 수는 없다 — 같은 텍스처를 읽으면서
     /// 쓰면 결과가 정의되지 않는다. 그래서 한 장 떠 놓고 그것을 읽는다.
     private var backdropTexture: MTLTexture?
+
+    /// 합성 레이어가 읽을 그림을 레이어 좌표계로 떠낸다.
+    ///
+    /// 크기는 그 상자가 화면에서 차지하는 픽셀 수다. 너무 크면 죈다 —
+    /// 창작마당 씬이 4551x2560짜리 레이어를 두기도 한다.
+    private func extractComposition(
+        id: Int, quad: QuadInstance, uniforms: QuadUniforms,
+        from frame: MTLTexture, commands: MTLCommandBuffer
+    ) -> MTLTexture? {
+        guard let compositionPipeline, projection.x > 0, projection.y > 0 else { return nil }
+        let scaleX = Double(frame.width) / Double(projection.x)
+        let scaleY = Double(frame.height) / Double(projection.y)
+        let width = Int((Double(abs(quad.size.x)) * scaleX).rounded())
+        let height = Int((Double(abs(quad.size.y)) * scaleY).rounded())
+        let bounded = (
+            Swift.min(Swift.max(width, 1), frame.width),
+            Swift.min(Swift.max(height, 1), frame.height))
+        var target = compositionSources[id]
+        if target == nil || target?.width != bounded.0 || target?.height != bounded.1 {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: Self.colorPixelFormat,
+                width: bounded.0, height: bounded.1, mipmapped: false)
+            descriptor.usage = [.shaderRead, .renderTarget]
+            descriptor.storageMode = .private
+            target = device.makeTexture(descriptor: descriptor)
+            compositionSources[id] = target
+        }
+        guard let target else { return nil }
+
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return nil }
+        encoder.setRenderPipelineState(compositionPipeline)
+        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+        // 목적지를 꽉 채우는 쿼드. 배치는 목적지 기준이라 회전 없이 그린다.
+        var fill = QuadUniforms(
+            origin: SIMD2(Float(bounded.0) / 2, Float(bounded.1) / 2),
+            size: SIMD2(Float(bounded.0), Float(bounded.1)),
+            projection: SIMD2(Float(bounded.0), Float(bounded.1)),
+            color: SIMD4(1, 1, 1, 1), rotation: 0)
+        encoder.setVertexBytes(&fill, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+        // 읽을 자리는 원래 레이어의 배치다.
+        var source = uniforms
+        encoder.setFragmentBytes(&source, length: MemoryLayout<QuadUniforms>.stride, index: 0)
+        encoder.setFragmentTexture(frame, index: 0)
+        encoder.setFragmentSamplerState(sampler, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+        return target
+    }
 
     private func backdrop(width: Int, height: Int) -> MTLTexture? {
         if let backdropTexture, backdropTexture.width == width,
@@ -364,7 +426,14 @@ final class MetalCompositor {
                 // 그 지점까지 그려진 화면이 이 레이어의 입력이다. 인코더를 끊어
                 // 지금까지 그린 것을 텍스처에 확정한 뒤 넘긴다.
                 encoder.endEncoding()
-                let result = offscreen.flatMap { composite?(id, commands, $0) }
+                // 이펙트가 상자를 화면 삼아 돌도록, 상자 자리의 그림을 레이어
+                // 좌표계로 떠서 넘긴다. 화면 전체를 넘기면 오디오 막대가
+                // 화면 아래에 그려지고 상자에는 배경만 비친다.
+                let source = offscreen.flatMap {
+                    extractComposition(id: id, quad: quad, uniforms: uniforms,
+                                       from: $0, commands: commands)
+                }
+                let result = source.flatMap { composite?(id, commands, $0) }
                 guard let restarted = startEncoder(clear: false) else { return }
                 encoder = restarted
                 guard let result else { continue }

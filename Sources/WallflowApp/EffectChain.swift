@@ -375,8 +375,13 @@ final class EffectChain {
         let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
 
         if ProcessInfo.processInfo.environment["WALLFLOW_EFFECT_DEBUG"] != nil {
-            let vs = vertex.uniforms.map { "\($0.type) \($0.name)" }.joined(separator: ", ")
-            let fs = fragment.uniforms.map { "\($0.type) \($0.name)" }.joined(separator: ", ")
+            // 배열 길이까지 찍는다. 길이를 잃으면 오디오 스펙트럼이 첫 성분만
+            // 채워져 막대가 안 뜨는데, 이름만 봐서는 멀쩡해 보인다.
+            func describe(_ u: GLSLTranslator.Uniform) -> String {
+                u.count.map { "\(u.type) \(u.name)[\($0)]" } ?? "\(u.type) \(u.name)"
+            }
+            let vs = vertex.uniforms.map(describe).joined(separator: ", ")
+            let fs = fragment.uniforms.map(describe).joined(separator: ", ")
             FileHandle.standardError.write(Data("""
             EFFECTDBG \(pass.shaderName)
               vert 유니폼: \(vs)

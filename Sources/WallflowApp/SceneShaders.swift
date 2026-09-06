@@ -228,6 +228,29 @@ enum SceneShaders {
         return float4(blended, max(dst.a, color.a));
     }
 
+    /// 합성 레이어가 읽을 그림을 **레이어 좌표계로** 떠낸다.
+    ///
+    /// 입력은 그 지점까지 그려진 화면 전체다. 그대로 넘기면 이펙트가 화면
+    /// 전체를 상대로 돌아, 상자 안에 그려야 할 오디오 막대가 화면 아래쪽에
+    /// 그려지고 상자에는 배경만 비친다(실물 "Audio Visualizer"가 그랬다).
+    ///
+    /// 그래서 상자 크기의 텍스처를 만들고, 그 uv를 레이어의 자리·크기·회전으로
+    /// 화면 좌표에 되돌려 읽는다. `quad_vertex`가 하는 배치의 역이다. 이렇게
+    /// 뜨면 아무것도 안 하는 통과 레이어는 화면과 이어져 **보이지 않고**,
+    /// 이펙트는 상자를 화면 삼아 돈다.
+    fragment float4 composition_extract_fragment(
+        VertexOut in [[stage_in]],
+        texture2d<float> tex [[texture(0)]],
+        sampler samp [[sampler(0)]],
+        constant QuadUniforms &u [[buffer(0)]]
+    ) {
+        float2 local = (in.uv - 0.5) * u.size;
+        float c = cos(u.rotation), s = sin(u.rotation);
+        float2 rotated = float2(local.x * c - local.y * s, local.x * s + local.y * c);
+        float2 world = float2(u.origin.x, u.projection.y - u.origin.y) + rotated;
+        return tex.sample(samp, world / u.projection);
+    }
+
     fragment float4 solid_fragment(
         VertexOut in [[stage_in]],
         constant float4 &color [[buffer(0)]]
