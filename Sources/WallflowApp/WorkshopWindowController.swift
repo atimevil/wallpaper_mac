@@ -18,7 +18,10 @@ final class WorkshopWindowController: NSWindowController {
     private let tableView = NSTableView()
     private let searchField = NSSearchField()
     private let sortPopup = NSPopUpButton()
-    private let sceneOnlyCheckbox = NSButton(checkboxWithTitle: "씬만 보기", target: nil, action: nil)
+    private let kindPopup = NSPopUpButton()
+    private let hideInstalledCheckbox =
+        NSButton(checkboxWithTitle: "받은 것 숨기기", target: nil, action: nil)
+    private let loginButton = NSButton(title: "스팀 로그인", target: nil, action: nil)
     private let accountField = NSTextField()
     private let statusLabel = NSTextField(labelWithString: "")
     private let downloadButton = NSButton(title: "받아서 추가", target: nil, action: nil)
@@ -63,13 +66,20 @@ final class WorkshopWindowController: NSWindowController {
         sortPopup.target = self
         sortPopup.action = #selector(reload)
 
-        sceneOnlyCheckbox.state = .off
-        sceneOnlyCheckbox.target = self
-        sceneOnlyCheckbox.action = #selector(refreshTable)
+        // 종류 필터. 목록은 이미 받아 왔으므로 다시 요청하지 않고 화면만 거른다.
+        for title in Self.kindTitles { kindPopup.addItem(withTitle: title) }
+        kindPopup.target = self
+        kindPopup.action = #selector(refreshTable)
+
+        hideInstalledCheckbox.state = .off
+        hideInstalledCheckbox.target = self
+        hideInstalledCheckbox.action = #selector(refreshTable)
 
         let refreshButton = NSButton(title: "새로고침", target: self, action: #selector(reload))
 
-        let top = NSStackView(views: [searchField, sortPopup, sceneOnlyCheckbox, refreshButton])
+        let top = NSStackView(views: [
+            searchField, sortPopup, kindPopup, hideInstalledCheckbox, refreshButton,
+        ])
         top.orientation = .horizontal
         top.spacing = 8
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -109,8 +119,11 @@ final class WorkshopWindowController: NSWindowController {
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         statusLabel.textColor = .secondaryLabelColor
 
+        loginButton.target = self
+        loginButton.action = #selector(openLoginTerminal)
+
         let bottom = NSStackView(views: [
-            NSTextField(labelWithString: "계정:"), accountField,
+            NSTextField(labelWithString: "계정:"), accountField, loginButton,
             spinner, statusLabel, downloadButton,
         ])
         bottom.orientation = .horizontal
@@ -161,9 +174,22 @@ final class WorkshopWindowController: NSWindowController {
         }
     }
 
-    /// 화면에 쓰는 목록. 체크박스가 켜져 있으면 씬만 남긴다.
+    /// 종류 필터의 표시 이름. 순서가 곧 팝업 순서다.
+    static let kindTitles = ["모든 종류", "씬", "비디오", "웹"]
+
+    /// 화면에 쓰는 목록. 필터는 화면에서만 건다 — 다시 요청하지 않는다.
     private var visibleItems: [WorkshopItem] {
-        sceneOnlyCheckbox.state == .on ? items.filter { $0.kind == .scene } : items
+        var list = items
+        switch kindPopup.indexOfSelectedItem {
+        case 1: list = list.filter { $0.kind == .scene }
+        case 2: list = list.filter { $0.kind == .video }
+        case 3: list = list.filter { $0.kind == .web }
+        default: break
+        }
+        if hideInstalledCheckbox.state == .on {
+            list = list.filter { !installer.isInstalled(id: $0.id) }
+        }
+        return list
     }
 
     @objc private func refreshTable() {
@@ -256,18 +282,58 @@ final class WorkshopWindowController: NSWindowController {
     }
 
     /// 자격 증명은 이 앱이 만지지 않는다. 사용자가 터미널에서 한 번 로그인해야 한다.
+    ///
+    /// 비밀번호 프롬프트에는 진짜 TTY가 필요하다. 앱 안에서 받으면 비밀번호를
+    /// 우리가 만지게 되고, 그건 배경화면 앱이 할 일이 아니다. 대신 터미널을 열어
+    /// 명령까지 넣어 준다 — 사용자는 비밀번호만 치면 된다.
+    @objc private func openLoginTerminal() {
+        saveAccount()
+        let account = accountField.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !account.isEmpty else {
+            present(title: "계정 이름이 필요하다",
+                    message: "스팀 계정 이름을 먼저 넣으세요. 비밀번호가 아니라 계정 이름입니다.")
+            return
+        }
+        // 계정 이름이 그대로 셸에 들어가므로 스팀이 허용하는 글자만 남긴다.
+        let safe = account.filter { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+        guard safe == account else {
+            present(title: "계정 이름에 쓸 수 없는 글자가 있다",
+                    message: "영문·숫자·밑줄·붙임표만 쓸 수 있습니다.")
+            return
+        }
+        let script = "tell application \"Terminal\"\n"
+            + "activate\n"
+            + "do script \"steamcmd +login \(safe)\"\n"
+            + "end tell"
+        guard let apple = NSAppleScript(source: script) else { return }
+        var error: NSDictionary?
+        apple.executeAndReturnError(&error)
+        if error != nil {
+            present(title: "터미널을 열지 못했다",
+                    message: "터미널에서 직접 `steamcmd +login \(safe)`를 실행하세요.")
+            return
+        }
+        statusLabel.stringValue = "터미널에서 로그인한 뒤 다시 받기를 누르세요"
+    }
+
     private func presentLoginHelp(account: String?) {
         let name = account?.isEmpty == false ? account! : "<계정이름>"
-        present(
-            title: "스팀 로그인이 필요하다",
-            message: """
-            터미널에서 아래를 한 번 실행해 로그인하세요. 비밀번호와 Steam Guard 코드를 \
-            물어봅니다. 이 앱은 비밀번호를 저장하지도 다루지도 않습니다.
+        let alert = NSAlert()
+        alert.messageText = "스팀 로그인이 필요하다"
+        alert.informativeText = """
+            로그인 세션이 만료됐습니다. 터미널에서 한 번 로그인하면 다시 이어집니다.
+            비밀번호와 Steam Guard 코드를 터미널이 직접 받습니다 — 이 앱은 비밀번호를 \
+            저장하지도 다루지도 않습니다.
 
                 steamcmd +login \(name)
-
-            로그인이 끝나면 `quit`으로 나온 뒤 다시 받기를 누르세요.
-            """)
+            """
+        alert.addButton(withTitle: "터미널 열기")
+        alert.addButton(withTitle: "닫기")
+        let handler: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            if response == .alertFirstButtonReturn { self?.openLoginTerminal() }
+        }
+        if let window { alert.beginSheetModal(for: window, completionHandler: handler) }
+        else { handler(alert.runModal()) }
     }
 
     // MARK: - 잡동사니
