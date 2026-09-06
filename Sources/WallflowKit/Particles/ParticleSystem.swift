@@ -11,6 +11,11 @@ public struct Particle: Equatable, Sendable {
     public var alpha: Double
     public var age: Double
     public var lifetime: Double
+    /// 스프라이트 시트에서 어느 칸을 쓸지 정하는 0~1 난수. 태어날 때 한 번 정한다.
+    ///
+    /// `animationmode: randomframe`인 프리셋은 파티클마다 **한 장을 골라 고정**한다.
+    /// 수명에 따라 훑으면 빗방울이 16장을 오가며 깜빡인다(실물에서 확인).
+    public var frameSeed: Double = 0
 
     public var isAlive: Bool {
         age < lifetime
@@ -180,7 +185,8 @@ public final class ParticleSystem {
             size: 1,
             alpha: 1,
             age: 0,
-            lifetime: 1
+            lifetime: 1,
+            frameSeed: random.next()
         )
 
         // Apply emitter position and velocity

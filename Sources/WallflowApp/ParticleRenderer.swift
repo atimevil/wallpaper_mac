@@ -69,6 +69,8 @@ final class ParticleRenderer {
     private var instanceCount = 0
     private var textureRatio: Float = 1
     private let sheet: ParticleSpriteSheet?
+    /// 시트를 훑을지, 한 장을 골라 고정할지.
+    private let animationMode: ParticleAnimationMode
 
     /// - Parameters:
     ///   - library: 컴포지터가 이미 컴파일해 둔 셰이더 라이브러리. 파티클 레이어마다
@@ -83,10 +85,12 @@ final class ParticleRenderer {
         sampler: MTLSamplerState,
         layerOrigin: SIMD3<Float>,
         layerScale: SIMD3<Float>,
-        sheet: ParticleSpriteSheet?
+        sheet: ParticleSpriteSheet?,
+        animationMode: ParticleAnimationMode
     ) throws {
         self.layerOrigin = layerOrigin
         self.layerScale = layerScale
+        self.animationMode = animationMode
         // 빌보드는 정사각형 하나라 축별 배율을 표현할 수 없다. 평균이 가장 덜 틀린다.
         let averaged = (abs(layerScale.x) + abs(layerScale.y)) / 2
         self.sizeScale = averaged.isFinite && averaged > 0 ? averaged : 1
@@ -166,12 +170,23 @@ final class ParticleRenderer {
         instanceCount = count
     }
 
-    /// 스프라이트 시트는 파티클이 사는 동안 프레임을 훑는다. 꽃잎이 도는 것처럼
-    /// 보이게 하는 것이 시트의 용도다. 시트가 아니면 항상 0이다.
+    /// 어느 칸을 그릴지.
+    ///
+    /// 기본은 사는 동안 칸을 훑는 것이다 — 꽃잎이 도는 것처럼 보이게 하는 용도다.
+    /// 하지만 화면에 맺힌 빗방울 프리셋은 `animationmode: randomframe`이라
+    /// **파티클마다 한 장을 골라 고정**해야 한다. 훑으면 방울이 모양을 바꾸며
+    /// 깜빡인다(실물에서 확인). 시트가 아니면 항상 0이다.
     private func frameIndex(for p: Particle) -> Float {
-        guard let sheet, sheet.frameCount > 1, p.lifetime > 0 else { return 0 }
-        let progress = min(max(p.age / p.lifetime, 0), 0.999)
-        return Float(Int(progress * Double(sheet.frameCount)))
+        guard let sheet, sheet.frameCount > 1 else { return 0 }
+        switch animationMode {
+        case .randomFrame:
+            let seed = min(max(p.frameSeed, 0), 0.999)
+            return Float(Int(seed * Double(sheet.frameCount)))
+        case .sequence:
+            guard p.lifetime > 0 else { return 0 }
+            let progress = min(max(p.age / p.lifetime, 0), 0.999)
+            return Float(Int(progress * Double(sheet.frameCount)))
+        }
     }
 
     /// 살아 있는 파티클이 없으면 아무것도 인코딩하지 않는다.

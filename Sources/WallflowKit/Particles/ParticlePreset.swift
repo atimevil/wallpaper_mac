@@ -119,6 +119,21 @@ public struct ParticleOverride: Equatable, Sendable {
     }
 }
 
+/// 스프라이트 시트를 어떻게 넘길지.
+public enum ParticleAnimationMode: String, Equatable, Sendable {
+    /// 수명에 따라 칸을 훑는다. 꽃잎이 도는 것처럼 보이게 하는 용도다.
+    case sequence
+    /// 파티클마다 한 장을 골라 **고정**한다. 화면에 맺힌 빗방울이 이 방식이다 —
+    /// 훑으면 방울이 모양을 바꾸며 깜빡인다.
+    case randomFrame
+
+    /// 파일의 값. `null`이거나 없으면 훑는 쪽이 기본이다.
+    public static func parse(_ raw: Any?) -> ParticleAnimationMode {
+        guard let text = raw as? String else { return .sequence }
+        return text == "randomframe" ? .randomFrame : .sequence
+    }
+}
+
 public struct ParticlePreset: Equatable, Sendable {
     /// maxcount는 파일에서 온 값이고 시뮬레이션 버퍼 크기를 정한다.
     /// 실물 프리셋의 최대가 300이므로 8192는 충분히 관대하다.
@@ -155,6 +170,8 @@ public struct ParticlePreset: Equatable, Sendable {
     /// 깨졌으면, 나머지가 정상 동작하는 중에도 그 이름이 여기 들어간다.
     /// "이 타입이 통째로 망가졌다"가 아니라 "이 이름의 엔트리 중 하나 이상을 버렸다"로 읽어야 한다.
     public let malformedNames: [String]
+    /// 스프라이트 시트를 훑을지, 한 장을 골라 고정할지.
+    public let animationMode: ParticleAnimationMode
 
     /// public struct의 memberwise 이니셜라이저는 internal이라 테스트 타깃에서
     /// 쓸 수 없다. Task 3의 시뮬레이션 테스트가 프리셋을 직접 만들어야 하므로
@@ -162,7 +179,8 @@ public struct ParticlePreset: Equatable, Sendable {
     public init(
         maxCount: Int, startTime: Double, materialPath: String,
         emitters: [ParticleEmitter], initializers: [ParticleInitializer],
-        operators: [ParticleOperator], unsupportedNames: [String], malformedNames: [String] = []
+        operators: [ParticleOperator], unsupportedNames: [String],
+        malformedNames: [String] = [], animationMode: ParticleAnimationMode = .sequence
     ) {
         self.maxCount = maxCount
         self.startTime = startTime
@@ -172,6 +190,7 @@ public struct ParticlePreset: Equatable, Sendable {
         self.operators = operators
         self.unsupportedNames = unsupportedNames
         self.malformedNames = malformedNames
+        self.animationMode = animationMode
     }
 
     /// 씬의 조정값을 얹은 프리셋을 만든다.
@@ -195,7 +214,8 @@ public struct ParticlePreset: Equatable, Sendable {
             },
             operators: operators,
             unsupportedNames: unsupportedNames,
-            malformedNames: malformedNames)
+            malformedNames: malformedNames,
+            animationMode: animationMode)
     }
 
     /// 총량 예산에 맞추기 위한 축소 배율. 줄일 필요가 없으면 1이다.
@@ -331,7 +351,8 @@ public struct ParticlePreset: Equatable, Sendable {
             initializers: initializers,
             operators: operators,
             unsupportedNames: Array(unsupportedNames).sorted(),
-            malformedNames: Array(malformedNames).sorted()
+            malformedNames: Array(malformedNames).sorted(),
+            animationMode: ParticleAnimationMode.parse(json["animationmode"])
         )
     }
 

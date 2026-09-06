@@ -848,4 +848,107 @@ extension SceneDocumentTests {
             return XCTFail("이펙트 없는 후처리는 건너뛴다: \(layer.content)")
         }
     }
+
+    /// 굴절 파티클은 그리지 않는다.
+    ///
+    /// 재질의 콤보에 `REFRACT`가 있으면 그 스프라이트는 색이 아니라 **배경을
+    /// 휘게 하는 렌즈**다. 함께 선언된 노멀맵으로 뒤 그림을 굴절시켜야 유리에
+    /// 맺힌 물방울로 보인다. 우리 파티클 파이프라인은 배경을 읽지 못하고,
+    /// 그대로 그리면 텍스처가 흰 덩어리라 화면에 불투명한 흰 점이 뜬다.
+    func testRefractiveParticleIsSkipped() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "雨滴屏幕", "particle": "particles/rain.json",
+                          "origin": "10.00000 10.00000 0.00000"}]}
+            """,
+            extras: [
+                "particles/rain.json":
+                    #"{"maxcount": 8, "material": "materials/rain.json", "emitter": [], "initializer": []}"#,
+                "materials/rain.json": """
+                    {"passes": [{"shader": "genericparticle",
+                     "textures": ["particle/water/rain_drops_sheet",
+                                  "particle/water/rain_drops_sheet_normal"],
+                     "combos": {"REFRACT": 1}}]}
+                    """,
+            ])
+        let layer = try XCTUnwrap(SceneDocument.load(from: reader).layers.first)
+        guard case .unsupported(let reason) = layer.content else {
+            return XCTFail("굴절 파티클을 그리면 흰 덩어리가 된다: \(layer.content)")
+        }
+        XCTAssertTrue(reason.contains("굴절"), "이유: \(reason)")
+    }
+
+    /// 콤보가 없는 파티클은 그대로 그린다. 내리는 비(`rainperspective`)가 이쪽이라,
+    /// 굴절만 건너뛰고 비 자체는 남아야 한다.
+    func testNonRefractiveParticleStillDraws() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "雨景远景", "particle": "particles/rain.json",
+                          "origin": "10.00000 10.00000 0.00000"}]}
+            """,
+            extras: [
+                "particles/rain.json":
+                    #"{"maxcount": 8, "material": "materials/rain.json", "emitter": [], "initializer": []}"#,
+                // 콤보는 있는데 `REFRACT`만 없다. 실물 잎사귀·꽃잎 재질이 이 꼴이라,
+                // "콤보가 있으면 건너뛴다"로 잘못 만들면 그것들까지 사라진다.
+                "materials/rain.json": """
+                    {"passes": [{"shader": "genericparticle",
+                     "textures": ["particle/drop"], "combos": {"CUTOUT": 1}}]}
+                    """,
+            ])
+        let layer = try XCTUnwrap(SceneDocument.load(from: reader).layers.first)
+        guard case .particle = layer.content else {
+            return XCTFail("굴절이 아닌 파티클은 그려야 한다: \(layer.content)")
+        }
+    }
+
+    /// `REFRACT`가 **꺼져 있으면**(값 0) 굴절이 아니다.
+    /// 실물 `magic_vortex_0`이 이 꼴이라, 값을 안 보면 소용돌이가 통째로 사라진다.
+    func testRefractComboSetToZeroStillDraws() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "vortex", "particle": "particles/p.json",
+                          "origin": "10.00000 10.00000 0.00000"}]}
+            """,
+            extras: [
+                "particles/p.json":
+                    #"{"maxcount": 8, "material": "materials/m.json", "emitter": [], "initializer": []}"#,
+                "materials/m.json": """
+                    {"passes": [{"shader": "genericparticle",
+                     "textures": ["particle/beam", "particle/beam_normal"],
+                     "combos": {"REFRACT": 0}}]}
+                    """,
+            ])
+        let layer = try XCTUnwrap(SceneDocument.load(from: reader).layers.first)
+        guard case .particle = layer.content else {
+            return XCTFail("REFRACT가 0이면 그려야 한다: \(layer.content)")
+        }
+    }
+
+    /// 노멀맵이 없으면 굴절이 성립하지 않는다 — 그냥 스프라이트다.
+    /// 창작마당 `leaves1`이 `REFRACT: 1`인데 텍스처가 꽃 하나뿐이라,
+    /// 콤보만 보면 꽃잎이 사라진다.
+    func testRefractWithoutNormalMapStillDraws() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "leaves", "particle": "particles/p.json",
+                          "origin": "10.00000 10.00000 0.00000"}]}
+            """,
+            extras: [
+                "particles/p.json":
+                    #"{"maxcount": 8, "material": "materials/m.json", "emitter": [], "initializer": []}"#,
+                "materials/m.json": """
+                    {"passes": [{"shader": "genericparticle",
+                     "textures": ["particle/flower"], "combos": {"REFRACT": 1}}]}
+                    """,
+            ])
+        let layer = try XCTUnwrap(SceneDocument.load(from: reader).layers.first)
+        guard case .particle = layer.content else {
+            return XCTFail("노멀맵이 없으면 그려야 한다: \(layer.content)")
+        }
+    }
 }

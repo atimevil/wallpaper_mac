@@ -154,12 +154,12 @@ final class MetalCompositor {
     func makeParticleRenderer(
         maxCount: Int, blend: ParticleBlendMode, texture: MTLTexture,
         layerOrigin: SIMD3<Float>, layerScale: SIMD3<Float>,
-        sheet: ParticleSpriteSheet?
+        sheet: ParticleSpriteSheet?, animationMode: ParticleAnimationMode
     ) throws -> ParticleRenderer {
         try ParticleRenderer(
             device: device, library: library, maxCount: maxCount,
             blend: blend, texture: texture, sampler: sampler, layerOrigin: layerOrigin,
-            layerScale: layerScale, sheet: sheet)
+            layerScale: layerScale, sheet: sheet, animationMode: animationMode)
     }
 
     /// 씬의 직교 공간 크기를 정한다.

@@ -587,6 +587,25 @@ public struct SceneDocument: Sendable {
             return .unsupported(reason: "파티클 머티리얼의 첫 텍스처가 없다: \(preset.materialPath)")
         }
 
+        // **굴절 파티클은 그리지 않는다.** 그 스프라이트는 색이 아니라 **배경을
+        // 휘게 하는 렌즈**다. 함께 선언된 노멀맵으로 뒤 그림을 굴절시켜야 유리에
+        // 맺힌 물방울로 보인다. 우리 파티클 파이프라인은 배경을 읽지 못하고,
+        // 그대로 그리면 텍스처가 흰 덩어리라 화면에 불투명한 흰 점이 뜬다(실물 확인).
+        //
+        // 조건 둘을 **함께** 본다. 실물에서 하나만 보면 틀린다:
+        // - `REFRACT`가 **켜져 있어야** 한다. `magic_vortex_0`은 값이 0이다.
+        // - **노멀맵이 함께 와야** 한다. 굴절은 그것 없이 성립하지 않는다.
+        //   창작마당 `leaves1`은 `REFRACT: 1`인데 텍스처가 꽃 하나뿐이라
+        //   그냥 스프라이트다 — 이걸 건너뛰면 꽃잎이 사라진다.
+        //
+        // 내리는 비는 그대로 남는다. `rainperspective`에는 이 콤보가 없다.
+        let refractOn = ((pass["combos"] as? [String: Any])?["REFRACT"] as? NSNumber)?
+            .intValue ?? 0
+        if refractOn != 0, textures.count >= 2 {
+            return .unsupported(
+                reason: "굴절 파티클이라 배경을 휘게 해야 한다: \(preset.materialPath)")
+        }
+
         // 합성 방식. 없으면 씬 머티리얼의 기본값인 translucent다.
         // additive만 특별 취급하는 이유는 실물에서 이 둘만 나오기 때문이다.
         let blend: ParticleBlendMode =
