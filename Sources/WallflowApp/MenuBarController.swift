@@ -74,6 +74,26 @@ final class MenuBarController {
         sound.state = UserDefaults.standard.bool(forKey: Self.soundKey) ? .on : .off
         menu.addItem(sound)
 
+        // 씬마다 소리 크기가 제각각이라 켜고 끄는 것만으로는 부족하다.
+        // 씬이 정한 볼륨에 곱해지므로, 씬 안의 균형은 그대로 남는다.
+        let volumeItem = NSMenuItem(title: "소리 크기", action: nil, keyEquivalent: "")
+        let volumeMenu = NSMenu()
+        let current = SceneRenderer.soundVolume
+        for percent in [0, 25, 50, 75, 100] {
+            let entry = NSMenuItem(
+                title: "\(percent)%", action: #selector(setVolume), keyEquivalent: "")
+            entry.target = self
+            entry.tag = percent
+            // 저장된 값이 목록에 없는 값일 수도 있다. 가장 가까운 것에 표시한다 —
+            // 아무 데도 표시가 없으면 지금 크기를 알 수 없다.
+            entry.state = abs(current * 100 - Double(percent)) < 12.5 ? .on : .off
+            volumeMenu.addItem(entry)
+        }
+        volumeItem.submenu = volumeMenu
+        // 소리가 꺼져 있어도 크기는 정할 수 있게 둔다. 켜기 전에 미리 줄여 두는 것이
+        // 자연스럽고, 막아 두면 왜 안 눌리는지 알 수 없다.
+        menu.addItem(volumeItem)
+
         let browse = NSMenuItem(
             title: "창작마당 둘러보기…", action: #selector(browseWorkshop), keyEquivalent: "w")
         browse.target = self
@@ -110,7 +130,17 @@ final class MenuBarController {
         let enabled = sender.state != .on
         UserDefaults.standard.set(enabled, forKey: Self.soundKey)
         sender.state = enabled ? .on : .off
+        // 소리 크기 항목의 켬/끔 표시도 따라가야 한다. 메뉴를 다시 만든다.
+        rebuildMenu()
         onToggleSound(enabled)
+    }
+
+    @objc private func setVolume(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(
+            Double(sender.tag) / 100, forKey: SceneRenderer.volumeKey)
+        rebuildMenu()
+        // 소리 설정을 다시 적용하는 경로가 이것뿐이다. 켬/끔과 같은 길을 쓴다.
+        onToggleSound(UserDefaults.standard.bool(forKey: Self.soundKey))
     }
 
     @objc private func browseWorkshop() { onBrowseWorkshop() }

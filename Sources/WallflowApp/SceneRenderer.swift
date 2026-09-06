@@ -48,7 +48,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 씬의 직교 공간 크기. 시차 밀림을 그 단위로 계산한다.
     private var ortho = SIMD2<Float>(1, 1)
     /// 이 씬의 소리들. 사용자가 켤 때만 실제로 난다.
-    private var sounds: [AVAudioPlayer] = []
+    private var sounds: [(player: AVAudioPlayer, sceneVolume: Float)] = []
     /// 전력 정책이 재생을 멈췄는지.
     ///
     /// `MTKView.isPaused`로 판단하면 안 된다. 정적인 씬은 그릴 것이 없어 뷰가 늘
@@ -58,6 +58,19 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 메뉴에서 켜면 UserDefaults에 남는다.
     static var soundEnabled: Bool {
         UserDefaults.standard.bool(forKey: "wallflow.soundEnabled")
+    }
+
+    static let volumeKey = "wallflow.soundVolume"
+
+    /// 씬 소리의 크기(0~1). **씬이 정한 볼륨에 곱한다** — 씬마다 제 나름의 균형이
+    /// 있어서, 사용자 설정으로 그것을 덮어쓰면 원래 작게 깔린 소리가 튄다.
+    ///
+    /// 저장된 값이 없으면 100%다. 값은 파일이 아니라 우리 설정에서 오지만,
+    /// 손으로 고칠 수 있으니 0~1로 죈다.
+    static var soundVolume: Double {
+        guard let stored = UserDefaults.standard.object(forKey: volumeKey) as? Double,
+              stored.isFinite else { return 1 }
+        return Swift.min(Swift.max(stored, 0), 1)
     }
     /// 컴포지터에 준 레이어 목록. 글자 크기가 바뀌면 다시 줘야 해서 들고 있는다.
     private var layerList: [(QuadInstance, LayerSource)] = []
@@ -219,8 +232,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 소리 설정과 재생 상태를 맞춘다.
     func applySoundSetting() {
         let on = Self.soundEnabled && !playbackPaused
+        let volume = Float(Self.soundVolume)
         var failed = 0
-        for player in sounds {
+        for (player, sceneVolume) in sounds {
+            // 크기는 켜고 끌 때마다 다시 맞춘다. 설정이 바뀌는 경로가 이것뿐이다.
+            player.volume = sceneVolume * volume
             if on, !player.isPlaying {
                 if !player.play() { failed += 1 }
             } else if !on, player.isPlaying {
@@ -228,12 +244,13 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             }
         }
         guard !sounds.isEmpty else { return }
-        let playing = sounds.filter(\.isPlaying).count
+        let playing = sounds.filter { $0.player.isPlaying }.count
         // 소리가 안 난다는 신고를 받았을 때 어디까지 갔는지 알 수 있어야 한다.
         // 시작한 개수가 아니라 지금 나는 개수를 남긴다 — 이미 나던 것도 세야
         // "안 난다"와 "이미 나고 있다"를 구별할 수 있다.
         var line = "씬 \(item.title)의 소리 \(sounds.count)개 중 \(playing)개 재생 중"
-        line += " (설정 \(Self.soundEnabled ? "켬" : "끔")"
+        line += " (설정 \(Self.soundEnabled ? "켬" : "끔"), 크기 "
+            + "\(Int((Self.soundVolume * 100).rounded()))%"
         line += playbackPaused ? ", 전력 정책이 멈춤)" : ")"
         if failed > 0 { line += " — \(failed)개는 재생을 시작하지 못했다" }
         FileHandle.standardError.write(Data((line + "\n").utf8))
@@ -526,7 +543,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var particles: [(system: ParticleSystem, renderer: ParticleRenderer,
                          textureRatio: Float)] = []
         var texts: [TextState] = []
-        var sounds: [AVAudioPlayer] = []
+        var sounds: [(player: AVAudioPlayer, sceneVolume: Float)] = []
         var drawable: [(QuadInstance, LayerSource)] = []
         var displayStates: [DisplayState] = []
         // 스크립트가 화면·캔버스 크기를 물어본다(실물에서 `engine.screenResolution` 13회).
@@ -705,7 +722,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 if sound.startsSilent {
                     degraded.append("\(layer.name): 시작할 때 조용한 소리라 스크립트 없이는 나지 않는다")
                 } else {
-                    sounds.append(player)
+                    // 씬이 정한 볼륨을 따로 들고 있어야 사용자 설정을 곱할 수 있다.
+                    // AVAudioPlayer는 원래 값을 기억하지 않는다.
+                    sounds.append((player, Float(sound.volume)))
                 }
 
             case .text(let text):
@@ -847,7 +866,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     func stop() {
         for video in videos { video.stop() }
         videos.removeAll()
-        for player in sounds { player.stop() }
+        for (player, _) in sounds { player.stop() }
         sounds.removeAll()
         particles.removeAll()
         texts.removeAll()
