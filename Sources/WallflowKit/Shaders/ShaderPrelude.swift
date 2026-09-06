@@ -127,6 +127,18 @@ public enum ShaderPrelude {
     public static let sampling = """
     #ifdef WF_FORCE_GREEN
     #define texSample2D(tex, uv) float4(0.0, 1.0, 0.0, 1.0)
+    #elif defined(WF_SHOW_ALPHA)
+    // 진단용: 샘플의 알파를 회색조로 그린다. 자홍이 나오던 자리가 검으면
+    // 그 자리는 투명한 곳이고, 문제는 투명 영역의 RGB가 보이는 것이다.
+    #define texSample2D(tex, uv) \
+        float4(float3(tex.sample(tex##Sampler, (uv)).a), 1.0)
+    #elif defined(WF_SHOW_UV)
+    // 진단용: 샘플링 좌표를 색으로 그린다. 0~1이면 빨강-초록 그라데이션이 나온다.
+    #define texSample2D(tex, uv) float4(saturate((uv).x), saturate((uv).y), 0.0, 1.0)
+    #elif defined(WF_FIXED_UV)
+    // 진단용: 좌표를 고정해 샘플링한다. 결과가 균일한 색이면 텍스처는 정상이고
+    // 좌표가 문제다. 여기서도 자홍이면 텍스처 자체를 잘못 읽고 있는 것이다.
+    #define texSample2D(tex, uv) tex.sample(tex##Sampler, float2(0.5, 0.5))
     #else
     #define texSample2D(tex, uv) tex.sample(tex##Sampler, (uv))
     #endif

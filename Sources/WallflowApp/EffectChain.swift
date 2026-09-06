@@ -182,8 +182,17 @@ final class EffectChain {
             .map { "#define \($0.key) \($0.value)\n" }
             .joined()
 
-        let extra = ProcessInfo.processInfo.environment["WALLFLOW_EFFECT_GREEN"] != nil
+        var extra = ProcessInfo.processInfo.environment["WALLFLOW_EFFECT_GREEN"] != nil
             ? "#define WF_FORCE_GREEN 1\n" : ""
+        if ProcessInfo.processInfo.environment["WALLFLOW_EFFECT_FIXEDUV"] != nil {
+            extra += "#define WF_FIXED_UV 1\n"
+        }
+        if ProcessInfo.processInfo.environment["WALLFLOW_EFFECT_SHOWUV"] != nil {
+            extra += "#define WF_SHOW_UV 1\n"
+        }
+        if ProcessInfo.processInfo.environment["WALLFLOW_EFFECT_SHOWALPHA"] != nil {
+            extra += "#define WF_SHOW_ALPHA 1\n"
+        }
         let vertexLibrary = try device.makeLibrary(
             source: extra + defines + vertex.source, options: nil)
         let fragmentLibrary = try device.makeLibrary(
