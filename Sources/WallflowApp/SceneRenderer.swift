@@ -135,6 +135,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         /// 이미 돌고 있으면 또 던지지 않는다. 느린 스크립트가 큐에 쌓이면
         /// 나중엔 몇 분 전 시각을 그리게 된다.
         var inFlight = false
+        /// 구운 픽셀 하나가 씬 단위로 몇인지. 저장된 글자와 상자를 견줘 한 번만
+        /// 정한다. 실행 중 글자가 길어져도 글자 크기는 그대로여야 한다.
+        var unitsPerPixel: Double?
+        /// 배율을 이미 구해 봤는지. 못 구한 경우를 매 프레임 다시 시도하지 않는다.
+        var measuredScale = false
         /// 컴포지터 레이어 목록에서의 자리. 글자 폭이 바뀌면 그 자리의 쿼드를 고쳐야 한다.
         var layerIndex = 0
 
@@ -324,12 +329,28 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             return
         }
         state.texture = try? compositor.makeTexture(from: .image(image))
-        // 구운 글자를 씬이 정한 상자에 비율 그대로 맞춰 넣는다. 상자를 무시하면
-        // 글자가 상자를 넘어 화면 밖으로 밀려난다.
-        let fitted = TextRasterizer.fit(
-            imageWidth: image.width, imageHeight: image.height,
-            boxWidth: Double(state.box.x), boxHeight: Double(state.box.y))
-        state.size = SIMD2(Float(fitted.width), Float(fitted.height))
+        // 상자는 **편집기에 저장된 글자**의 크기다. 실행 중 글자를 거기 맞추면
+        // `Date`(4자)로 저장된 상자에 `07 SEP 2026`(11자)을 우겨넣게 되어 글자가
+        // 쪼그라든다. 저장된 글자에서 배율을 한 번 얻어 두고 그 배율로 그린다 —
+        // 글자 크기가 고정되고 긴 글자는 상자를 넘어간다. 실물이 그렇다.
+        measureTextScale(state, wrapWidth: wrapWidth)
+        if let unitsPerPixel = state.unitsPerPixel {
+            state.size = SIMD2(Float(Double(image.width) * unitsPerPixel),
+                               Float(Double(image.height) * unitsPerPixel))
+        } else {
+            // 저장된 글자를 못 재면 예전처럼 상자에 맞춘다.
+            let fitted = TextRasterizer.fit(
+                imageWidth: image.width, imageHeight: image.height,
+                boxWidth: Double(state.box.x), boxHeight: Double(state.box.y))
+            state.size = SIMD2(Float(fitted.width), Float(fitted.height))
+        }
+        // 스크립트가 만든 글자는 얼마든지 길어질 수 있다. 화면 몇 배를 넘으면
+        // 그리기가 의미 없고 텍스처만 커지므로 거기서 죈다.
+        let cap = ortho * 4
+        if state.size.x > cap.x || state.size.y > cap.y, state.size.x > 0, state.size.y > 0 {
+            let shrink = Swift.min(cap.x / state.size.x, cap.y / state.size.y)
+            state.size *= shrink
+        }
         // 정렬은 **origin을 기준점으로** 글자의 어느 쪽을 붙이는지다. 상자 기준으로
         // 잡으면 안 된다 — 실물 Chisa 씬의 시계는 상자가 화면 오른쪽 밖(3886 > 3840)
         // 까지 나가 있어서, 상자 오른쪽에 붙이면 초 자리가 잘린다.
@@ -344,6 +365,28 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         case .bottom: state.origin.y = state.boxCenter.y + state.size.y / 2
         case .center: state.origin.y = state.boxCenter.y
         }
+    }
+
+    /// 저장된 글자를 같은 조건으로 한 번 구워 상자와의 배율을 잡는다.
+    ///
+    /// 저장된 글자가 비어 있거나 굽지 못하면 배율 없이 둔다 — 그때는 상자에
+    /// 맞추는 예전 방식으로 그린다.
+    private func measureTextScale(_ state: TextState, wrapWidth: Double) {
+        guard !state.measuredScale else { return }
+        state.measuredScale = true
+        let authored = state.text.value
+        guard !authored.isEmpty, !authored.allSatisfy(\.isWhitespace) else { return }
+        let wrap = state.text.wrapping
+        guard let image = try? TextRasterizer.rasterize(
+            text: authored, fontData: state.fontData,
+            pointSize: state.pointSize, color: state.text.color,
+            wrapWidth: wrapWidth, maxRows: wrap.maxRows, usesEllipsis: wrap.usesEllipsis,
+            shadow: state.text.shadow,
+            shadowScale: wrap.pointSize > 0 ? state.pointSize / wrap.pointSize : 1)
+        else { return }
+        state.unitsPerPixel = TextRasterizer.unitsPerPixel(
+            authoredWidth: image.width, authoredHeight: image.height,
+            boxWidth: Double(state.box.x), boxHeight: Double(state.box.y))
     }
 
     /// 스크립트를 돌려 값이 바뀌었으면 다시 굽는다.

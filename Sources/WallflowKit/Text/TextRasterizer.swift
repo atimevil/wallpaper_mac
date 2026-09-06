@@ -233,6 +233,28 @@ public enum TextRasterizer {
         return (w * scale, h * scale)
     }
 
+    /// 저장된 글자와 상자를 견줘 "구운 픽셀 → 씬 단위" 배율을 얻는다.
+    ///
+    /// 오브젝트의 `size`는 **편집기에 저장된 글자**의 크기다. 실행 중에 글자가
+    /// 길어지면(`Date` → `07 SEP 2026`) 상자에 맞추는 순간 글자가 쪼그라든다 —
+    /// 실물에서 시계·날짜가 자리표시자로 저장돼 있어 거의 모든 씬이 이 경우다.
+    /// 배율은 저장된 글자에서 한 번 얻어 두고, 실행 중 글자에는 그 배율을 그대로
+    /// 쓴다. 글자 크기가 고정되고 긴 글자는 상자를 넘어간다 — 실물이 그렇다.
+    ///
+    /// 저장된 글자를 못 구웠거나 상자가 없으면 nil이다. 그때는 상자에 맞추는
+    /// 예전 방식으로 돌아간다.
+    public static func unitsPerPixel(
+        authoredWidth: Int, authoredHeight: Int, boxWidth: Double, boxHeight: Double
+    ) -> Double? {
+        let w = Double(authoredWidth), h = Double(authoredHeight)
+        guard w > 0, h > 0, boxWidth > 0, boxHeight > 0,
+              boxWidth.isFinite, boxHeight.isFinite else { return nil }
+        // 가로세로 비가 살짝 달라도 글자가 상자를 넘지 않게 작은 쪽을 쓴다.
+        let scale = Swift.min(boxWidth / w, boxHeight / h)
+        guard scale.isFinite, scale > 0 else { return nil }
+        return scale
+    }
+
     /// 그림자를 켠다. 켠 뒤에 그린 것에만 붙는다.
     ///
     /// 그림자는 글자 바깥으로 번지므로 비트맵에 여백이 더 필요하다.

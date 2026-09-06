@@ -280,3 +280,52 @@ extension TextRasterizerTests {
         XCTAssertGreaterThan(wrapped.height, short.height, "긴 문단이 접히지 않았다")
     }
 }
+
+/// 글자 크기는 **저장된 글자**와 상자의 비에서 온다.
+///
+/// 오브젝트의 `size`는 편집기에 저장된 글자(`Date`, `12:34` 같은 자리표시자)를
+/// 잰 값이다. 실행 중 글자는 그보다 길다(`7 September.2026.Monday`). 상자에
+/// 맞추면 길수록 작아져서, 실물 시계 위젯의 날짜가 하나같이 깨알만 해진다.
+extension TextRasterizerTests {
+    func testScaleComesFromTheAuthoredText() throws {
+        // 저장된 글자가 200x50이고 상자가 400x100이면 픽셀당 2 단위다.
+        let scale = try XCTUnwrap(TextRasterizer.unitsPerPixel(
+            authoredWidth: 200, authoredHeight: 50, boxWidth: 400, boxHeight: 100))
+        XCTAssertEqual(scale, 2, accuracy: 0.0001)
+    }
+
+    /// 긴 글자는 **커지지 않고 상자를 넘어간다.** 이게 상자 맞춤과 갈리는 지점이다.
+    func testLongerTextKeepsGlyphSizeAndOverflows() throws {
+        let box = (width: 400.0, height: 100.0)
+        let scale = try XCTUnwrap(TextRasterizer.unitsPerPixel(
+            authoredWidth: 200, authoredHeight: 50,
+            boxWidth: box.width, boxHeight: box.height))
+        // 실행 중 글자가 세 배 길다.
+        let drawn = (width: 600.0 * scale, height: 50.0 * scale)
+        XCTAssertEqual(drawn.height, box.height, accuracy: 0.0001, "글자 높이는 그대로다")
+        XCTAssertGreaterThan(drawn.width, box.width, "긴 글자는 상자를 넘어간다")
+        // 상자에 맞추던 예전 방식은 같은 글자를 절반 이하로 줄였다.
+        let fitted = TextRasterizer.fit(
+            imageWidth: 600, imageHeight: 50, boxWidth: box.width, boxHeight: box.height)
+        XCTAssertLessThan(fitted.height, box.height / 2)
+    }
+
+    /// 잴 수 없으면 nil이다. 부르는 쪽이 예전 방식으로 돌아간다.
+    func testNoScaleWithoutAuthoredTextOrBox() {
+        XCTAssertNil(TextRasterizer.unitsPerPixel(
+            authoredWidth: 0, authoredHeight: 50, boxWidth: 400, boxHeight: 100))
+        XCTAssertNil(TextRasterizer.unitsPerPixel(
+            authoredWidth: 200, authoredHeight: 50, boxWidth: 0, boxHeight: 100))
+        XCTAssertNil(TextRasterizer.unitsPerPixel(
+            authoredWidth: 200, authoredHeight: 50,
+            boxWidth: .nan, boxHeight: 100))
+    }
+
+    /// 가로세로 비가 어긋나면 작은 쪽을 쓴다. 큰 쪽을 쓰면 저장된 글자부터
+    /// 상자를 넘는다.
+    func testUsesTheSmallerRatio() throws {
+        let scale = try XCTUnwrap(TextRasterizer.unitsPerPixel(
+            authoredWidth: 200, authoredHeight: 50, boxWidth: 400, boxHeight: 60))
+        XCTAssertEqual(scale, 1.2, accuracy: 0.0001)
+    }
+}
