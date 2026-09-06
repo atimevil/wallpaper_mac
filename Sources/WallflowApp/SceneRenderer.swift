@@ -147,14 +147,16 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 여러 스크립트가 붙어 있으면 가장 숨기는 쪽을 따른다. 이 위젯들은 조건이
     /// 맞지 않을 때 자기를 감추는 용도라, 하나라도 숨기라면 숨기는 것이 의도에 맞다.
     private static func applyDisplayScripts(
-        _ layer: SceneLayer, degraded: inout [String]
+        _ layer: SceneLayer, degraded: inout [String],
+        environment: SceneScriptRuntime.Environment, modules: [String: String]
     ) -> SceneLayer {
         guard !layer.displayScripts.isEmpty else { return layer }
         var alpha = layer.alpha
         var visible = layer.visible
         var ran = false
         for script in layer.displayScripts {
-            let engine = ScriptEngine(source: script.source)
+            let engine = ScriptEngine(source: script.source,
+                                      environment: environment, modules: modules)
             // 콜백 전용 스크립트에는 update가 없다. 그건 실패가 아니다 —
             // 미디어 위젯은 이벤트로만 동작한다. 본문 평가 실패만 건너뛴다.
             if case .evaluationFailed = engine.failure { continue }
@@ -453,11 +455,21 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var sounds: [AVAudioPlayer] = []
         var drawable: [(QuadInstance, LayerSource)] = []
         var displayStates: [DisplayState] = []
+        // 스크립트가 화면·캔버스 크기를 물어본다(실물에서 `engine.screenResolution` 13회).
+        // 없으면 참조 오류로 스크립트가 통째로 죽는다.
+        let screen = view.window?.screen ?? NSScreen.main
+        let scriptEnvironment = SceneScriptRuntime.Environment(
+            screenWidth: Double(screen?.frame.width ?? CGFloat(document.orthoWidth)),
+            screenHeight: Double(screen?.frame.height ?? CGFloat(document.orthoHeight)),
+            canvasWidth: Double(document.orthoWidth),
+            canvasHeight: Double(document.orthoHeight))
 
         for rawLayer in document.layers where rawLayer.visible {
             // 표시 스크립트를 먼저 돌린다. 미디어 위젯이 "지금 재생 중이 아니다"를
             // 알고 스스로 숨는다 — 저장된 alpha로 그리면 반투명한 검은 상자가 남는다.
-            let layer = Self.applyDisplayScripts(rawLayer, degraded: &degraded)
+            let layer = Self.applyDisplayScripts(
+                rawLayer, degraded: &degraded,
+                environment: scriptEnvironment, modules: document.scriptModules)
             guard layer.visible, layer.alpha > 0.004 else {
                 if rawLayer.alpha != layer.alpha || rawLayer.visible != layer.visible {
                     degraded.append("\(layer.name): 스크립트가 숨김으로 정했다")
@@ -483,7 +495,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             if !layer.displayScripts.isEmpty {
                 let engines = layer.displayScripts.compactMap {
                     script -> (property: DisplayScript.Property, engine: ScriptEngine)? in
-                    let engine = ScriptEngine(source: script.source)
+                    let engine = ScriptEngine(source: script.source,
+                                              environment: scriptEnvironment,
+                                              modules: document.scriptModules)
                     if case .evaluationFailed = engine.failure { return nil }
                     if case .noUpdateFunction = engine.failure { return nil }
                     return (script.property, engine)
@@ -606,7 +620,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 let engine = text.script.map {
                     ScriptEngine(
                         source: $0,
-                        properties: text.scriptProperties.mapValues(\.jsValue))
+                        properties: text.scriptProperties.mapValues(\.jsValue),
+                        environment: scriptEnvironment,
+                        modules: document.scriptModules)
                 }
                 if let failure = engine?.failure {
                     skipped.append("\(layer.name): 스크립트를 쓸 수 없다: \(failure)")

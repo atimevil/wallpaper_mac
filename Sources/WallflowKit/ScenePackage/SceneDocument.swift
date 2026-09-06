@@ -28,6 +28,11 @@ public struct SceneDocument: Sendable {
     ///
     /// WE의 특징적인 움직임이라 없으면 씬이 납작해 보인다. 레이어마다
     /// `parallaxDepth`가 있고 화면 중심에서 마우스가 떨어진 만큼 곱해 민다.
+    /// 스크립트가 `import * as X from 'Y'`로 불러오는 모듈들(이름 → 본문).
+    ///
+    /// JavaScriptCore는 ES 모듈을 모르므로 스크립트를 돌릴 때 미리 심어 줘야 한다.
+    /// 씬마다 같은 모듈을 여러 스크립트가 쓰므로 문서에서 한 번만 읽는다.
+    public let scriptModules: [String: String]
     public let parallaxAmount: Double
 
     public static func load(from reader: PkgReader) throws -> SceneDocument {
@@ -89,6 +94,7 @@ public struct SceneDocument: Sendable {
                              transform: transforms[id] ?? .identity)
         }
         let layers = applyingParticleBudget(rawLayers)
+        let scriptModules = loadScriptModules(objects: objects, resolver: resolver)
 
         // cameraparallax가 꺼져 있으면 강도를 0으로 본다.
         let parallaxOn = boolValue(general["cameraparallax"]) ?? false
@@ -97,8 +103,41 @@ public struct SceneDocument: Sendable {
             orthoWidth: width, orthoHeight: height,
             clearColor: clearColor, clearEnabled: clearEnabled,
             layers: layers,
+            scriptModules: scriptModules,
             parallaxAmount: parallaxOn && amount.isFinite ? Swift.min(Swift.max(amount, 0), 2) : 0
         )
+    }
+
+    /// 스크립트들이 import하는 모듈을 assets에서 읽어 온다.
+    ///
+    /// 실물에 `WEMath`·`WEColor`·`WEVector` 셋이 있고 전부
+    /// `scripts/jsmodules/<소문자 이름>.js`에 들어 있다. 파일 이름은 소문자인데
+    /// import 이름은 대문자라 그대로 찾으면 못 찾는다.
+    static func loadScriptModules(
+        objects: [[String: Any]], resolver: ReferenceResolver
+    ) -> [String: String] {
+        var wanted: Set<String> = []
+        for object in objects {
+            for key in ["origin", "size", "scale", "alpha", "color", "visible", "text"] {
+                guard let script = (object[key] as? [String: Any])?["script"] as? String
+                else { continue }
+                for line in script.split(whereSeparator: \.isNewline) {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    guard trimmed.hasPrefix("import ") else { continue }
+                    let quoted = trimmed.split(separator: "'").dropFirst().first
+                        ?? trimmed.split(separator: "\"").dropFirst().first
+                    if let quoted { wanted.insert(String(quoted)) }
+                }
+            }
+        }
+        var modules: [String: String] = [:]
+        for name in wanted {
+            let path = "scripts/jsmodules/\(name.lowercased()).js"
+            guard let data = resolver.data(for: path),
+                  let body = String(data: data, encoding: .utf8) else { continue }
+            modules[name] = body
+        }
+        return modules
     }
 
     /// 씬 전체의 파티클 총량을 예산 안으로 죈다.

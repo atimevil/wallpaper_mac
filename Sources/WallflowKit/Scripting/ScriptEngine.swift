@@ -57,7 +57,14 @@ public final class ScriptEngine: @unchecked Sendable {
     ///     `createScriptProperties()` 빌더를 **덮어쓴다** — 빌더는 편집기 UI 정의라
     ///     실제 값이 아니다. 덮어쓰지 않으면 `scriptProperties.delimiter`가
     ///     undefined가 되어 시계가 `12undefined34`처럼 나온다.
-    public init(source: String, properties: [String: Any] = [:]) {
+    /// 지금까지 스크립트에 알려 준 누적 실행 시간(초). `engine.runtime`이 된다.
+    private var runtime: Double = 0
+
+    /// - Parameter modules: `import * as X from 'Y'`가 가리키는 모듈들(이름 → 본문).
+    ///   실물에 `WEMath`·`WEColor`·`WEVector` 셋이 있고 전부 assets에 들어 있다.
+    public init(source: String, properties: [String: Any] = [:],
+                environment: SceneScriptRuntime.Environment = .init(),
+                modules: [String: String] = [:]) {
         guard let context = JSContext() else {
             self.context = JSContext(virtualMachine: JSVirtualMachine())!
             failure = .evaluationFailed("JSContext를 만들 수 없다")
@@ -71,7 +78,10 @@ public final class ScriptEngine: @unchecked Sendable {
         }
 
         Self.installScriptPropertiesShim(context, layerProperties: properties)
-        Self.installEngineShim(context)
+        Self.installEngineShim(context, environment: environment)
+        for statement in Self.moduleBindings(for: source, modules: modules) {
+            context.evaluateScript(statement)
+        }
         context.evaluateScript(Self.stripModuleSyntax(source))
 
         if let thrown {
@@ -187,12 +197,78 @@ public final class ScriptEngine: @unchecked Sendable {
     /// 줄 맨 앞의 `export`만 지운다. ES 모듈 문법을 `evaluateScript`가 모르기 때문이다.
     /// 문자열 리터럴 안의 "export"는 줄 맨 앞에 오지 않으므로 건드리지 않는다.
     static func stripModuleSyntax(_ source: String) -> String {
-        source.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+        // `"\r\n"`은 Swift에서 **한 Character**라 `split(separator: "\n")`으로는 나뉘지 않는다.
+        // 그러면 파일 전체가 한 줄이 되어 `export` 제거가 통째로 무력화된다 —
+        // assets의 `wemath.js`가 CRLF라 실제로 이 일이 났다.
+        source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+            .map { line -> String in
             let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+            // `import * as shared from 'shared.js'` 같은 줄이 있다. 모듈을 풀어 줄
+            // 방법이 없으므로 줄을 지운다 — 남겨 두면 `evaluateScript`가 구문 오류로
+            // **스크립트 전체**를 버려서, 모듈을 실제로 쓰지 않는 부분까지 죽는다.
+            // 실물에서 이 한 줄 때문에 스크립트 4개가 통째로 떨어졌다.
+            if trimmed.hasPrefix("import ") { return "" }
             guard trimmed.hasPrefix("export ") else { return String(line) }
             let indent = String(line.prefix(line.count - trimmed.count))
             return indent + String(trimmed.dropFirst("export ".count))
         }.joined(separator: "\n")
+    }
+
+    /// `import * as X from 'Y'` 한 줄마다, 모듈 본문을 즉시실행 함수로 감싸
+    /// `var X = (function () { ... return {내보낸 이름들}; })();`를 만든다.
+    ///
+    /// JavaScriptCore의 `evaluateScript`는 ES 모듈을 모른다. 모듈을 안 주면
+    /// `WEMath.smoothStep(...)`이 참조 오류를 내고 스크립트가 죽는다.
+    /// 모르는 모듈은 건너뛴다 — 못 채우는 이름을 빈 객체로 채우면 오류가
+    /// "없는 변수"에서 "함수가 아닌 값"으로 바뀔 뿐이다.
+    static func moduleBindings(for source: String, modules: [String: String]) -> [String] {
+        guard !modules.isEmpty else { return [] }
+        // 이름은 대소문자가 파일과 다르다(`WEMath` ↔ `wemath.js`).
+        var byLowercasedName: [String: String] = [:]
+        for (name, body) in modules { byLowercasedName[name.lowercased()] = body }
+
+        var statements: [String] = []
+        for line in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("import ") else { continue }
+            guard let alias = trimmed.components(separatedBy: " as ").dropFirst().first?
+                .components(separatedBy: " from ").first?
+                .trimmingCharacters(in: .whitespaces),
+                !alias.isEmpty, alias.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" })
+            else { continue }
+            let quoted = trimmed.split(separator: "'").dropFirst().first
+                ?? trimmed.split(separator: "\"").dropFirst().first
+            guard let quoted, let body = byLowercasedName[String(quoted).lowercased()]
+            else { continue }
+            let exported = exportedNames(in: body)
+            guard !exported.isEmpty else { continue }
+            let members = exported.map { "\($0): \($0)" }.joined(separator: ", ")
+            statements.append("""
+            var \(alias) = (function () {
+            \(stripModuleSyntax(body))
+            return { \(members) };
+            })();
+            """)
+        }
+        return statements
+    }
+
+    /// 모듈이 내보내는 이름들. `export let x`, `export function f`, `export var v` 형태다.
+    static func exportedNames(in source: String) -> [String] {
+        var names: [String] = []
+        for line in source.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("export ") else { continue }
+            var rest = trimmed.dropFirst("export ".count)
+            for keyword in ["let ", "var ", "const ", "function ", "class "]
+            where rest.hasPrefix(keyword) {
+                rest = rest.dropFirst(keyword.count)
+                break
+            }
+            let name = String(rest.prefix(while: { $0.isLetter || $0.isNumber || $0 == "_" }))
+            if !name.isEmpty, !names.contains(name) { names.append(name) }
+        }
+        return names
     }
 
     /// `createScriptProperties()`는 편집기 UI를 정의하는 빌더다. 값은 레이어가 준다.
@@ -234,8 +310,11 @@ public final class ScriptEngine: @unchecked Sendable {
         }
         // 시간이 흘렀다고 스크립트에 알린다. 없으면 `engine.frametime`이 undefined라
         // 뺄셈이 NaN이 되고 타이머가 영영 안 끝난다.
-        context.objectForKeyedSubscript("engine")?
-            .setObject(frametime, forKeyedSubscript: "frametime" as NSString)
+        runtime += Swift.max(0, frametime)
+        if let engine = context.objectForKeyedSubscript("engine"), engine.isObject {
+            engine.setObject(frametime, forKeyedSubscript: "frametime" as NSString)
+            engine.setObject(runtime, forKeyedSubscript: "runtime" as NSString)
+        }
         let result = updateFunction.call(withArguments: [value])
         if let thrown {
             failure = .updateFailed(thrown)
@@ -246,10 +325,13 @@ public final class ScriptEngine: @unchecked Sendable {
         return result
     }
 
-    /// 스크립트가 기대하는 `engine` 전역. 없으면 참조하는 스크립트가 통째로 죽는다.
-    /// 값은 매 호출마다 `callUpdate`가 채운다.
-    private static func installEngineShim(_ context: JSContext) {
-        context.evaluateScript("var engine = { frametime: 0, time: 0 };")
+    /// 스크립트가 있다고 가정하는 전역들(`Vec3`, `engine`, `console`).
+    /// 없으면 참조하는 스크립트가 통째로 죽는다 — 실물 145개 중 대부분이 쓴다.
+    /// `frametime`/`runtime`은 매 호출마다 `callUpdate`가 채운다.
+    private static func installEngineShim(_ context: JSContext,
+                                          environment: SceneScriptRuntime.Environment) {
+        context.evaluateScript(SceneScriptRuntime.vectors)
+        context.evaluateScript(SceneScriptRuntime.engine(environment))
     }
 
     /// `createScriptProperties()` 흉내.
@@ -272,20 +354,28 @@ public final class ScriptEngine: @unchecked Sendable {
         function createScriptProperties() {
             var layer = __wallflowLayerProperties || {};
             var builder = {};
+            // `add*`는 이름을 열거하지 않는다. 실물에 `addColor`가 있었는데 목록에
+            // 없어서 스크립트가 통째로 죽었다 — 모르는 이름이 하나 더 있으면 같은 일이
+            // 또 난다. add로 시작하면 무엇이든 받고, 체인이 끊기지 않게 프록시를 돌려준다.
+            var proxy = new Proxy(builder, {
+                get: function (target, name) {
+                    if (name in target) { return target[name]; }
+                    if (typeof name === 'string' && name.indexOf('add') === 0) {
+                        return handler;
+                    }
+                    return undefined;
+                }
+            });
             var handler = function (spec) {
                 if (spec && spec.name !== undefined && spec.name !== null) {
                     builder[spec.name] = Object.prototype.hasOwnProperty.call(layer, spec.name)
                         ? layer[spec.name] : spec.value;
                 }
-                return builder;
+                return proxy;
             };
-            var names = ['addCheckbox', 'addSlider', 'addTextInput', 'addCombo',
-                         'addColorPicker', 'addFilePicker', 'addText', 'addSeparator',
-                         'addSpinner', 'addVec2', 'addVec3'];
-            for (var i = 0; i < names.length; i++) { builder[names[i]] = handler; }
             // `.finish()`를 부르지 않는 스크립트가 있어서 빌더 자체가 값 노릇을 한다.
-            builder.finish = function () { return builder; };
-            return builder;
+            builder.finish = function () { return proxy; };
+            return proxy;
         }
         """)
     }
