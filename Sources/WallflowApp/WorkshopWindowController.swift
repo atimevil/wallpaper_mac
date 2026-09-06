@@ -191,9 +191,10 @@ final class WorkshopWindowController: NSWindowController {
         // 격자로 보여 준다. 흐름 배치라 창 너비가 바뀌면 한 줄에 들어가는 개수가
         // 알아서 바뀐다. 배경화면은 그림이 본체라 표보다 격자가 맞다.
         let layout = NSCollectionViewFlowLayout()
-        layout.itemSize = NSSize(width: 216, height: 168)
-        layout.minimumInteritemSpacing = 12
-        layout.minimumLineSpacing = 12
+        // 배경화면은 대부분 16:9다. 칸을 그 비율로 두면 잘리는 부분이 적다.
+        layout.itemSize = NSSize(width: 248, height: 140)
+        layout.minimumInteritemSpacing = 8
+        layout.minimumLineSpacing = 8
         layout.sectionInset = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
         collectionView.collectionViewLayout = layout
         collectionView.dataSource = self
@@ -742,49 +743,115 @@ final class WorkshopWindowController: NSWindowController {
     }
 }
 
-/// 격자 한 칸. 미리보기 그림과 제목·부제를 보여 준다.
+/// 칸을 꽉 채우는 그림. 비율을 지키고 넘치는 쪽을 자른다.
+///
+/// 레이어에 직접 그리므로 `NSImageView`가 아니다. 그쪽에는 "채우기" 축척이
+/// 없어서, 16:9 배경화면이 정사각형에 가까운 칸에서 위아래로 회색 띠를 남긴다.
+final class PreviewView: NSView {
+    var image: NSImage? {
+        didSet { updateContents() }
+    }
+
+    override func layout() {
+        super.layout()
+        // 화면 배율이 바뀌면 다시 물어봐야 선명하다.
+        updateContents()
+    }
+
+    private func updateContents() {
+        wantsLayer = true
+        layer?.contentsGravity = .resizeAspectFill
+        layer?.masksToBounds = true
+        guard let image else {
+            layer?.contents = nil
+            return
+        }
+        // 칸 비율에 맞춰 CGImage를 꺼낸다. NSImage를 그대로 넣으면 표현이
+        // 여럿일 때(아이콘 등) 어느 것이 쓰일지 정해지지 않는다.
+        var rect = CGRect(origin: .zero, size: bounds.size)
+        layer?.contents = image.cgImage(
+            forProposedRect: &rect, context: nil, hints: nil)
+    }
+}
+
+/// 격자 한 칸.
+///
+/// 실물 Wallpaper Engine처럼 **그림이 칸 전체**이고, 제목은 그 위 아래쪽에
+/// 얹는다. 그림 밑에 이름을 따로 한 줄 두면 같은 자리에 그림이 그만큼 작게
+/// 들어가고, 목록이 글자 반 그림 반이 된다 — 배경화면은 그림이 본체다.
 final class WorkshopGridItem: NSCollectionViewItem {
     static let identifier = NSUserInterfaceItemIdentifier("WorkshopGridItem")
 
-    private let preview = NSImageView()
+    /// 미리보기 그림. **칸을 꽉 채운다.**
+    ///
+    /// `NSImageView`에는 "채우기" 축척이 없다 — 비율을 지키면 회색 여백이
+    /// 남고, 늘리면 그림이 찌그러진다. 레이어의 `resizeAspectFill`은 비율을
+    /// 지키면서 넘치는 쪽을 잘라 준다.
+    private let preview = PreviewView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private let box = NSView()
+    /// 제목이 밝은 그림 위에서도 읽히게 까는 그늘.
+    private let scrim = CAGradientLayer()
 
     override func loadView() {
         box.wantsLayer = true
         box.layer?.cornerRadius = 8
+        box.layer?.masksToBounds = true
         box.layer?.borderWidth = 2
         box.layer?.borderColor = NSColor.clear.cgColor
+        box.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
 
-        preview.imageScaling = .scaleProportionallyUpOrDown
         preview.wantsLayer = true
-        preview.layer?.cornerRadius = 6
-        preview.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        preview.translatesAutoresizingMaskIntoConstraints = false
 
-        nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        // 그늘은 아래에서 위로 옅어진다. 그림 전체를 덮으면 목록이 어두워진다.
+        scrim.colors = [
+            NSColor.clear.cgColor,
+            NSColor.black.withAlphaComponent(0.75).cgColor,
+        ]
+        scrim.startPoint = CGPoint(x: 0.5, y: 1)
+        scrim.endPoint = CGPoint(x: 0.5, y: 0)
+
+        nameLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        nameLabel.textColor = .white
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.maximumNumberOfLines = 1
         detailLabel.font = .systemFont(ofSize: 10)
-        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.textColor = NSColor.white.withAlphaComponent(0.75)
         detailLabel.lineBreakMode = .byTruncatingTail
+        detailLabel.maximumNumberOfLines = 1
 
-        let stack = NSStackView(views: [preview, nameLabel, detailLabel])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 3
-        stack.edgeInsets = NSEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        box.addSubview(stack)
+        let text = NSStackView(views: [nameLabel, detailLabel])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 1
+        text.translatesAutoresizingMaskIntoConstraints = false
+
+        box.addSubview(preview)
+        box.addSubview(text)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: box.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: box.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: box.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: box.trailingAnchor),
-            preview.heightAnchor.constraint(equalToConstant: 110),
-            preview.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -12),
+            preview.topAnchor.constraint(equalTo: box.topAnchor),
+            preview.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+            preview.leadingAnchor.constraint(equalTo: box.leadingAnchor),
+            preview.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+            text.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            text.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+            text.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -6),
         ])
+        // 그늘은 그림 위, 글자 아래에 깔린다.
+        preview.layer?.addSublayer(scrim)
         view = box
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        // 그늘은 아래 40%만 덮는다. 자동 배치가 없는 레이어라 직접 잡는다.
+        let height = view.bounds.height * 0.4
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        scrim.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: height)
+        CATransaction.commit()
     }
 
     func configure(entry: GridEntry, image: NSImage?) {
@@ -797,14 +864,12 @@ final class WorkshopGridItem: NSCollectionViewItem {
         didSet {
             box.layer?.borderColor = isSelected
                 ? NSColor.controlAccentColor.cgColor : NSColor.clear.cgColor
-            box.layer?.backgroundColor = isSelected
-                ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.25).cgColor
-                : NSColor.clear.cgColor
         }
     }
 }
 
-extension WorkshopWindowController: NSCollectionViewDataSource, NSCollectionViewDelegate {
+extension WorkshopWindowController: NSCollectionViewDataSource,
+                                   NSCollectionViewDelegateFlowLayout {
     func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int)
         -> Int { visibleEntries.count }
 
@@ -819,6 +884,28 @@ extension WorkshopWindowController: NSCollectionViewDataSource, NSCollectionView
             grid.configure(entry: entry, image: thumbnailImage(for: entry.id))
         }
         return cell
+    }
+
+    /// 칸 크기를 창 너비에 맞춰 나눈다.
+    ///
+    /// 흐름 배치는 남는 자리를 **칸 사이 간격**으로 흘려보낸다. 고정 크기로 두면
+    /// 창이 넓어질수록 칸 사이가 벌어져 목록 가운데가 뻥 뚫린다. 한 줄에 몇 개가
+    /// 들어갈지 먼저 정하고 남는 자리를 칸 너비에 나눠 준다 — 실물 창작마당처럼
+    /// 그림이 줄을 꽉 채운다.
+    func collectionView(
+        _ collectionView: NSCollectionView, layout: NSCollectionViewLayout,
+        sizeForItemAt indexPath: IndexPath
+    ) -> NSSize {
+        let flow = layout as? NSCollectionViewFlowLayout
+        let inset = flow?.sectionInset ?? NSEdgeInsets()
+        let spacing = flow?.minimumInteritemSpacing ?? 8
+        let available = collectionView.bounds.width - inset.left - inset.right
+        guard available > 0 else { return NSSize(width: 248, height: 140) }
+        // 한 칸이 260pt쯤 되게 잡되 최소 두 줄은 유지한다.
+        let columns = Swift.max(2, Int((available + spacing) / (260 + spacing)))
+        let width = (available - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+        // 배경화면은 대부분 16:9다. 그 비율로 두면 잘리는 부분이 적다.
+        return NSSize(width: floor(width), height: floor(width * 9 / 16))
     }
 
     func collectionView(
