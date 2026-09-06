@@ -194,7 +194,13 @@ public enum LayerContent: Equatable, Sendable {
     /// 셰이더 `flat` 기반의 단색 사각형. 텍스처가 없다.
     case solidColor(Vec3)
     /// 파티클 시스템. 프리셋과 텍스처 경로, 그리고 합성 방식을 담는다.
-    case particle(preset: ParticlePreset, texturePath: String, blend: ParticleBlendMode)
+    /// 파티클 시스템. 프리셋과 텍스처 경로, 합성 방식, 그리고 굴절이면
+    /// 법선 지도의 경로.
+    ///
+    /// 굴절 파티클은 **뒤에 이미 그려진 화면**을 법선 지도로 밀어 읽어 곱한다.
+    /// 유리구슬과 충격파가 그렇게 배경을 휘게 한다.
+    case particle(preset: ParticlePreset, texturePath: String, blend: ParticleBlendMode,
+                  normalPath: String? = nil, refractAmount: Double = 0.05)
     /// 글자. 스크립트가 값을 만들 수 있다.
     case text(TextLayer)
     /// 소리. 그리지 않는다.

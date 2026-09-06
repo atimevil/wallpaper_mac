@@ -471,7 +471,7 @@ final class SceneDocumentTests: XCTestCase {
             ]
         )
         let doc = try SceneDocument.load(from: reader, assets: nil)
-        guard case .particle(let preset, let texturePath, _) = doc.layers[0].content else {
+        guard case .particle(let preset, let texturePath, _, _, _) = doc.layers[0].content else {
             return XCTFail("파티클 레이어여야 한다: \(doc.layers[0].content)")
         }
         XCTAssertEqual(preset.maxCount, 300)
@@ -534,7 +534,7 @@ final class SceneDocumentTests: XCTestCase {
                 ]
             )
             let doc = try SceneDocument.load(from: reader, assets: nil)
-            guard case .particle(_, _, let b) = doc.layers[0].content else {
+            guard case .particle(_, _, let b, _, _) = doc.layers[0].content else {
                 throw XCTSkip("파티클 레이어여야 한다: \(doc.layers[0].content)")
             }
             return b
@@ -602,7 +602,7 @@ final class SceneDocumentTests: XCTestCase {
             ]
         )
         let doc = try SceneDocument.load(from: reader, assets: nil)
-        guard case .particle(let preset, _, _) = doc.layers[0].content else {
+        guard case .particle(let preset, _, _, _, _) = doc.layers[0].content else {
             return XCTFail("일부만 인식 못 해도 그려야 한다")
         }
         XCTAssertEqual(preset.emitters.count, 1)
@@ -849,13 +849,12 @@ extension SceneDocumentTests {
         }
     }
 
-    /// 굴절 파티클은 그리지 않는다.
+    /// 굴절 파티클은 **법선 지도까지 들고** 나온다.
     ///
     /// 재질의 콤보에 `REFRACT`가 있으면 그 스프라이트는 색이 아니라 **배경을
-    /// 휘게 하는 렌즈**다. 함께 선언된 노멀맵으로 뒤 그림을 굴절시켜야 유리에
-    /// 맺힌 물방울로 보인다. 우리 파티클 파이프라인은 배경을 읽지 못하고,
-    /// 그대로 그리면 텍스처가 흰 덩어리라 화면에 불투명한 흰 점이 뜬다.
-    func testRefractiveParticleIsSkipped() throws {
+    /// 휘게 하는 렌즈**다. 두 번째 텍스처가 그 법선 지도이고, 그것 없이
+    /// 그리면 흰 덩어리가 뜬다. 그래서 경로가 함께 나와야 한다.
+    func testRefractiveParticleCarriesNormalMap() throws {
         let reader = try makeScenePkg(
             scene: """
             {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
@@ -873,10 +872,96 @@ extension SceneDocumentTests {
                     """,
             ])
         let layer = try XCTUnwrap(SceneDocument.load(from: reader).layers.first)
-        guard case .unsupported(let reason) = layer.content else {
-            return XCTFail("굴절 파티클을 그리면 흰 덩어리가 된다: \(layer.content)")
+        guard case .particle(_, let texturePath, _, let normalPath, _) = layer.content else {
+            return XCTFail("굴절 파티클도 그려야 한다: \(layer.content)")
         }
-        XCTAssertTrue(reason.contains("굴절"), "이유: \(reason)")
+        XCTAssertEqual(texturePath, "materials/particle/water/rain_drops_sheet.tex")
+        XCTAssertEqual(normalPath, "materials/particle/water/rain_drops_sheet_normal.tex",
+                       "두 번째 텍스처가 법선 지도다")
+    }
+
+    /// `REFRACT`가 꺼져 있으면 두 번째 텍스처가 있어도 렌즈가 아니다.
+    /// `magic_vortex_0`이 `REFRACT: 0`으로 적고 텍스처를 둘 들고 온다 —
+    /// 텍스처 수만 보고 판단하면 마법 소용돌이가 배경을 휘게 만든다.
+    func testTwoTexturesWithoutRefractComboIsNotALens() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "vortex", "particle": "particles/rain.json",
+                          "origin": "10.00000 10.00000 0.00000"}]}
+            """,
+            extras: [
+                "particles/rain.json":
+                    #"{"maxcount": 8, "material": "materials/rain.json", "emitter": [], "initializer": []}"#,
+                "materials/rain.json": """
+                    {"passes": [{"shader": "genericparticle",
+                     "textures": ["particle/beam", "particle/beam_mask"],
+                     "combos": {"REFRACT": 0}}]}
+                    """,
+            ])
+        let layer = try XCTUnwrap(SceneDocument.load(from: reader).layers.first)
+        guard case .particle(_, _, _, let normalPath, _) = layer.content else {
+            return XCTFail("그려야 한다: \(layer.content)")
+        }
+        XCTAssertNil(normalPath, "콤보가 꺼져 있으면 굴절이 아니다")
+    }
+
+    /// 미는 정도는 재질이 정한다. 놓치면 물방울이 배경을 거의 안 휜다.
+    /// 실물 유리창 비가 -0.1이고, 셰이더 주석의 기본값은 0.05다.
+    func testRefractAmountComesFromTheMaterial() throws {
+        func amount(_ constants: String) throws -> Double {
+            let reader = try makeScenePkg(
+                scene: """
+                {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+                 "objects": [{"id": 1, "name": "rain", "particle": "particles/rain.json",
+                              "origin": "10.00000 10.00000 0.00000"}]}
+                """,
+                extras: [
+                    "particles/rain.json":
+                        #"{"maxcount": 8, "material": "materials/rain.json", "emitter": [], "initializer": []}"#,
+                    "materials/rain.json": """
+                        {"passes": [{"shader": "genericparticle",
+                         "textures": ["particle/drop", "particle/drop_normal"],
+                         "combos": {"REFRACT": 1}\(constants)}]}
+                        """,
+                ])
+            let layer = try XCTUnwrap(SceneDocument.load(from: reader).layers.first)
+            guard case .particle(_, _, _, _, let amount) = layer.content else {
+                throw XCTSkip("파티클이 아니다")
+            }
+            return amount
+        }
+        XCTAssertEqual(
+            try amount(#", "constantshadervalues": {"ui_editor_properties_refract_amount": -0.1}"#),
+            -0.1, accuracy: 0.0001)
+        XCTAssertEqual(try amount(""), 0.05, accuracy: 0.0001, "안 적으면 셰이더 기본값")
+        XCTAssertEqual(
+            try amount(#", "constantshadervalues": {"ui_editor_properties_refract_amount": 50}"#),
+            1, accuracy: 0.0001, "범위를 벗어나면 죈다")
+    }
+
+    /// `REFRACT`가 켜져 있어도 텍스처가 하나뿐이면 렌즈가 아니다.
+    /// 창작마당 `leaves1`이 그 꼴이라, 렌즈로 다루면 꽃잎이 사라진다.
+    func testRefractWithoutNormalMapIsAPlainSprite() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "leaves", "particle": "particles/rain.json",
+                          "origin": "10.00000 10.00000 0.00000"}]}
+            """,
+            extras: [
+                "particles/rain.json":
+                    #"{"maxcount": 8, "material": "materials/rain.json", "emitter": [], "initializer": []}"#,
+                "materials/rain.json": """
+                    {"passes": [{"shader": "genericparticle",
+                     "textures": ["particle/leaf"], "combos": {"REFRACT": 1}}]}
+                    """,
+            ])
+        let layer = try XCTUnwrap(SceneDocument.load(from: reader).layers.first)
+        guard case .particle(_, _, _, let normalPath, _) = layer.content else {
+            return XCTFail("그려야 한다: \(layer.content)")
+        }
+        XCTAssertNil(normalPath)
     }
 
     /// 콤보가 없는 파티클은 그대로 그린다. 내리는 비(`rainperspective`)가 이쪽이라,

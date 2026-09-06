@@ -321,7 +321,7 @@ final class RealScenesTests: XCTestCase {
         }
         let doc = try SceneDocument.load(from: reader, assets: assets)
         let particles = doc.layers.compactMap { layer -> ParticlePreset? in
-            if case .particle(let preset, _, _) = layer.content { return preset }
+            if case .particle(let preset, _, _, _, _) = layer.content { return preset }
             return nil
         }
         XCTAssertEqual(particles.count, 3, "Snow flat, Rain perspective, Sakura")
@@ -345,7 +345,7 @@ final class RealScenesTests: XCTestCase {
             do {
                 let doc = try SceneDocument.load(from: reader, assets: assets)
                 for layer in doc.layers {
-                    if case .particle(let preset, _, _) = layer.content {
+                    if case .particle(let preset, _, _, _, _) = layer.content {
                         if !preset.malformedNames.isEmpty {
                             if allMalformed[id] == nil { allMalformed[id] = [] }
                             allMalformed[id]?.append((layer.name, preset.malformedNames))

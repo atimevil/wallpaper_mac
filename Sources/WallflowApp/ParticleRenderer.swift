@@ -67,6 +67,19 @@ final class ParticleRenderer {
     private let sizeScale: Float
 
     private var instanceCount = 0
+    /// 굴절 파티클의 법선 지도. 없으면 보통 파티클이다.
+    private let normalMap: MTLTexture?
+    /// 재질이 정한 미는 정도(`ui_editor_properties_refract_amount`). 기본 0.05.
+    /// 실물 유리창 비는 -0.1이다 — 음수면 반대로 민다.
+    private let refractAmount: Float
+    /// 이 레이어 뒤에 이미 그려진 화면. 굴절이 이걸 밀어 읽는다.
+    /// 매 프레임 컴포지터가 넣어 준다.
+    private var background: MTLTexture?
+
+    /// 뒤 화면이 필요한지. 컴포지터가 이걸 보고 인코더를 끊어 화면을 떠 준다.
+    var needsBackground: Bool { normalMap != nil }
+
+    func setBackground(_ texture: MTLTexture?) { background = texture }
     private var textureRatio: Float = 1
     private let sheet: ParticleSpriteSheet?
     /// 시트를 훑을지, 한 장을 골라 고정할지.
@@ -86,8 +99,12 @@ final class ParticleRenderer {
         layerOrigin: SIMD3<Float>,
         layerScale: SIMD3<Float>,
         sheet: ParticleSpriteSheet?,
-        animationMode: ParticleAnimationMode
+        animationMode: ParticleAnimationMode,
+        normalMap: MTLTexture? = nil,
+        refractAmount: Float = 0.05
     ) throws {
+        self.normalMap = normalMap
+        self.refractAmount = refractAmount
         self.layerOrigin = layerOrigin
         self.layerScale = layerScale
         self.animationMode = animationMode
@@ -113,7 +130,9 @@ final class ParticleRenderer {
 
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = library.makeFunction(name: "particle_vertex")
-        descriptor.fragmentFunction = library.makeFunction(name: "particle_fragment")
+        // 굴절이면 법선 지도로 화면을 밀어 읽는 프래그먼트를 쓴다.
+        descriptor.fragmentFunction = library.makeFunction(
+            name: normalMap == nil ? "particle_fragment" : "particle_refract_fragment")
         descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         descriptor.colorAttachments[0].isBlendingEnabled = true
         descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
@@ -214,6 +233,17 @@ final class ParticleRenderer {
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<ParticleUniforms>.stride, index: 3)
         encoder.setFragmentTexture(texture, index: 0)
         encoder.setFragmentSamplerState(sampler, index: 0)
+        if let normalMap {
+            // 뒤 화면이 아직 없으면 이 프레임은 건너뛴다. 안 묶고 그리면
+            // Metal이 그 draw를 버리고, 그 이유는 화면에 안 나온다.
+            guard let background else { return }
+            encoder.setFragmentTexture(normalMap, index: 1)
+            encoder.setFragmentTexture(background, index: 2)
+            var screen = SIMD3<Float>(
+                Float(background.width), Float(background.height), refractAmount)
+            encoder.setFragmentBytes(
+                &screen, length: MemoryLayout<SIMD3<Float>>.stride, index: 0)
+        }
         encoder.drawPrimitives(
             type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: instanceCount)
     }

@@ -264,13 +264,20 @@ public struct ParticleChild: Equatable, Sendable {
     public let preset: ParticlePreset
     public let texturePath: String
     public let blend: ParticleBlendMode
+    /// 굴절 자식의 법선 지도. 불꽃이 터질 때의 충격파가 이것이다.
+    public let normalPath: String?
+    /// 재질이 정한 미는 정도.
+    public let refractAmount: Double
 
     public init(reference: ParticleChildReference, preset: ParticlePreset,
-                texturePath: String, blend: ParticleBlendMode) {
+                texturePath: String, blend: ParticleBlendMode,
+                normalPath: String? = nil, refractAmount: Double = 0.05) {
+        self.refractAmount = refractAmount
         self.reference = reference
         self.preset = preset
         self.texturePath = texturePath
         self.blend = blend
+        self.normalPath = normalPath
     }
 }
 

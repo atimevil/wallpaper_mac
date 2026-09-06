@@ -163,17 +163,19 @@ public struct SceneDocument: Sendable {
     static func applyingParticleBudget(_ layers: [SceneLayer]) -> [SceneLayer] {
         var total = 0
         for layer in layers {
-            if case .particle(let preset, _, _) = layer.content { total += preset.maxCount }
+            if case .particle(let preset, _, _, _, _) = layer.content { total += preset.maxCount }
         }
         let factor = ParticlePreset.budgetScale(forTotalCount: total)
         guard factor < 1 else { return layers }
         return layers.map { layer in
-            guard case .particle(let preset, let texturePath, let blend) = layer.content else {
+            guard case .particle(let preset, let texturePath, let blend, let normalPath,
+                                 let refractAmount) = layer.content else {
                 return layer
             }
             return layer.replacingContent(
                 .particle(preset: preset.scaledToBudget(factor),
-                          texturePath: texturePath, blend: blend))
+                          texturePath: texturePath, blend: blend, normalPath: normalPath,
+                          refractAmount: refractAmount))
         }
     }
 
@@ -603,24 +605,32 @@ public struct SceneDocument: Sendable {
             return .unsupported(reason: "파티클 머티리얼의 첫 텍스처가 없다: \(preset.materialPath)")
         }
 
-        // **굴절 파티클은 그리지 않는다.** 그 스프라이트는 색이 아니라 **배경을
-        // 휘게 하는 렌즈**다. 함께 선언된 노멀맵으로 뒤 그림을 굴절시켜야 유리에
-        // 맺힌 물방울로 보인다. 우리 파티클 파이프라인은 배경을 읽지 못하고,
-        // 그대로 그리면 텍스처가 흰 덩어리라 화면에 불투명한 흰 점이 뜬다(실물 확인).
+        // **굴절 파티클**은 색이 아니라 **배경을 휘게 하는 렌즈**다. 함께 선언된
+        // 노멀맵으로 뒤 그림을 밀어 읽어야 유리에 맺힌 물방울로 보인다.
+        // 그냥 그리면 텍스처가 흰 덩어리라 불투명한 흰 점이 뜬다(실물 확인).
         //
         // 조건 둘을 **함께** 본다. 실물에서 하나만 보면 틀린다:
         // - `REFRACT`가 **켜져 있어야** 한다. `magic_vortex_0`은 값이 0이다.
         // - **노멀맵이 함께 와야** 한다. 굴절은 그것 없이 성립하지 않는다.
         //   창작마당 `leaves1`은 `REFRACT: 1`인데 텍스처가 꽃 하나뿐이라
-        //   그냥 스프라이트다 — 이걸 건너뛰면 꽃잎이 사라진다.
-        //
-        // 내리는 비는 그대로 남는다. `rainperspective`에는 이 콤보가 없다.
+        //   그냥 스프라이트다 — 이걸 렌즈로 다루면 꽃잎이 사라진다.
         let refractOn = ((pass["combos"] as? [String: Any])?["REFRACT"] as? NSNumber)?
             .intValue ?? 0
-        if refractOn != 0, textures.count >= 2 {
-            return .unsupported(
-                reason: "굴절 파티클이라 배경을 휘게 해야 한다: \(preset.materialPath)")
-        }
+        let normalPath: String? = {
+            guard refractOn != 0, textures.count >= 2,
+                  let name = textures[1] as? String, !name.isEmpty else { return nil }
+            return "materials/\(name).tex"
+        }()
+        // 미는 정도는 재질이 정한다. 셰이더 주석의 기본값이 0.05이고,
+        // 실물 유리창 비는 -0.1이다(음수면 반대로 민다). 여기가 곧 굴절의
+        // 세기라, 놓치면 물방울이 배경을 거의 안 휘거나 화면을 뭉갠다.
+        let refractAmount: Double = {
+            let values = pass["constantshadervalues"] as? [String: Any] ?? [:]
+            let raw = (values["ui_editor_properties_refract_amount"] as? [String: Any])?["value"]
+                ?? values["ui_editor_properties_refract_amount"]
+            guard let value = (raw as? NSNumber)?.doubleValue, value.isFinite else { return 0.05 }
+            return Swift.min(Swift.max(value, -1), 1)
+        }()
 
         // 합성 방식. 없으면 씬 머티리얼의 기본값인 translucent다.
         // additive만 특별 취급하는 이유는 실물에서 이 둘만 나오기 때문이다.
@@ -633,7 +643,8 @@ public struct SceneDocument: Sendable {
         let withChildren = preset.withChildren(
             resolveParticleChildren(preset.childReferences, resolver: resolver, depth: 0))
         return .particle(preset: withChildren.applying(override),
-                         texturePath: texturePath, blend: blend)
+                         texturePath: texturePath, blend: blend, normalPath: normalPath,
+                         refractAmount: refractAmount)
     }
 
     /// 자식 프리셋을 재귀로 읽는다.
@@ -657,10 +668,24 @@ public struct SceneDocument: Sendable {
                   let textures = pass["textures"] as? [Any],
                   let textureName = textures.first as? String
             else { continue }
-            // 부모와 같은 이유로 굴절 자식은 건너뛴다.
+            // 굴절 자식도 부모와 같은 길로 그린다. 불꽃이 터질 때의 충격파가
+            // 이것이라, 건너뛰면 폭발에서 일그러짐만 빠진다.
             let refractOn = ((pass["combos"] as? [String: Any])?["REFRACT"] as? NSNumber)?
                 .intValue ?? 0
-            if refractOn != 0, textures.count >= 2 { continue }
+            let childNormal: String? = {
+                guard refractOn != 0, textures.count >= 2,
+                      let name = textures[1] as? String, !name.isEmpty else { return nil }
+                return "materials/\(name).tex"
+            }()
+            let childRefract: Double = {
+                let values = pass["constantshadervalues"] as? [String: Any] ?? [:]
+                let raw = (values["ui_editor_properties_refract_amount"]
+                    as? [String: Any])?["value"]
+                    ?? values["ui_editor_properties_refract_amount"]
+                guard let value = (raw as? NSNumber)?.doubleValue,
+                      value.isFinite else { return 0.05 }
+                return Swift.min(Swift.max(value, -1), 1)
+            }()
             let blend: ParticleBlendMode =
                 (pass["blending"] as? String) == "additive" ? .additive : .translucent
             let nested = resolveParticleChildren(
@@ -669,7 +694,7 @@ public struct SceneDocument: Sendable {
                 reference: reference,
                 preset: child.withChildren(nested),
                 texturePath: "materials/\(textureName).tex",
-                blend: blend))
+                blend: blend, normalPath: childNormal, refractAmount: childRefract))
         }
         return out
     }

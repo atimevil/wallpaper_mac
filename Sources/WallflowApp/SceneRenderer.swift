@@ -594,6 +594,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 안 그려진다. 텍스처를 못 읽은 자식은 건너뛰고 나머지는 그대로 그린다.
     private static func buildParticleRenderers(
         preset: ParticlePreset, texturePath: String, blend: ParticleBlendMode,
+        normalPath: String?, refractAmount: Double,
         key: String, instances: Int, layer: SceneLayer, compositor: MetalCompositor,
         resolver: ReferenceResolver,
         into out: inout [(key: String, renderer: ParticleRenderer, ratio: Float)],
@@ -614,6 +615,24 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 // 잡아 두지 않으면 나중에 터진 불꽃이 잘려 나간다.
                 let capacity = min(preset.maxCount * max(1, instances),
                                    ParticlePreset.maxAllowedCount)
+                // 굴절이면 법선 지도를 함께 올린다. 못 읽으면 굴절만 포기하고
+                // 파티클은 그대로 그린다 — 레이어 전체를 버리는 것보다 낫다.
+                var normalMap: MTLTexture?
+                if let normalPath {
+                    if let raw = resolver.data(for: normalPath),
+                       let decoded = try? TexDecoder.decode(raw),
+                       case .video = decoded {
+                        skipped.append("\(layer.name): 굴절 법선 지도가 비디오다: \(normalPath)")
+                    } else if let raw = resolver.data(for: normalPath),
+                              let decoded = try? TexDecoder.decode(raw),
+                              let loaded = try? compositor.makeTexture(from: decoded) {
+                        normalMap = loaded
+                    } else {
+                        skipped.append(
+                            "\(layer.name): 굴절 법선 지도를 읽지 못해 휘지 않게 그린다: "
+                                + normalPath)
+                    }
+                }
                 let renderer = try compositor.makeParticleRenderer(
                     maxCount: capacity, blend: blend, texture: texture,
                     layerOrigin: SIMD3(Float(layer.origin.x), Float(layer.origin.y),
@@ -621,12 +640,14 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     layerScale: SIMD3(Float(layer.scale.x), Float(layer.scale.y),
                                       Float(layer.scale.z)),
                     sheet: Self.spriteSheet(of: raw),
-                    animationMode: preset.animationMode)
+                    animationMode: preset.animationMode,
+                    normalMap: normalMap, refractAmount: Float(refractAmount))
                 out.append((key, renderer, ratio))
                 for (index, child) in preset.children.enumerated() {
                     buildParticleRenderers(
                         preset: child.preset, texturePath: child.texturePath,
-                        blend: child.blend, key: key + ".\(index)",
+                        blend: child.blend, normalPath: child.normalPath,
+                        refractAmount: child.refractAmount, key: key + ".\(index)",
                         instances: instances * max(1, child.reference.maxCount),
                         layer: layer, compositor: compositor, resolver: resolver,
                         into: &out, skipped: &skipped)
@@ -894,13 +915,14 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     skipped.append("\(layer.name): 텍스처 로드 실패 \(error)")
                 }
 
-            case .particle(let preset, let texturePath, let blend):
+            case .particle(let preset, let texturePath, let blend, let normalPath, let refractAmount):
                 // 자식까지 한 번에 만든다. 자식 파티클은 부모와 **다른 텍스처와
                 // 다른 혼합**을 쓴다(불꽃 잔해는 가산, 빗줄기 꼬리는 반투명) —
                 // 그래서 렌더러가 그룹마다 하나씩 필요하다.
                 var built: [(key: String, renderer: ParticleRenderer, ratio: Float)] = []
                 Self.buildParticleRenderers(
-                    preset: preset, texturePath: texturePath, blend: blend, key: "0",
+                    preset: preset, texturePath: texturePath, blend: blend,
+                    normalPath: normalPath, refractAmount: refractAmount, key: "0",
                     instances: 1, layer: layer, compositor: compositor, resolver: resolver,
                     into: &built, skipped: &skipped)
                 guard let root = built.first, root.key == "0" else {

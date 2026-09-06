@@ -39,7 +39,7 @@ final class RealParticleChildScenesTests: XCTestCase {
         var systems: [ParticleSystem] = []
         var withChildren = 0
         for layer in document.layers {
-            guard case .particle(let preset, _, _) = layer.content else { continue }
+            guard case .particle(let preset, _, _, _, _) = layer.content else { continue }
             if !preset.children.isEmpty { withChildren += 1 }
             systems.append(ParticleSystem(preset: preset, random: SeededRandom(seed: 1)))
         }

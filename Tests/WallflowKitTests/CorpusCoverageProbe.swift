@@ -61,7 +61,7 @@ final class CorpusCoverageProbe: XCTestCase {
                     case .sound: kinds["sound", default: 0] += 1
                     case .postProcess: kinds["postProcess", default: 0] += 1
                     case .composition: kinds["composition", default: 0] += 1
-                    case .particle(let preset, _, _):
+                    case .particle(let preset, _, _, _, _):
                         kinds["particle", default: 0] += 1
                         let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
                         for name in system.unimplementedOperators {

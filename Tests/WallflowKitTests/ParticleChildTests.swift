@@ -70,7 +70,7 @@ final class ParticleChildTests: XCTestCase {
         let content = SceneDocument.resolveParticleContent(
             presetPath: "particles/parent.json", resolver: resolver,
             override: ParticleOverride())
-        guard case .particle(let preset, _, _) = content else {
+        guard case .particle(let preset, _, _, _, _) = content else {
             return XCTFail("파티클로 풀리지 않았다: \(content)")
         }
         XCTAssertEqual(preset.children.count, 1)
@@ -88,7 +88,7 @@ final class ParticleChildTests: XCTestCase {
         let content = SceneDocument.resolveParticleContent(
             presetPath: "particles/parent.json", resolver: resolver,
             override: ParticleOverride())
-        guard case .particle(let preset, let texturePath, _) = content else {
+        guard case .particle(let preset, let texturePath, _, _, _) = content else {
             return XCTFail("파티클로 풀리지 않았다: \(content)")
         }
         XCTAssertEqual(texturePath, "materials/p.tex")
@@ -106,7 +106,7 @@ final class ParticleChildTests: XCTestCase {
         let content = SceneDocument.resolveParticleContent(
             presetPath: "particles/parent.json", resolver: resolver,
             override: ParticleOverride())
-        guard case .particle(let preset, _, _) = content else {
+        guard case .particle(let preset, _, _, _, _) = content else {
             return XCTFail("파티클로 풀리지 않았다: \(content)")
         }
         // 두 단계까지만 편다: 자식 하나, 그 자식의 자식 하나, 거기서 끝.

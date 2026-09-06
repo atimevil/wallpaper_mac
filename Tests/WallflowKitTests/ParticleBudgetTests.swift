@@ -22,14 +22,14 @@ final class ParticleBudgetTests: XCTestCase {
 
     private func counts(_ layers: [SceneLayer]) -> [Int] {
         layers.compactMap {
-            if case .particle(let p, _, _) = $0.content { return p.maxCount }
+            if case .particle(let p, _, _, _, _) = $0.content { return p.maxCount }
             return nil
         }
     }
 
     private func rates(_ layers: [SceneLayer]) -> [Double] {
         layers.compactMap {
-            guard case .particle(let p, _, _) = $0.content,
+            guard case .particle(let p, _, _, _, _) = $0.content,
                   case .sphereRandom(let r, _, _, _, _, _) = p.emitters[0] else { return nil }
             return r
         }

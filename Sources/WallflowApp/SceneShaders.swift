@@ -13,6 +13,9 @@ enum SceneShaders {
         // 파티클마다 다른 색·알파를 프래그먼트로 나른다.
         // quad_vertex도 반드시 채워야 한다 — 안 채우면 쓰레기 값이 넘어간다.
         float4 color;
+        // 빌보드의 right/up을 **화면 uv 단위로** 옮긴 것. 굴절이 법선 지도를
+        // 화면 좌표로 풀 때 쓴다. 굴절이 아닌 경로는 0으로 채운다.
+        float4 screenTangents;
     };
 
     struct QuadUniforms {
@@ -50,6 +53,7 @@ enum SceneShaders {
         out.position = float4(ndc, 0.0, 1.0);
         out.uv = in.position + 0.5;
         out.color = u.color;
+        out.screenTangents = float4(0.0);
         return out;
     }
 
@@ -298,6 +302,19 @@ enum SceneShaders {
         out.position = float4(ndc, 0.0, 1.0);
         out.uv = (corner + float2(col, row)) * u.frameScale;
         out.color = p.color;
+        // `common_particles.h`의 `ComputeScreenRefractionTangents` 그대로다.
+        //
+        //   right = normalize(right); up = normalize(up);
+        //   tangents.xy = (dot(right, g_ViewRight), dot(up, g_ViewRight));
+        //   tangents.zw = (dot(right, g_ViewUp),    dot(up, g_ViewUp));
+        //
+        // **크기가 곱해지지 않는다.** 빌보드의 축을 화면 축에 투영한 방향일
+        // 뿐이고, 미는 정도는 재질의 `refract_amount` 하나가 정한다. 크기를
+        // 곱하면 큰 물방울이 화면을 통째로 밀어 얼굴이 뭉개진다(실물에서 확인).
+        // 직교 2D라 g_ViewRight/g_ViewUp은 (1,0,0)/(0,1,0)이다.
+        float3 nRight = normalize(right);
+        float3 nUp = normalize(up);
+        out.screenTangents = float4(nRight.x, nUp.x, nRight.y, nUp.y);
         return out;
     }
 
@@ -307,6 +324,41 @@ enum SceneShaders {
         sampler samp [[sampler(0)]]
     ) {
         return tex.sample(samp, in.uv) * in.color;
+    }
+
+    /// 굴절 파티클. `genericparticle.frag`의 `REFRACT` 경로를 옮긴 것이다.
+    ///
+    /// 법선 지도로 화면 좌표를 밀어 **뒤에 이미 그려진 화면**을 그 자리에서
+    /// 읽고, 파티클 색에 곱한다. 그래서 유리구슬처럼 배경이 휜다.
+    /// 원문:
+    ///   screenRefractionOffset = v_ScreenTangents.xy * normal.x
+    ///                          + v_ScreenTangents.zw * normal.y;
+    ///   screenRefractionOffset *= normal.a * v_Color.a;
+    ///   color.rgb *= texSample2D(g_Texture3, refractTexCoord).rgb;
+    fragment float4 particle_refract_fragment(
+        VertexOut in [[stage_in]],
+        texture2d<float> tex [[texture(0)]],
+        texture2d<float> normalMap [[texture(1)]],
+        texture2d<float> background [[texture(2)]],
+        sampler samp [[sampler(0)]],
+        // x·y는 화면 픽셀 크기, z는 재질의 refract_amount.
+        constant float3 &screen [[buffer(0)]]
+    ) {
+        float4 color = tex.sample(samp, in.uv) * in.color;
+        float4 n = normalMap.sample(samp, in.uv);
+        // `common_fragment.h`의 `DecompressNormalWithMask` 그대로다. **x는 알파에서
+        // 오고, 마스크는 빨강에서 온다**(`normal.xw = normal.wx`) — 흔한
+        // "법선은 AG, 마스크는 R" 포장이다. 빨강을 x로 읽으면 마스크가 법선
+        // 자리로 들어가 물방울마다 화면이 통째로 밀린다(실물에서 확인).
+        float2 normal = float2(n.a, n.g) * 2.0 - 1.0;
+        float mask = n.r;
+        float2 offset = (in.screenTangents.xy * normal.x + in.screenTangents.zw * normal.y)
+            * screen.z * mask * in.color.a;
+        // 원문은 GL에서 offset.y를 뒤집는다. 그쪽 화면 uv는 y가 위로 증가하고
+        // 우리 것은 아래로 증가하니, 뒤집기가 한 번 더 걸려 서로 지워진다.
+        float2 screenUV = in.position.xy / max(screen.xy, float2(1.0)) + offset;
+        color.rgb *= background.sample(samp, saturate(screenUV)).rgb;
+        return color;
     }
     """
 }

@@ -184,12 +184,14 @@ final class MetalCompositor {
     func makeParticleRenderer(
         maxCount: Int, blend: ParticleBlendMode, texture: MTLTexture,
         layerOrigin: SIMD3<Float>, layerScale: SIMD3<Float>,
-        sheet: ParticleSpriteSheet?, animationMode: ParticleAnimationMode
+        sheet: ParticleSpriteSheet?, animationMode: ParticleAnimationMode,
+        normalMap: MTLTexture? = nil, refractAmount: Float = 0.05
     ) throws -> ParticleRenderer {
         try ParticleRenderer(
             device: device, library: library, maxCount: maxCount,
             blend: blend, texture: texture, sampler: sampler, layerOrigin: layerOrigin,
-            layerScale: layerScale, sheet: sheet, animationMode: animationMode)
+            layerScale: layerScale, sheet: sheet, animationMode: animationMode,
+            normalMap: normalMap, refractAmount: refractAmount)
     }
 
     /// 씬의 직교 공간 크기를 정한다.
@@ -233,11 +235,36 @@ final class MetalCompositor {
     /// 화면을 셰이더가 읽어야 하는데, 표시용 드로어블은 읽을 수 없다.
     private var needsOffscreen: Bool {
         if postProcess != nil { return true }
-        return layers.contains { if case .composition = $0.1 { return true } else { return false } }
+        return layers.contains {
+            switch $0.1 {
+            case .composition: return true
+            // 굴절 파티클도 뒤 화면을 읽어야 한다. 드로어블은 읽을 수 없다.
+            case .particles(let renderer): return renderer.needsBackground
+            default: return false
+            }
+        }
     }
 
     /// 후처리가 있을 때 레이어를 모아 그리는 곳.
     private var frameTexture: MTLTexture?
+    /// 굴절이 읽을 "여기까지 그려진 화면"의 사본.
+    ///
+    /// 그리는 중인 텍스처를 그대로 읽을 수는 없다 — 같은 텍스처를 읽으면서
+    /// 쓰면 결과가 정의되지 않는다. 그래서 한 장 떠 놓고 그것을 읽는다.
+    private var backdropTexture: MTLTexture?
+
+    private func backdrop(width: Int, height: Int) -> MTLTexture? {
+        if let backdropTexture, backdropTexture.width == width,
+           backdropTexture.height == height {
+            return backdropTexture
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: Self.colorPixelFormat, width: width, height: height, mipmapped: false)
+        descriptor.usage = [.shaderRead, .renderTarget]
+        descriptor.storageMode = .private
+        backdropTexture = device.makeTexture(descriptor: descriptor)
+        return backdropTexture
+    }
 
     private func frame(width: Int, height: Int) -> MTLTexture? {
         if let frameTexture, frameTexture.width == width, frameTexture.height == height {
@@ -351,6 +378,26 @@ final class MetalCompositor {
                 encoder.setFragmentTexture(result, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
             case .particles(let renderer):
+                if renderer.needsBackground {
+                    // 굴절은 **뒤에 이미 그려진 화면**을 읽는다. 그리는 중인
+                    // 텍스처를 그대로 읽을 수는 없으므로, 인코더를 끊어 지금까지
+                    // 그린 것을 확정하고 한 장 떠서 넘긴다.
+                    if let offscreen,
+                       let copy = backdrop(width: offscreen.width, height: offscreen.height) {
+                        encoder.endEncoding()
+                        if let blit = commands.makeBlitCommandEncoder() {
+                            blit.copy(from: offscreen, to: copy)
+                            blit.endEncoding()
+                        }
+                        guard let restarted = startEncoder(clear: false) else { return }
+                        encoder = restarted
+                        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                        renderer.setBackground(copy)
+                    } else {
+                        // 오프스크린이 없으면 읽을 화면도 없다. 이 프레임은 건너뛴다.
+                        renderer.setBackground(nil)
+                    }
+                }
                 // 파티클은 자기 draw를 인코딩한다. 아래 공통 drawPrimitives까지
                 // 실행되면 파티클 위에 정체불명의 쿼드가 한 장 더 그려진다.
                 renderer.encode(into: encoder, projection: projection)
