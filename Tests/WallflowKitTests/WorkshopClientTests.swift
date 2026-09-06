@@ -123,6 +123,17 @@ extension WorkshopClientTests {
                        WorkshopFilter(tags: ["Anime", "Scene"]).key)
     }
 
+    /// 특성은 팝업이 아니라 체크박스라 "제한 없음" 칸이 없다. 전부 진짜 태그여야
+    /// 하고, 여러 개를 함께 걸면 교집합이다(스팀에 두 태그를 보내 확인했다 —
+    /// 돌아온 항목 전부가 둘 다 달고 있었다).
+    func testFlagChoicesAreAllRealTags() {
+        XCTAssertFalse(WorkshopTag.flags.isEmpty)
+        XCTAssertTrue(WorkshopTag.flags.allSatisfy { !$0.tag.isEmpty && !$0.label.isEmpty })
+        let filter = WorkshopFilter(tags: WorkshopTag.flags.map(\.tag) + [""])
+        XCTAssertEqual(filter.tags.count, WorkshopTag.flags.count, "빈 것만 걸러져야 한다")
+        XCTAssertTrue(filter.queryItems.allSatisfy { $0.name == "requiredtags[]" })
+    }
+
     /// 태그 목록의 첫 칸은 "제한 없음"이라 빈 태그여야 한다.
     /// 여기에 진짜 태그가 들어가면 기본 화면부터 걸러진 목록이 뜬다.
     func testTagChoicesStartWithNoRestriction() {

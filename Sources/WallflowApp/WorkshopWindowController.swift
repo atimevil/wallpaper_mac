@@ -65,6 +65,12 @@ final class WorkshopWindowController: NSWindowController {
     private let genrePopup = NSPopUpButton()
     private let resolutionPopup = NSPopUpButton()
     private let ratingPopup = NSPopUpButton()
+    /// 켜고 끄는 특성들(승인됨·오디오 응답성·커스텀 가능…). 여러 개를 함께 걸 수
+    /// 있어 팝업이 아니라 체크박스다. 실물 창작마당의 "다음만 표시" 상자다.
+    private let flagCheckboxes: [NSButton] = WorkshopTag.flags.map {
+        NSButton(checkboxWithTitle: $0.label, target: nil, action: nil)
+    }
+    private var flagRow: NSStackView?
     private let hideInstalledCheckbox =
         NSButton(checkboxWithTitle: "받은 것 숨기기", target: nil, action: nil)
     private let loginButton = NSButton(title: "스팀 로그인", target: nil, action: nil)
@@ -139,6 +145,11 @@ final class WorkshopWindowController: NSWindowController {
             popup.target = self
             popup.action = #selector(filterChanged)
         }
+        for checkbox in flagCheckboxes {
+            checkbox.state = .off
+            checkbox.target = self
+            checkbox.action = #selector(filterChanged)
+        }
 
         hideInstalledCheckbox.state = .off
         hideInstalledCheckbox.target = self
@@ -182,7 +193,13 @@ final class WorkshopWindowController: NSWindowController {
             popup.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
 
-        let top = NSStackView(views: [tabRow, searchRow])
+        // 특성은 셋째 줄이다. 둘째 줄은 팝업 넷으로 이미 찼다.
+        let flagRow = NSStackView(views: flagCheckboxes)
+        flagRow.orientation = .horizontal
+        flagRow.spacing = 12
+        self.flagRow = flagRow
+
+        let top = NSStackView(views: [tabRow, searchRow, flagRow])
         top.orientation = .vertical
         top.spacing = 8
         top.alignment = .leading
@@ -302,6 +319,8 @@ final class WorkshopWindowController: NSWindowController {
         ].map { popup, choices in
             let index = max(0, popup.indexOfSelectedItem)
             return index < choices.count ? choices[index].tag : ""
+        } + zip(flagCheckboxes, WorkshopTag.flags).map { checkbox, choice in
+            checkbox.state == .on ? choice.tag : ""
         })
     }
 
@@ -412,6 +431,8 @@ final class WorkshopWindowController: NSWindowController {
                         hideInstalledCheckbox, accountField, loginButton] {
             control.isHidden = isLibrary
         }
+        // 특성은 스팀에 거는 조건이라 라이브러리에서는 뜻이 없다.
+        flagRow?.isHidden = isLibrary
         searchField.isHidden = next == .browse
         searchField.placeholderString = isLibrary ? "라이브러리에서 찾기" : "창작마당 검색"
         applyButton.isHidden = !isLibrary
