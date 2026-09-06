@@ -406,15 +406,10 @@ public struct SceneDocument: Sendable {
             return unsupported("origin이나 size를 읽을 수 없다")
         }
 
-        // 이펙트가 모양을 통째로 만드는 단색 레이어. 실물 음악 위젯의 淡化层/实色层이
-        // `util/white` 흰 판에 `gradientopacity`를 걸어 부드러운 띠를 만든다.
-        // 이펙트를 못 돌리는 채로 그리면 배경화면 위에 불투명한 흰 판이 그대로 남는다 —
-        // 안 그리는 쪽이 정직하다.
-        if object["effects"] != nil,
-           let textures = (object["instance"] as? [String: Any])?["textures"] as? [String],
-           textures.allSatisfy({ $0 == "util/white" }), !textures.isEmpty {
-            return unsupported("이펙트가 모양을 만드는 단색 레이어라 M6의 이펙트 체인이 필요하다")
-        }
+        // 이펙트가 모양을 통째로 만드는 단색 레이어(`util/white` + `gradientopacity`)는
+        // 한동안 건너뛰었다. 이펙트를 못 걸던 때는 불투명한 흰 판이 그대로 남았기
+        // 때문이다. 이제 이펙트를 걸 수 있으므로 그린다 — 걸지 못하면 렌더러가
+        // 그 레이어를 원본으로 되돌린다.
 
         let content = resolveContent(modelPath: modelPath, object: object, resolver: resolver)
         return SceneLayer(

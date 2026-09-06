@@ -119,11 +119,12 @@ final class SceneDocumentTests: XCTestCase {
         }
     }
 
-    /// 이펙트가 모양을 통째로 만드는 단색 레이어는 그리지 않는다.
-    /// 실물 음악 위젯의 淡化层이 `util/white` 흰 판에 `gradientopacity`를 걸어
-    /// 부드러운 띠를 만드는데, 이펙트 없이 그리면 배경화면 위에 불투명한
-    /// 흰 판이 그대로 남는다(실물 캡처로 확인).
-    func testWhiteSolidLayerShapedByEffectsIsSkipped() throws {
+    /// 이펙트가 모양을 만드는 단색 레이어도 **그린다.**
+    ///
+    /// 한동안은 건너뛰었다 — 이펙트를 못 걸던 때는 불투명한 흰 판이 그대로
+    /// 남았기 때문이다. 이제 이펙트를 걸 수 있으므로 그리고, 걸지 못하면
+    /// 렌더러가 그 레이어를 원본으로 되돌린다.
+    func testWhiteSolidLayerShapedByEffectsIsDrawn() throws {
         // 모델과 재질을 갖춰 둔다. 없으면 참조가 안 풀려서 어차피 unsupported가 되고,
         // 테스트가 흰 판 규칙이 아니라 그것을 재게 된다.
         let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(
@@ -139,8 +140,8 @@ final class SceneDocumentTests: XCTestCase {
                 "materials/m.json":
                     #"{"passes": [{"shader": "genericimage4", "textures": ["t"]}]}"#,
             ])).layers.first)
-        guard case .unsupported = layer.content else {
-            return XCTFail("흰 판을 그대로 그리면 안 된다: \(layer.content)")
+        if case .unsupported = layer.content {
+            XCTFail("이펙트를 걸 수 있으므로 그려야 한다")
         }
     }
 

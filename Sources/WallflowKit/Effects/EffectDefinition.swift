@@ -36,16 +36,22 @@ public struct EffectPass: Equatable, Sendable {
     public let combos: [String: Int]
     /// 씬이 정한 유니폼 값. 키는 셰이더 주석의 `material` 이름이다.
     public let constants: [String: EffectConstant]
+    /// 씬이 슬롯마다 지정한 텍스처 경로. `null`인 자리는 지정하지 않은 것이다.
+    ///
+    /// 실물 블러가 슬롯 1에 마스크를 준다 — 이걸 무시하면 흐림이 마스크 없이
+    /// **화면 전체**에 걸린다.
+    public let textures: [String?]
     public let blending: String
 
     public init(shaderName: String, target: String?, bindings: [EffectBinding],
                 combos: [String: Int], constants: [String: EffectConstant],
-                blending: String) {
+                textures: [String?] = [], blending: String) {
         self.shaderName = shaderName
         self.target = target
         self.bindings = bindings
         self.combos = combos
         self.constants = constants
+        self.textures = textures
         self.blending = blending
     }
 }
@@ -149,12 +155,16 @@ extension EffectDefinition {
                 constants[key] = constant
             }
 
+            // 씬이 슬롯마다 텍스처를 지정할 수 있다. `null`은 지정 안 한 자리다.
+            let sceneTextures = (scenePass["textures"] as? [Any] ?? []).map { $0 as? String }
+
             passes.append(EffectPass(
                 shaderName: shader,
                 target: pass["target"] as? String,
                 bindings: bindings,
                 combos: combos,
                 constants: constants,
+                textures: sceneTextures,
                 blending: firstPass["blending"] as? String ?? "normal"))
         }
         guard !passes.isEmpty else { return nil }

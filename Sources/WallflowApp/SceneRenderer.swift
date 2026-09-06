@@ -352,16 +352,13 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 확인했다(슬롯에 흰색을 묶으면 흰색이, 샘플링을 상수로 바꾸면 그 색이
     /// 화면 전체에 제대로 나온다). 원인은 그 사이 어딘가다.
     ///
-    /// 지금 상태(2026-09-06):
-    /// - **패스가 하나인 이펙트는 맞다.** `foliagesway`가 걸린 씬을 미리보기와
-    ///   비교해 확인했다.
-    /// - **패스가 여럿이고 곁버퍼(`_rt_*`)를 쓰는 체인은 화면이 하얘진다.**
-    ///   블러 계열이 여기 해당한다. 원인을 아직 못 찾았다.
+    /// 15패스 체인(블러+갓레이+물흐름+구름+물결)이 걸린 실물 씬을 미리보기와
+    /// 비교해 일치를 확인했고, 배경화면 26개를 순회해 죽는 씬도 평평해지는 씬도
+    /// 없었다(이펙트를 끈 것과 픽셀 분포가 같다).
     ///
-    /// 배경화면은 매일 쓰는 것이라, 고치는 중인 기능이 보이는 결함을 남기면 안 된다.
-    /// `WALLFLOW_EFFECTS=1`로 켜서 마저 고친다.
+    /// 문제가 생기면 `WALLFLOW_EFFECTS=0`으로 끄고 원본만 그린다.
     static var effectsEnabled: Bool {
-        ProcessInfo.processInfo.environment["WALLFLOW_EFFECTS"] != nil
+        ProcessInfo.processInfo.environment["WALLFLOW_EFFECTS"] != "0"
     }
 
     /// 이펙트 체인을 그린다. 컴포지터의 커맨드 버퍼에 같이 실린다.
@@ -809,7 +806,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         if !chains.isEmpty {
             let bytes = chains.reduce(0) { $0 + $1.chain.textureBytes }
             FileHandle.standardError.write(Data(
-                "이펙트 체인 \(chains.count)개, 텍스처 \(bytes / 1_000_000)MB\n".utf8))
+                ("이펙트 체인 \(chains.count)개, "
+                    + "패스 \(chains.reduce(0) { $0 + $1.chain.passCount })개, "
+                    + "텍스처 \(bytes / 1_000_000)MB\n").utf8))
         }
         self.effectChains = chains
         self.effectStartTime = nil

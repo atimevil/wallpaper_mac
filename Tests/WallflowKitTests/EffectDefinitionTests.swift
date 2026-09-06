@@ -126,4 +126,26 @@ final class EffectDefinitionTests: XCTestCase {
         XCTAssertEqual(paths.fragment.last, "shaders/effects/iris.frag")
         XCTAssertEqual(paths.vertex.first, "effects/iris/shaders/effects/iris.vert")
     }
+
+    /// 씬은 패스마다 슬롯별 텍스처를 준다. 블러가 슬롯 1에 마스크를 주는데,
+    /// 이걸 무시하면 흐림이 마스크 없이 **화면 전체**에 걸린다(실물에서 확인).
+    func testScenePassTexturesAreCarried() throws {
+        let resolver = try resolver([
+            "effects/blur/effect.json": #"{"passes": [{"material": "materials/m.json"}]}"#,
+            "effects/blur/materials/m.json": #"{"passes": [{"shader": "effects/combine"}]}"#,
+        ])
+        let effect = try XCTUnwrap(EffectDefinition.load(
+            path: "effects/blur/effect.json",
+            scenePasses: [["textures": [NSNull(), "masks/blur_mask", NSNull()]]],
+            resolver: resolver))
+        // 개수가 안 맞으면 여기서 멈춘다. 그냥 인덱스로 접근하면 실패가 보고되는
+        // 대신 테스트가 죽어, 무엇이 왜 틀렸는지 알 수 없다.
+        let textures = effect.passes[0].textures
+        guard textures.count == 3 else {
+            return XCTFail("슬롯 3개여야 한다: \(textures)")
+        }
+        XCTAssertNil(textures[0])
+        XCTAssertEqual(textures[1], "masks/blur_mask")
+        XCTAssertNil(textures[2])
+    }
 }

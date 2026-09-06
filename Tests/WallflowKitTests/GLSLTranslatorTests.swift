@@ -319,4 +319,45 @@ final class GLSLTranslatorTests: XCTestCase {
             XCTAssertTrue(source.contains("v_B [[user(v_B)]]"))
         }
     }
+
+    /// **텍스처 번호는 선언 순서가 아니라 이름에서 온다.**
+    /// 실물 `godrays_combine.frag`는 `g_Texture2`를 먼저 선언한다. 순서로 매기면
+    /// 이펙트의 `bind`가 가리키는 슬롯과 어긋나 텍스처가 통째로 뒤섞이고,
+    /// 합치기 셰이더가 엉뚱한 것을 읽어 화면이 하얘진다(실물에서 확인).
+    func testTextureSlotComesFromTheNameNotDeclarationOrder() throws {
+        let result = try translate("""
+        uniform sampler2D g_Texture2;
+        uniform sampler2D g_Texture0;
+        uniform sampler2D g_Texture1;
+        void main() { gl_FragColor = texSample2D(g_Texture0, vec2(0.0)); }
+        """)
+        let slots = Dictionary(uniqueKeysWithValues: result.textures.map { ($0.name, $0.index) })
+        XCTAssertEqual(slots["g_Texture0"], 0)
+        XCTAssertEqual(slots["g_Texture1"], 1)
+        XCTAssertEqual(slots["g_Texture2"], 2)
+        XCTAssertTrue(result.source.contains("texture2d<float> g_Texture2 [[texture(2)]]"),
+                      result.source)
+    }
+
+    /// 이름이 규칙에 안 맞으면 선언 순서로 매긴다. 그때만이다.
+    func testUnnamedSamplersFallBackToDeclarationOrder() throws {
+        let result = try translate("""
+        uniform sampler2D myTexture;
+        uniform sampler2D another;
+        void main() { gl_FragColor = texSample2D(myTexture, vec2(0.0)); }
+        """)
+        XCTAssertEqual(result.textures.map(\.index), [0, 1])
+    }
+
+    /// 마스크는 `#if MASK`로 감싸여 있다. 씬이 그 슬롯에 텍스처를 주면 콤보를
+    /// 켜야 하므로, 콤보 이름을 주석에서 들고 나와야 한다.
+    func testTextureCarriesItsComboName() throws {
+        let result = try translate("""
+        uniform sampler2D g_Texture0; // {"hidden":true}
+        uniform sampler2D g_Texture1; // {"mode":"opacitymask","combo":"MASK"}
+        void main() { gl_FragColor = texSample2D(g_Texture0, vec2(0.0)); }
+        """)
+        XCTAssertNil(result.textures[0].comboName)
+        XCTAssertEqual(result.textures[1].comboName, "MASK")
+    }
 }

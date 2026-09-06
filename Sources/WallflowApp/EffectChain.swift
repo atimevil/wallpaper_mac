@@ -25,6 +25,10 @@ final class EffectChain {
         /// 셰이더가 선언한 텍스처들. 슬롯마다 **반드시** 무엇이든 묶어야 한다 —
         /// Metal에서 안 묶인 텍스처를 샘플링하면 쓰레기가 나온다(자홍색 블록).
         let textures: [GLSLTranslator.Texture]
+        /// 씬이 슬롯마다 지정한 텍스처 경로.
+        let sceneTextures: [String?]
+        /// 이 패스가 속한 이펙트 폴더. 텍스처의 상대 경로가 여기 기준일 수 있다.
+        let base: String
         /// 시간처럼 매 프레임 바뀌는 값이 있는지. 없으면 한 번만 그리면 된다.
         let isAnimated: Bool
     }
@@ -73,6 +77,9 @@ final class EffectChain {
     var texture: MTLTexture { output }
     /// 매 프레임 다시 그려야 하는지. 시간이 안 들어가면 한 번으로 끝난다.
     let isAnimated: Bool
+
+    /// 이 체인의 패스 수. 진단용이다.
+    var passCount: Int { passes.count }
 
     /// 이 체인이 잡은 텍스처 메모리(바이트). 상시 구동 예산을 재는 근거다.
     var textureBytes: Int {
@@ -164,14 +171,29 @@ final class EffectChain {
         guard let placeholder = Self.makeWhitePixel(device: device) else { return nil }
         self.placeholder = placeholder
 
-        // 주석이 기본 텍스처를 지정한 슬롯(`util/noise` 등)을 미리 읽어 둔다.
+        // 씬이 지정한 텍스처와, 주석이 기본으로 지정한 텍스처(`util/noise` 등)를
+        // 미리 읽어 둔다. 슬롯마다 무엇이든 묶여 있어야 한다.
         for pass in compiled {
+            for path in pass.sceneTextures.compactMap({ $0 }) where defaults[path] == nil {
+                for candidate in Self.textureCandidates(path, base: pass.base) {
+                    guard let data = resolver.data(for: candidate),
+                          let decoded = try? TexDecoder.decode(data),
+                          let texture = try? makeTexture(decoded) else { continue }
+                    defaults[path] = texture
+                    break
+                }
+                if defaults[path] == nil {
+                    // 못 읽으면 그 슬롯에 흰색이 들어가 마스크가 무력해진다.
+                    // 조용히 넘어가면 "왜 전체가 흐린가"를 알 수 없다.
+                    diagnostics.append("이펙트 텍스처를 찾지 못했다: \(path)")
+                }
+            }
             for slot in pass.textures {
                 guard let path = slot.defaultPath, defaults[path] == nil,
                       !pass.bindings.contains(where: { $0.index == slot.index })
                 else { continue }
                 // 경로에는 확장자가 없다. 실물이 `.tex`다.
-                for candidate in ["\(path).tex", path] {
+                for candidate in Self.textureCandidates(path, base: pass.base) {
                     guard let data = resolver.data(for: candidate),
                           let decoded = try? TexDecoder.decode(data),
                           let texture = try? makeTexture(decoded) else { continue }
@@ -204,6 +226,20 @@ final class EffectChain {
             region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
             withBytes: &pixel, bytesPerRow: 4)
         return texture
+    }
+
+    /// 이펙트가 쓰는 텍스처 이름이 실제로 있을 만한 자리들.
+    ///
+    /// 씬은 `masks/blur_combine_mask_…`처럼 확장자도 접두사도 없이 준다.
+    /// 실물 pkg에서는 `materials/masks/blur_combine_mask_….tex`에 있다 —
+    /// 이미지 레이어의 텍스처 참조와 같은 규칙이다. assets 쪽 이펙트는
+    /// 자기 폴더 아래 `materials/`에 둔다.
+    static func textureCandidates(_ path: String, base: String) -> [String] {
+        var out = ["materials/\(path).tex", "\(path).tex", path]
+        if !base.isEmpty {
+            out.insert("\(base)/materials/\(path).tex", at: 0)
+        }
+        return out
     }
 
     private static func makeTarget(
@@ -287,7 +323,16 @@ final class EffectChain {
 
         // 씬이 정한 콤보를 셰이더 앞에 붙인다. 번역기가 넣은 기본값은 `#ifndef`라
         // 여기서 준 값이 이긴다.
-        let defines = pass.combos
+        var combos = pass.combos
+        // 씬이 슬롯에 텍스처를 줬으면 그 슬롯의 콤보도 켠다. 마스크는 `#if MASK`로
+        // 감싸여 있어서, 텍스처만 묶고 콤보를 안 켜면 그림에 아무 영향이 없다.
+        for texture in fragment.textures + vertex.textures {
+            guard let combo = texture.comboName,
+                  texture.index < pass.textures.count,
+                  pass.textures[texture.index] != nil else { continue }
+            combos[combo] = 1
+        }
+        let defines = combos
             .sorted { $0.key < $1.key }
             .map { "#define \($0.key) \($0.value)\n" }
             .joined()
@@ -357,6 +402,8 @@ final class EffectChain {
             vertexBytes: values(for: vertex.uniforms, pass: pass, layout: vertexLayout),
             fragmentBytes: values(for: fragment.uniforms, pass: pass, layout: fragmentLayout),
             textures: fragment.textures,
+            sceneTextures: pass.textures,
+            base: base,
             isAnimated: (vertex.uniforms + fragment.uniforms)
                 .contains { $0.name == "g_Time" || $0.name == "g_Frametime" })
     }
@@ -416,7 +463,11 @@ final class EffectChain {
         var front = bufferA
         _ = front
 
-        for pass in passes {
+        // 진단용: 앞의 N개 패스만 돌린다. 어느 패스에서 그림이 무너지는지 가른다.
+        // 15패스 체인에서 10번째(godrays_combine)가 범인임을 이걸로 찾았다.
+        let limit = ProcessInfo.processInfo.environment["WALLFLOW_EFFECT_MAXPASS"]
+            .flatMap(Int.init) ?? passes.count
+        for pass in passes.prefix(limit) {
             // 이름 붙은 타깃이 있으면 거기 그리고, 없으면 번갈아 쓰는 쪽에 그린다.
             let destination: MTLTexture = pass.target.flatMap { targets[$0] } ?? back
 
@@ -443,6 +494,11 @@ final class EffectChain {
                 } else if let bound {
                     texture = bound.name == "previous"
                         ? previous : (targets[bound.name] ?? previous)
+                } else if slot.index < pass.sceneTextures.count,
+                          let path = pass.sceneTextures[slot.index],
+                          let loaded = defaults[path] {
+                    // 씬이 이 슬롯에 준 텍스처. 마스크가 여기로 온다.
+                    texture = loaded
                 } else if let path = slot.defaultPath, let loaded = defaults[path] {
                     texture = loaded
                 } else {

@@ -48,6 +48,10 @@ public enum GLSLTranslator {
         public let name: String
         /// `g_Texture0` → 0. 재질의 `textures` 배열 순서와 맞물린다.
         public let index: Int
+        /// 주석의 `combo`. 씬이 이 슬롯에 텍스처를 주면 그 콤보를 켜야 한다 —
+        /// 마스크는 `#if MASK`로 감싸여 있어서, 텍스처만 묶고 콤보를 안 켜면
+        /// 그림에 아무 영향이 없다.
+        public let comboName: String?
         /// 주석의 `default`. `util/noise` 같은 기본 텍스처 경로다.
         ///
         /// **모든 슬롯에 무엇이든 묶어야 한다.** Metal에서 안 묶인 텍스처를
@@ -336,8 +340,14 @@ public enum GLSLTranslator {
             case "uniform" where type.hasPrefix("sampler"):
                 // 샘플러는 버퍼가 아니라 텍스처 인자다. 이름 규칙이
                 // `texSample2D` 매크로와 맞물린다(`<이름>Sampler`).
+                //
+                // **번호는 선언 순서가 아니라 이름에서 온다.** 실물
+                // `godrays_combine.frag`는 `g_Texture2`를 먼저 선언한다. 순서로
+                // 매기면 이펙트의 `bind`가 가리키는 슬롯과 어긋나 텍스처가 통째로
+                // 뒤섞이고, 합치기 셰이더가 엉뚱한 것을 읽어 화면이 하얘진다.
                 parsed.textures.append(Texture(
-                    name: name, index: textureIndex,
+                    name: name, index: textureSlot(for: name) ?? textureIndex,
+                    comboName: annotations[name]?["combo"] as? String,
                     defaultPath: annotations[name].flatMap { stringValue($0["default"]) }))
                 textureIndex += 1
             case "uniform":
@@ -356,6 +366,18 @@ public enum GLSLTranslator {
         }
         parsed.body = bodyLines.joined(separator: "\n")
         return parsed
+    }
+
+    /// `g_Texture2` → 2. WE의 텍스처 슬롯 번호는 이름에 적혀 있다.
+    /// 규칙에 안 맞는 이름이면 nil — 그때만 선언 순서로 매긴다.
+    static func textureSlot(for name: String) -> Int? {
+        let prefix = "g_Texture"
+        guard name.hasPrefix(prefix) else { return nil }
+        let digits = name.dropFirst(prefix.count)
+        guard !digits.isEmpty, digits.allSatisfy(\.isNumber) else { return nil }
+        // 슬롯이 터무니없이 크면 바인딩 배열을 벗어난다.
+        guard let slot = Int(digits), slot >= 0, slot < 32 else { return nil }
+        return slot
     }
 
     /// 주석의 `default`는 수일 수도 `"1 1 1"` 같은 문자열일 수도 있다.
