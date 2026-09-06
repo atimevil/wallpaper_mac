@@ -50,6 +50,13 @@ final class WorkshopWindowController: NSWindowController {
     private let applyButton = NSButton(title: "배경화면으로 지정", target: nil, action: nil)
     private var tab: WorkshopTab = .library
     private var localItems: [WallpaperItem] = []
+    /// 탭마다 검색어를 따로 기억한다. 라이브러리에서 친 말이 창작마당으로
+    /// 넘어가면 엉뚱한 결과가 나온다.
+    private var searchTexts: [WorkshopTab: String] = [:]
+    /// 이미 받아 온 페이지. 뒤로 갈 때 다시 요청하지 않는다.
+    private var pageCache: [String: [WorkshopItem]] = [:]
+    /// 미리 받아 두는 작업. 탭이나 검색어가 바뀌면 버린다.
+    private var prefetch: Task<Void, Never>?
 
     private let collectionView = NSCollectionView()
     private let searchField = NSSearchField()
@@ -128,7 +135,7 @@ final class WorkshopWindowController: NSWindowController {
         hideInstalledCheckbox.target = self
         hideInstalledCheckbox.action = #selector(refreshTable)
 
-        let refreshButton = NSButton(title: "새로고침", target: self, action: #selector(reload))
+        let refreshButton = NSButton(title: "새로고침", target: self, action: #selector(hardRefresh))
 
         prevButton.target = self
         prevButton.action = #selector(previousPage)
@@ -141,13 +148,23 @@ final class WorkshopWindowController: NSWindowController {
         tabControl.target = self
         tabControl.action = #selector(tabChanged)
 
-        let top = NSStackView(views: [
-            tabControl, searchField, sortPopup, kindPopup, hideInstalledCheckbox,
+        let tabRow = NSStackView(views: [
+            tabControl, sortPopup, kindPopup, hideInstalledCheckbox,
             prevButton, pageLabel, nextButton, refreshButton,
         ])
-        top.orientation = .horizontal
-        top.spacing = 8
+        tabRow.orientation = .horizontal
+        tabRow.spacing = 8
+
+        // 검색창은 탭 아래 제 줄에 둔다. 위 줄에 끼우면 좁고 눈에 덜 띈다.
+        let searchRow = NSStackView(views: [searchField])
+        searchRow.orientation = .horizontal
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let top = NSStackView(views: [tabRow, searchRow])
+        top.orientation = .vertical
+        top.spacing = 8
+        top.alignment = .leading
+        searchRow.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
 
         // 격자로 보여 준다. 흐름 배치라 창 너비가 바뀌면 한 줄에 들어가는 개수가
         // 알아서 바뀐다. 배경화면은 그림이 본체라 표보다 격자가 맞다.
@@ -245,6 +262,19 @@ final class WorkshopWindowController: NSWindowController {
         loadPage()
     }
 
+    /// 새로고침은 캐시를 버리고 다시 받는다. 그러라고 있는 단추다.
+    @objc private func hardRefresh() {
+        pageCache.removeAll()
+        prefetch?.cancel()
+        page = 1
+        loadPage()
+    }
+
+    /// 요청 하나를 가리키는 열쇠. 정렬·검색어·페이지가 같으면 같은 결과다.
+    private func cacheKey(sort: WorkshopSort, text: String, page: Int) -> String {
+        "\(sort.rawValue)|\(text)|\(page)"
+    }
+
     private func loadPage() {
         pageLabel.stringValue = "\(page)"
         prevButton.isEnabled = page > 1
@@ -253,6 +283,19 @@ final class WorkshopWindowController: NSWindowController {
         let sort = WorkshopSort.allCases[max(0, sortPopup.indexOfSelectedItem)]
         let text = searchField.stringValue
         let requested = page
+        let key = cacheKey(sort: sort, text: text, page: requested)
+
+        // 이미 받아 둔 페이지면 바로 보여 준다. 뒤로 가기와 미리 받아 둔
+        // 다음 페이지가 즉시 뜬다 — 한 페이지에 2초쯤 걸리므로 체감이 크다.
+        if let cached = pageCache[key] {
+            items = cached
+            refreshTable()
+            setBusy(false, status: "\(requested)페이지 · \(cached.count)개")
+            loadThumbnails(generation: loadGeneration)
+            schedulePrefetch(sort: sort, text: text, after: requested)
+            return
+        }
+
         setBusy(true, status: "목록을 읽는 중…")
 
         Task { [weak self] in
@@ -263,8 +306,10 @@ final class WorkshopWindowController: NSWindowController {
                 let fetched = try await client.details(ids: ids)
                 // 늦게 도착한 옛 요청이 새 결과를 덮어쓰지 않게 한다.
                 guard generation == self.loadGeneration else { return }
+                self.pageCache[key] = fetched
                 self.items = fetched
-                self.thumbnails.removeAll()
+                // 썸네일은 지우지 않는다. 페이지를 오갈 때 이미 받은 그림을
+                // 다시 받는 것은 낭비다.
                 self.refreshTable()
                 // 결과가 없으면 마지막 페이지를 지난 것이다. 되돌려 준다 —
                 // 빈 화면에 갇히면 사용자가 손쓸 방법이 없다.
@@ -277,6 +322,7 @@ final class WorkshopWindowController: NSWindowController {
                 self.setBusy(false, status: fetched.isEmpty ? "결과가 없다"
                     : "\(requested)페이지 · \(fetched.count)개")
                 self.loadThumbnails(generation: generation)
+                self.schedulePrefetch(sort: sort, text: text, after: requested)
             } catch {
                 guard generation == self.loadGeneration else { return }
                 self.items = []
@@ -306,8 +352,12 @@ final class WorkshopWindowController: NSWindowController {
 
     /// 탭에 따라 무엇을 보여 주고 어떤 조작을 열지 정한다.
     private func showTab(_ next: WorkshopTab) {
+        // 떠나는 탭의 검색어를 기억하고, 가는 탭의 것을 되살린다.
+        searchTexts[tab] = searchField.stringValue
         tab = next
+        searchField.stringValue = searchTexts[next] ?? ""
         tabControl.selectedSegment = next.rawValue
+        prefetch?.cancel()
 
         let isLibrary = next == .library
         // 라이브러리는 내가 가진 것이라 정렬·페이지·계정이 필요 없다.
@@ -333,6 +383,32 @@ final class WorkshopWindowController: NSWindowController {
                 return
             }
             reload()
+        }
+    }
+
+    /// 다음 페이지를 미리 받아 둔다. 사용자가 ▶를 누를 때는 이미 와 있다.
+    ///
+    /// 목록 한 페이지에 2초쯤 걸린다(HTML 1.1초 + 메타 0.6초). 누른 뒤에 받으면
+    /// 그 시간이 그대로 기다림이 된다.
+    private func schedulePrefetch(sort: WorkshopSort, text: String, after page: Int) {
+        let key = cacheKey(sort: sort, text: text, page: page + 1)
+        guard pageCache[key] == nil else { return }
+        prefetch?.cancel()
+        prefetch = Task { [weak self] in
+            guard let self else { return }
+            guard let ids = try? await client.listIDs(
+                sort: sort, searchText: text, page: page + 1), !ids.isEmpty,
+                let fetched = try? await client.details(ids: ids) else { return }
+            guard !Task.isCancelled else { return }
+            self.pageCache[key] = fetched
+            // 그림도 미리 받아 둔다. 넘기는 순간 빈 칸이 보이지 않는다.
+            for item in fetched.prefix(12) {
+                guard let url = item.previewURL, self.thumbnails[item.id] == nil else { continue }
+                guard let (data, _) = try? await URLSession.shared.data(from: url),
+                      let image = NSImage(data: data) else { continue }
+                guard !Task.isCancelled else { return }
+                self.thumbnails[item.id] = image
+            }
         }
     }
 
