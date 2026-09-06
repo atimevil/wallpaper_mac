@@ -1,7 +1,33 @@
 import AppKit
 import WallflowKit
 
-/// 창작마당을 둘러보고 받아서 라이브러리에 넣는 창.
+/// 격자에 그리는 한 칸. 라이브러리 항목과 창작마당 항목을 같은 모양으로 보여 준다.
+struct GridEntry {
+    let id: String
+    let title: String
+    let detail: String
+    let installed: Bool
+}
+
+/// 창을 무엇으로 채우는지.
+enum WorkshopTab: Int, CaseIterable {
+    /// 받아 둔 배경화면. 먼저 보이는 것이 맞다 — 매일 쓰는 것은 이쪽이다.
+    case library
+    /// 창작마당 검색.
+    case search
+    /// 창작마당 둘러보기.
+    case browse
+
+    var label: String {
+        switch self {
+        case .library: return "내 라이브러리"
+        case .search: return "검색"
+        case .browse: return "창작마당"
+        }
+    }
+}
+
+/// 배경화면을 고르고, 창작마당에서 받아 라이브러리에 넣는 창.
 ///
 /// 목록은 스팀에서 읽고, 다운로드는 steamcmd가 한다. 자격 증명은 이 앱이 만지지
 /// 않는다 — steamcmd가 비밀번호와 Steam Guard를 대화식으로만 받으므로, 사용자가
@@ -14,6 +40,16 @@ final class WorkshopWindowController: NSWindowController {
     private let client = WorkshopClient()
     private let installer: WorkshopInstaller
     private let onLibraryChanged: () -> Void
+    /// 라이브러리 목록을 읽어 오는 곳.
+    private let libraryItems: () -> [WallpaperItem]
+    /// 라이브러리에서 고른 것을 배경화면으로 건다.
+    private let onApply: (WallpaperItem) -> Void
+
+    private let tabControl = NSSegmentedControl(
+        labels: WorkshopTab.allCases.map(\.label), trackingMode: .selectOne, target: nil, action: nil)
+    private let applyButton = NSButton(title: "배경화면으로 지정", target: nil, action: nil)
+    private var tab: WorkshopTab = .library
+    private var localItems: [WallpaperItem] = []
 
     private let collectionView = NSCollectionView()
     private let searchField = NSSearchField()
@@ -43,20 +79,27 @@ final class WorkshopWindowController: NSWindowController {
     /// 진행률 콜백이 창을 찾기 위한 자리. 창은 한 번에 하나만 뜬다.
     private static weak var current: WorkshopWindowController?
 
-    init(installer: WorkshopInstaller, onLibraryChanged: @escaping () -> Void) {
+    init(
+        installer: WorkshopInstaller,
+        libraryItems: @escaping () -> [WallpaperItem],
+        onApply: @escaping (WallpaperItem) -> Void,
+        onLibraryChanged: @escaping () -> Void
+    ) {
         self.installer = installer
+        self.libraryItems = libraryItems
+        self.onApply = onApply
         self.onLibraryChanged = onLibraryChanged
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        window.title = "창작마당"
+        window.title = "Wallflow"
         window.center()
         super.init(window: window)
         window.contentView = makeContentView()
         Self.current = self
-        reload()
+        showTab(.library)
     }
 
     required init?(coder: NSCoder) { fatalError("스토리보드를 쓰지 않는다") }
@@ -68,7 +111,7 @@ final class WorkshopWindowController: NSWindowController {
 
         searchField.placeholderString = "검색"
         searchField.target = self
-        searchField.action = #selector(reload)
+        searchField.action = #selector(searchChanged)
         // 검색은 Enter로만 돈다. 글자마다 요청하면 스팀에 부담이고 결과가 튄다.
         searchField.sendsWholeSearchString = true
 
@@ -94,8 +137,12 @@ final class WorkshopWindowController: NSWindowController {
         pageLabel.alignment = .center
         pageLabel.widthAnchor.constraint(equalToConstant: 28).isActive = true
 
+        tabControl.selectedSegment = 0
+        tabControl.target = self
+        tabControl.action = #selector(tabChanged)
+
         let top = NSStackView(views: [
-            searchField, sortPopup, kindPopup, hideInstalledCheckbox,
+            tabControl, searchField, sortPopup, kindPopup, hideInstalledCheckbox,
             prevButton, pageLabel, nextButton, refreshButton,
         ])
         top.orientation = .horizontal
@@ -151,9 +198,13 @@ final class WorkshopWindowController: NSWindowController {
         removeButton.target = self
         removeButton.action = #selector(removeSelected)
 
+        applyButton.target = self
+        applyButton.action = #selector(applySelected)
+        applyButton.keyEquivalent = "\r"
+
         let bottom = NSStackView(views: [
             NSTextField(labelWithString: "계정:"), accountField, loginButton,
-            spinner, statusLabel, removeButton, downloadButton,
+            spinner, statusLabel, removeButton, applyButton, downloadButton,
         ])
         bottom.orientation = .horizontal
         bottom.spacing = 8
@@ -238,6 +289,107 @@ final class WorkshopWindowController: NSWindowController {
     /// 종류 필터의 표시 이름. 순서가 곧 팝업 순서다.
     static let kindTitles = ["모든 종류", "씬", "비디오", "웹"]
 
+    /// 검색은 탭마다 뜻이 다르다. 라이브러리는 가진 것을 걸러내고,
+    /// 창작마당은 스팀에 새로 요청한다.
+    @objc private func searchChanged() {
+        if tab == .library {
+            refreshTable()
+            setBusy(false, status: "\(visibleEntries.count)개")
+        } else {
+            reload()
+        }
+    }
+
+    @objc private func tabChanged() {
+        showTab(WorkshopTab(rawValue: tabControl.selectedSegment) ?? .library)
+    }
+
+    /// 탭에 따라 무엇을 보여 주고 어떤 조작을 열지 정한다.
+    private func showTab(_ next: WorkshopTab) {
+        tab = next
+        tabControl.selectedSegment = next.rawValue
+
+        let isLibrary = next == .library
+        // 라이브러리는 내가 가진 것이라 정렬·페이지·계정이 필요 없다.
+        for control in [sortPopup, prevButton, nextButton, pageLabel,
+                        hideInstalledCheckbox, accountField, loginButton] {
+            control.isHidden = isLibrary
+        }
+        searchField.isHidden = next == .browse
+        searchField.placeholderString = isLibrary ? "라이브러리에서 찾기" : "창작마당 검색"
+        applyButton.isHidden = !isLibrary
+        downloadButton.isHidden = isLibrary
+        removeButton.isHidden = false
+
+        if isLibrary {
+            reloadLibrary()
+        } else {
+            // 검색 탭은 검색어가 있을 때만 요청한다. 빈 검색은 둘러보기와 같다.
+            if next == .search, searchField.stringValue.trimmingCharacters(
+                in: .whitespaces).isEmpty {
+                items = []
+                refreshTable()
+                setBusy(false, status: "검색어를 넣으세요")
+                return
+            }
+            reload()
+        }
+    }
+
+    /// 라이브러리 목록을 다시 읽는다.
+    private func reloadLibrary() {
+        localItems = libraryItems()
+        thumbnails.removeAll()
+        refreshTable()
+        setBusy(false, status: "\(visibleEntries.count)개")
+        loadLibraryThumbnails()
+    }
+
+    /// 라이브러리 미리보기는 로컬 파일이라 네트워크가 필요 없다.
+    private func loadLibraryThumbnails() {
+        for item in localItems {
+            guard let url = item.previewURL, let image = NSImage(contentsOf: url) else { continue }
+            thumbnails[item.id] = image
+        }
+        collectionView.reloadData()
+    }
+
+    /// 지금 탭에서 보여 줄 칸들.
+    var visibleEntries: [GridEntry] {
+        if tab == .library {
+            let text = searchField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+            return localItems
+                .filter { text.isEmpty || $0.title.lowercased().contains(text) }
+                .map { GridEntry(id: $0.id, title: $0.title,
+                                 detail: $0.type.rawValue, installed: true) }
+        }
+        return visibleItems.map {
+            GridEntry(id: $0.id, title: $0.title,
+                      detail: String(format: "%@ · %.1f MB%@", $0.kind.rawValue,
+                                     Double($0.sizeBytes) / 1_000_000,
+                                     installer.isInstalled(id: $0.id) ? " · 이미 있음" : ""),
+                      installed: installer.isInstalled(id: $0.id))
+        }
+    }
+
+    /// 라이브러리에서 고른 배경화면.
+    private var selectedLibraryItem: WallpaperItem? {
+        guard tab == .library, let id = selectedEntry?.id else { return nil }
+        return localItems.first { $0.id == id }
+    }
+
+    private var selectedEntry: GridEntry? {
+        guard let index = collectionView.selectionIndexPaths.first?.item else { return nil }
+        let list = visibleEntries
+        return index < list.count ? list[index] : nil
+    }
+
+    @objc private func applySelected() {
+        guard let item = selectedLibraryItem else { return }
+        onApply(item)
+        setBusy(false, status: "\(item.title) 적용")
+    }
+
     /// 화면에 쓰는 목록. 필터는 화면에서만 건다 — 다시 요청하지 않는다.
     private var visibleItems: [WorkshopItem] {
         var list = items
@@ -258,11 +410,10 @@ final class WorkshopWindowController: NSWindowController {
         updateDownloadButton()
     }
 
-    /// 지금 고른 항목. 격자는 선택이 여러 개일 수 있으나 하나만 허용한다.
+    /// 지금 고른 창작마당 항목.
     private var selectedItem: WorkshopItem? {
-        guard let index = collectionView.selectionIndexPaths.first?.item else { return nil }
-        let list = visibleItems
-        return index < list.count ? list[index] : nil
+        guard tab != .library, let id = selectedEntry?.id else { return nil }
+        return items.first { $0.id == id }
     }
 
     private func loadThumbnails(generation: Int) {
@@ -340,6 +491,7 @@ final class WorkshopWindowController: NSWindowController {
                     try self.installer.link(id: item.id)
                     self.onLibraryChanged()
                     self.setBusy(false, status: "\(item.title) 추가됨")
+                    if self.tab == .library { self.reloadLibrary() }
                     self.refreshTable()
                 } catch {
                     self.setBusy(false, status: "받았지만 라이브러리에 넣지 못했다")
@@ -422,10 +574,11 @@ final class WorkshopWindowController: NSWindowController {
 
     /// 라이브러리에서 링크만 걷는다. 받아 둔 원본은 남겨 다시 받지 않아도 되게 한다.
     @objc private func removeSelected() {
-        guard let item = selectedItem else { return }
+        guard let item = selectedEntry else { return }
         do {
             if try installer.unlink(id: item.id) {
                 onLibraryChanged()
+                if tab == .library { reloadLibrary() }
                 setBusy(false, status: "\(item.title) 뺐다")
             } else {
                 setBusy(false, status: "라이브러리에 없다")
@@ -437,11 +590,11 @@ final class WorkshopWindowController: NSWindowController {
     }
 
     private func updateDownloadButton() {
-        let item = selectedItem
-        let installed = item.map { installer.isInstalled(id: $0.id) } ?? false
-        downloadButton.isEnabled = item != nil && !isDownloading
-        removeButton.isEnabled = installed && !isDownloading
-        downloadButton.title = installed ? "다시 받기" : "받아서 추가"
+        let entry = selectedEntry
+        downloadButton.isEnabled = entry != nil && !isDownloading && tab != .library
+        applyButton.isEnabled = selectedLibraryItem != nil
+        removeButton.isEnabled = (entry?.installed ?? false) && !isDownloading
+        downloadButton.title = (entry?.installed ?? false) ? "다시 받기" : "받아서 추가"
     }
 
     private func present(title: String, message: String) {
@@ -510,13 +663,10 @@ final class WorkshopGridItem: NSCollectionViewItem {
         view = box
     }
 
-    func configure(item: WorkshopItem, image: NSImage?, installed: Bool) {
+    func configure(entry: GridEntry, image: NSImage?) {
         preview.image = image
-        nameLabel.stringValue = item.title
-        let megabytes = Double(item.sizeBytes) / 1_000_000
-        detailLabel.stringValue = String(format: "%@ · %.1f MB%@",
-                                      item.kind.rawValue, megabytes,
-                                      installed ? " · 이미 있음" : "")
+        nameLabel.stringValue = entry.title
+        detailLabel.stringValue = entry.detail
     }
 
     override var isSelected: Bool {
@@ -532,18 +682,17 @@ final class WorkshopGridItem: NSCollectionViewItem {
 
 extension WorkshopWindowController: NSCollectionViewDataSource, NSCollectionViewDelegate {
     func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int)
-        -> Int { visibleItems.count }
+        -> Int { visibleEntries.count }
 
     func collectionView(
         _ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath
     ) -> NSCollectionViewItem {
         let cell = collectionView.makeItem(
             withIdentifier: WorkshopGridItem.identifier, for: indexPath)
-        let list = visibleItems
+        let list = visibleEntries
         if let grid = cell as? WorkshopGridItem, indexPath.item < list.count {
-            let item = list[indexPath.item]
-            grid.configure(item: item, image: thumbnailImage(for: item.id),
-                           installed: installer.isInstalled(id: item.id))
+            let entry = list[indexPath.item]
+            grid.configure(entry: entry, image: thumbnailImage(for: entry.id))
         }
         return cell
     }

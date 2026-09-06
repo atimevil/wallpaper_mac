@@ -76,9 +76,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     /// 창작마당 창을 띄운다. 이미 떠 있으면 앞으로 가져온다.
     private func showWorkshop() {
         if workshop == nil {
-            workshop = WorkshopWindowController(installer: installer) { [weak self] in
-                self?.refreshLibrary()
-            }
+            workshop = WorkshopWindowController(
+                installer: installer,
+                libraryItems: { [weak self] in (try? self?.library.scan()) ?? [] },
+                onApply: { [weak self] item in self?.select(item) },
+                onLibraryChanged: { [weak self] in self?.refreshLibrary() })
         }
         // 메뉴바 전용 앱이라 창을 띄우려면 앱을 활성화해야 한다.
         NSApp.activate(ignoringOtherApps: true)
