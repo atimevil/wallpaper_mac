@@ -35,14 +35,7 @@ final class EffectResolutionProbe: XCTestCase {
             }
         }
         print("EFFECTS 적용 \(applied) 해석 \(resolved) 패스 \(passes)")
-        // 마스크가 pkg 어디에 있는지 본다.
-        for dir in (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [] {
-            let pkg = root.appendingPathComponent(dir).appendingPathComponent("scene.pkg")
-            guard let data = try? Data(contentsOf: pkg),
-                  let reader = try? PkgReader(data: data) else { continue }
-            for name in reader.names where name.contains("mask") || name.contains("waterflowphase") {
-                print("ENTRY \(name)")
-            }
+    }
         }
         for file in missing.sorted() { print("EFFECT_MISS \(file)") }
     }
