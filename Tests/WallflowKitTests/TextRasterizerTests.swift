@@ -120,3 +120,68 @@ final class TextRasterizerTests: XCTestCase {
         XCTAssertTrue(sawRed, "빨간 글자가 빨갛게 그려지지 않았다")
     }
 }
+
+extension TextRasterizerTests {
+    private var white2: Vec3 { Vec3(x: 1, y: 1, z: 1) }
+
+    /// 씬이 limitwidth로 폭을 정해 두는데 무시하면 긴 곡 제목이 한 줄로
+    /// 늘어져 화면 밖으로 흐른다.
+    func testWrapsAtMaxWidth() throws {
+        let long = "이것은 아주 긴 곡 제목이고 한 줄에 들어가지 않는다"
+        let single = try TextRasterizer.rasterize(
+            text: long, fontData: nil, pointSize: 40, color: white2)
+        let wrapped = try TextRasterizer.rasterize(
+            text: long, fontData: nil, pointSize: 40, color: white2,
+            wrapWidth: 200, maxRows: 0, usesEllipsis: false)
+        XCTAssertLessThan(wrapped.width, single.width, "접히지 않았다")
+        XCTAssertGreaterThan(wrapped.height, single.height, "여러 줄이 되어야 한다")
+    }
+
+    /// maxRows를 넘기면 잘라낸다. 두 줄 제한이면 세 줄이 되면 안 된다.
+    func testRespectsMaxRows() throws {
+        let long = String(repeating: "가나다라마바사 ", count: 12)
+        let two = try TextRasterizer.rasterize(
+            text: long, fontData: nil, pointSize: 30, color: white2,
+            wrapWidth: 150, maxRows: 2, usesEllipsis: false)
+        let four = try TextRasterizer.rasterize(
+            text: long, fontData: nil, pointSize: 30, color: white2,
+            wrapWidth: 150, maxRows: 4, usesEllipsis: false)
+        XCTAssertLessThan(two.height, four.height, "줄 수 제한이 듣지 않았다")
+    }
+
+    /// 폭이 0이면 접지 않는다. 씬이 limitwidth를 꺼 둔 경우다.
+    func testZeroWidthDoesNotWrap() throws {
+        let text = "접히면 안 되는 긴 문장이다 정말로 길다"
+        let plain = try TextRasterizer.rasterize(
+            text: text, fontData: nil, pointSize: 30, color: white2)
+        let unwrapped = try TextRasterizer.rasterize(
+            text: text, fontData: nil, pointSize: 30, color: white2,
+            wrapWidth: 0, maxRows: 0, usesEllipsis: false)
+        XCTAssertEqual(plain.width, unwrapped.width)
+        XCTAssertEqual(plain.height, unwrapped.height)
+    }
+
+    /// 말줄임을 켜면 잘린 마지막 줄이 그렇지 않은 것과 달라야 한다.
+    func testEllipsisChangesLastLine() throws {
+        let long = String(repeating: "abcdefgh ", count: 20)
+        let plain = try TextRasterizer.rasterize(
+            text: long, fontData: nil, pointSize: 30, color: white2,
+            wrapWidth: 160, maxRows: 2, usesEllipsis: false)
+        let dotted = try TextRasterizer.rasterize(
+            text: long, fontData: nil, pointSize: 30, color: white2,
+            wrapWidth: 160, maxRows: 2, usesEllipsis: true)
+        XCTAssertEqual(plain.height, dotted.height, "줄 수는 같아야 한다")
+        let a = try XCTUnwrap(plain.dataProvider?.data as Data?)
+        let b = try XCTUnwrap(dotted.dataProvider?.data as Data?)
+        XCTAssertNotEqual(a, b, "말줄임표가 그려지지 않았다")
+    }
+
+    /// 접을 때도 이상한 입력에 죽지 않아야 한다.
+    func testWrapSurvivesAbsurdInput() {
+        for width in [Double.nan, .infinity, -5] {
+            XCTAssertNoThrow(try TextRasterizer.rasterize(
+                text: "가", fontData: nil, pointSize: 20, color: Vec3(x: 1, y: 1, z: 1),
+                wrapWidth: width, maxRows: 2, usesEllipsis: true), "폭 \(width)")
+        }
+    }
+}

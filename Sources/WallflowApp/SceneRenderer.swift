@@ -68,6 +68,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let box: SIMD2<Float>
         /// 상자 안에서의 가로 정렬. 글자 폭이 바뀌면 붙는 자리도 달라진다.
         let align: TextAlignment
+        let verticalAlign: TextVerticalAlignment
         /// 상자의 중심. 정렬에 따라 실제 그리는 중심이 이것과 달라진다.
         let boxCenter: SIMD2<Float>
         let queue: DispatchQueue
@@ -86,6 +87,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         init(text: TextLayer, fontData: Data?, pointSize: Double, origin: SIMD2<Float>,
              box: SIMD2<Float>, engine: ScriptEngine?, name: String) {
             self.align = text.horizontalAlign
+            self.verticalAlign = text.verticalAlign
             self.boxCenter = origin
             self.origin = origin
             self.text = text
@@ -214,9 +216,16 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 글자를 굽고 텍스처와 쿼드 크기를 갱신한다.
     /// 직교 공간과 픽셀이 1:1이라 구운 이미지 크기를 그대로 쿼드 크기로 쓴다.
     private func rasterize(_ state: TextState, compositor: MetalCompositor) {
+        // 씬이 정한 줄바꿈 폭은 씬 단위다. 우리는 고정 크기로 구우므로 비율로 옮긴다.
+        // pointsize는 크기 결정이 아니라 이 비율에만 쓴다 — 씬의 편집기 값이라
+        // 그대로 크기로 쓰면 실제 렌더와 어긋난다.
+        let wrap = state.text.wrapping
+        let wrapWidth = wrap.maxWidth > 0 && wrap.pointSize > 0
+            ? wrap.maxWidth * state.pointSize / wrap.pointSize : 0
         guard let image = try? TextRasterizer.rasterize(
             text: state.value, fontData: state.fontData,
-            pointSize: state.pointSize, color: state.text.color)
+            pointSize: state.pointSize, color: state.text.color,
+            wrapWidth: wrapWidth, maxRows: wrap.maxRows, usesEllipsis: wrap.usesEllipsis)
         else {
             // 빈 문자열이면 텍스처를 지운다. 이전 글자가 남으면 시계가 멈춘 것처럼 보인다.
             state.texture = nil
@@ -237,6 +246,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         case .left: state.origin.x = state.boxCenter.x + state.size.x / 2
         case .right: state.origin.x = state.boxCenter.x - state.size.x / 2
         case .center: state.origin.x = state.boxCenter.x
+        }
+        // 세로도 같은 규칙이다. 씬 좌표는 Y가 위로 증가하므로 top은 더하는 쪽이다.
+        switch state.verticalAlign {
+        case .top: state.origin.y = state.boxCenter.y - state.size.y / 2
+        case .bottom: state.origin.y = state.boxCenter.y + state.size.y / 2
+        case .center: state.origin.y = state.boxCenter.y
         }
     }
 

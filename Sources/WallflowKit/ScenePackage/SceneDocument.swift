@@ -401,7 +401,17 @@ public struct SceneDocument: Sendable {
             scriptProperties: properties,
             // 실물에 left·center·right가 모두 나온다. 모르는 값은 가운데로 둔다.
             horizontalAlign: TextAlignment(rawValue: object["horizontalalign"] as? String ?? "")
-                ?? .center)
+                ?? .center,
+            verticalAlign: TextVerticalAlignment(
+                rawValue: object["verticalalign"] as? String ?? "") ?? .center,
+            // limitwidth가 꺼져 있으면 maxwidth가 있어도 줄바꿈하지 않는다.
+            wrapping: TextWrapping(
+                maxWidth: (boolValue(object["limitwidth"]) ?? false)
+                    ? (doubleValue(object["maxwidth"]) ?? 0) : 0,
+                maxRows: (boolValue(object["limitrows"]) ?? false)
+                    ? Int(doubleValue(object["maxrows"]) ?? 0) : 0,
+                usesEllipsis: boolValue(object["limituseellipsis"]) ?? false,
+                pointSize: doubleValue(object["pointsize"]) ?? 0))
     }
 
     /// 파티클 프리셋을 따라가 레이어 내용을 판정한다.

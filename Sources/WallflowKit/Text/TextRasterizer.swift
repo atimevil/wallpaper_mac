@@ -29,6 +29,87 @@ public enum TextRasterizer {
     ///   - fontData: 폰트 파일 바이트. nil이면 시스템 폰트를 쓴다.
     ///   - pointSize: 글자 크기.
     ///   - color: 0~1 RGB.
+    /// 여러 줄로 접어 굽는다. `wrapWidth`가 0이면 한 줄로 둔다.
+    ///
+    /// 씬이 `limitwidth`로 폭을 정해 두는데 그걸 무시하면 긴 곡 제목이 한 줄로
+    /// 늘어져 화면 밖으로 흐른다. `maxRows`를 넘기면 잘라내고, 씬이 그러라고
+    /// 하면 말줄임표를 붙인다.
+    public static func rasterize(
+        text: String, fontData: Data?, pointSize: Double, color: Vec3,
+        wrapWidth: Double, maxRows: Int, usesEllipsis: Bool
+    ) throws -> CGImage {
+        guard wrapWidth > 0, wrapWidth.isFinite else {
+            return try rasterize(text: text, fontData: fontData,
+                                 pointSize: pointSize, color: color)
+        }
+        guard !text.isEmpty, !text.allSatisfy(\.isWhitespace) else { throw TextRasterError.empty }
+        guard pointSize.isFinite, pointSize > 0 else {
+            throw TextRasterError.badSize(width: 0, height: 0)
+        }
+
+        let font = makeFont(data: fontData, pointSize: pointSize)
+        let attributes: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(
+                red: clamp(color.x), green: clamp(color.y), blue: clamp(color.z), alpha: 1),
+        ]
+
+        // 줄을 직접 나눈다. CTFramesetter는 높이를 미리 알아야 해서 두 번 재야 한다.
+        var lines: [CTLine] = []
+        var remaining = Substring(text)
+        let limit = maxRows > 0 ? maxRows : 64
+        while !remaining.isEmpty, lines.count < limit {
+            let attributed = NSAttributedString(string: String(remaining), attributes: attributes)
+            let typesetter = CTTypesetterCreateWithAttributedString(attributed)
+            let count = CTTypesetterSuggestLineBreak(typesetter, 0, wrapWidth)
+            guard count > 0 else { break }
+            let isLast = lines.count == limit - 1 && count < remaining.count
+            if isLast, usesEllipsis {
+                // 마지막 줄이 잘리면 말줄임표를 붙인다. 자리를 만들려고 조금 줄인다.
+                let head = String(remaining.prefix(max(1, count - 1))) + "…"
+                lines.append(CTLineCreateWithAttributedString(
+                    NSAttributedString(string: head, attributes: attributes)))
+                remaining = ""
+                break
+            }
+            let piece = String(remaining.prefix(count))
+            lines.append(CTLineCreateWithAttributedString(
+                NSAttributedString(string: piece, attributes: attributes)))
+            remaining = remaining.dropFirst(count)
+        }
+        guard !lines.isEmpty else { throw TextRasterError.empty }
+
+        var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
+        _ = CTLineGetTypographicBounds(lines[0], &ascent, &descent, &leading)
+        let lineHeight = ceil(ascent + descent + leading)
+        let padding = ceil(pointSize * 0.1)
+        let widest = lines.map { max(CTLineGetTypographicBounds($0, nil, nil, nil),
+                                     CTLineGetImageBounds($0, nil).maxX) }.max() ?? 0
+        let width = Int(ceil(widest) + padding * 2)
+        let height = Int(lineHeight * CGFloat(lines.count) + padding * 2)
+        guard width > 0, height > 0, width <= maxDimension, height <= maxDimension else {
+            throw TextRasterError.badSize(width: width, height: height)
+        }
+        guard let context = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { throw TextRasterError.contextCreationFailed }
+        context.setAllowsAntialiasing(true)
+        context.setShouldSmoothFonts(true)
+        for (index, line) in lines.enumerated() {
+            // CoreGraphics의 원점은 좌하단이라 첫 줄이 맨 위에 오도록 뒤에서 센다.
+            let baseline = CGFloat(lines.count - index - 1) * lineHeight + descent + padding
+            context.textPosition = CGPoint(x: padding, y: baseline)
+            CTLineDraw(line, context)
+        }
+        guard let image = context.makeImage() else {
+            throw TextRasterError.contextCreationFailed
+        }
+        return image
+    }
+
     public static func rasterize(
         text: String, fontData: Data?, pointSize: Double, color: Vec3
     ) throws -> CGImage {

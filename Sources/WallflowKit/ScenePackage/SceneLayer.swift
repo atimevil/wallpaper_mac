@@ -87,6 +87,10 @@ public struct TextLayer: Equatable, Sendable {
     public let scriptProperties: [String: ScriptPropertyValue]
     /// 상자 안에서의 가로 정렬.
     public let horizontalAlign: TextAlignment
+    /// 상자 안에서의 세로 정렬.
+    public let verticalAlign: TextVerticalAlignment
+    /// 넘칠 때의 줄바꿈·말줄임 규칙.
+    public let wrapping: TextWrapping
 
     /// 폰트가 파일이 아니라 시스템 폰트 이름인지.
     public var usesSystemFont: Bool { fontPath.hasPrefix("systemfont") }
@@ -94,9 +98,13 @@ public struct TextLayer: Equatable, Sendable {
     public init(
         value: String, fontPath: String, color: Vec3,
         script: String?, scriptProperties: [String: ScriptPropertyValue],
-        horizontalAlign: TextAlignment = .center
+        horizontalAlign: TextAlignment = .center,
+        verticalAlign: TextVerticalAlignment = .center,
+        wrapping: TextWrapping = .none
     ) {
         self.horizontalAlign = horizontalAlign
+        self.verticalAlign = verticalAlign
+        self.wrapping = wrapping
         self.value = value
         self.fontPath = fontPath
         self.color = color
@@ -109,6 +117,33 @@ public struct TextLayer: Equatable, Sendable {
 /// 무시하고 전부 가운데 두면 좌·우 정렬된 시계와 곡 제목이 제자리에서 벗어난다.
 public enum TextAlignment: String, Sendable, Equatable {
     case left, center, right
+}
+
+/// 상자 안에서의 세로 정렬. 실물에 center와 top이 나온다.
+public enum TextVerticalAlignment: String, Sendable, Equatable {
+    case top, center, bottom
+}
+
+/// 글자가 상자를 넘칠 때의 처리. 씬이 정한다.
+public struct TextWrapping: Equatable, Sendable {
+    /// 줄바꿈할 폭(씬 단위). 0이면 줄바꿈하지 않는다.
+    public let maxWidth: Double
+    /// 최대 줄 수. 0이면 제한 없음.
+    public let maxRows: Int
+    /// 잘릴 때 말줄임표를 붙이는지.
+    public let usesEllipsis: Bool
+    /// 씬이 정한 글자 크기. 줄바꿈 폭을 픽셀로 옮길 때 비율로만 쓴다.
+    public let pointSize: Double
+
+    public init(maxWidth: Double, maxRows: Int, usesEllipsis: Bool, pointSize: Double) {
+        self.maxWidth = maxWidth
+        self.maxRows = maxRows
+        self.usesEllipsis = usesEllipsis
+        self.pointSize = pointSize
+    }
+
+    public static let none = TextWrapping(
+        maxWidth: 0, maxRows: 0, usesEllipsis: false, pointSize: 0)
 }
 
 /// 소리만 내는 레이어. 그림은 없다.
