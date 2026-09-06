@@ -69,10 +69,18 @@ public struct SceneDocument: Sendable {
         let general = root["general"] as? [String: Any] ?? [:]
         // 키는 있는데 값이 null이면 직교가 아니라 원근 투영 씬이다.
         // 값이 없는 것과 형태가 다른 것을 구분해야 진단이 맞다.
+        //
+        // **원근 씬은 3D 모델까지 있어야 뜻이 있다.** 실물 원근 씬을 재 보니
+        // 레이어 26개 중 우리가 그릴 수 있는 것이 6개뿐이고, 그 씬의 중심인
+        // 프리즘 넷이 `.mdl` 3D 메시다. 투영만 넣어 그리면 배경 평면 몇 장만
+        // 뜬 깨진 화면이 된다 — 미리보기로 물러나는 편이 낫다.
+        // 카메라도 스크립트가 움직인다(`Camera (script)`, `OMGMatrix`).
         if general.keys.contains("orthogonalprojection"),
            !(general["orthogonalprojection"] is [String: Any]) {
             throw SceneError.perspectiveProjectionUnsupported
         }
+        // 원근 씬에는 직교 크기가 없다. 좌표가 픽셀이 아니라 정규화 단위라
+        // 화면 비율만 있으면 되므로 자리만 채운다.
         guard let ortho = general["orthogonalprojection"] as? [String: Any],
               let width = ortho["width"] as? Int,
               let height = ortho["height"] as? Int,
