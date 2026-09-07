@@ -391,7 +391,13 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             wrapWidth: wrapWidth, maxRows: wrap.maxRows, usesEllipsis: wrap.usesEllipsis,
             shadow: state.text.shadow,
             // 그림자 오프셋도 씬 단위라 줄바꿈 폭과 같은 비율로 옮긴다.
-            shadowScale: wrap.pointSize > 0 ? state.pointSize / wrap.pointSize : 1)
+            shadowScale: wrap.pointSize > 0 ? state.pointSize / wrap.pointSize : 1,
+            // `padding`은 "글자 도형 둘레의 여백"이다(문서). 우리는 고정 256pt로
+            // 굽고 그 raster 공간의 픽셀 여백으로 그대로 쓴다 — 씬마다 편집기
+            // pointsize가 달라도(9~98) 여백은 항상 같은 비율로 보여야 하고,
+            // 실물 값(32 안팎)이 딱 그 정도 raster 여백에 맞는 크기다.
+            extraPadding: state.text.padding,
+            horizontalAlign: state.align, blockAlign: state.text.blockAlign)
         else {
             // 빈 문자열이면 텍스처를 지운다. 이전 글자가 남으면 시계가 멈춘 것처럼 보인다.
             state.texture = nil
@@ -453,7 +459,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             pointSize: state.pointSize, color: state.text.color,
             wrapWidth: wrapWidth, maxRows: wrap.maxRows, usesEllipsis: wrap.usesEllipsis,
             shadow: state.text.shadow,
-            shadowScale: wrap.pointSize > 0 ? state.pointSize / wrap.pointSize : 1)
+            shadowScale: wrap.pointSize > 0 ? state.pointSize / wrap.pointSize : 1,
+            extraPadding: state.text.padding,
+            horizontalAlign: state.align, blockAlign: state.text.blockAlign)
         else { return }
         state.unitsPerPixel = TextRasterizer.unitsPerPixel(
             authoredWidth: image.width, authoredHeight: image.height,

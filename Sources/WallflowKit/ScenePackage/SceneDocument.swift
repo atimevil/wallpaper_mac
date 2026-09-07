@@ -547,9 +547,29 @@ public struct SceneDocument: Sendable {
                 guard let origin else {
                     return unsupported("텍스트 레이어의 origin에 좌표가 없다")
                 }
+                // 텍스트 전용 `anchor`는 문서상 "화면(캔버스) 닻"이다 — 레이어 자기
+                // 상자가 아니라 캔버스 가장자리 기준이다. 부모가 있으면 origin이
+                // 이미 그 부모 안에서 자리를 잡은 상대 좌표라 캔버스 기준을 다시
+                // 얹으면 이중으로 밀린다(실물 노트패드 하위 텍스트 셋이 그렇다 —
+                // anchor는 "left"인데 origin이 이미 -319/0/319로 각자 자리를 잡고
+                // 있어 그대로 두면 맞고, 캔버스 기준을 더하면 화면 밖으로 나간다).
+                // 최상위(부모 없음) 레이어에서만 적용한다.
+                // "none"(실물 111/115)이거나 없으면 origin을 그대로 캔버스 좌표로
+                // 쓰는 지금까지의 동작 그대로 둔다 — canvasAnchorPoint를 더하면
+                // 캔버스 중심만큼 밀려 거의 모든 실물 텍스트가 어긋난다.
+                let anchorRaw = (object["anchor"] as? String)?.lowercased()
+                let anchorsToEdge = anchorRaw.map {
+                    $0.contains("left") || $0.contains("right")
+                        || $0.contains("top") || $0.contains("bottom")
+                } ?? false
+                var textOrigin = origin
+                if object["parent"] == nil, anchorsToEdge {
+                    let edge = Self.canvasAnchorPoint(alignment: anchorRaw, canvas: canvas)
+                    textOrigin = Vec3(x: edge.x + origin.x, y: edge.y + origin.y, z: origin.z)
+                }
                 return SceneLayer(
                     id: id, name: name, visible: visible,
-                    origin: origin, size: size ?? Vec2(x: 0, y: 0),
+                    origin: textOrigin, size: size ?? Vec2(x: 0, y: 0),
                     content: .text(makeTextLayer(text, object: object)),
                     unrunScripts: unrun, alpha: alpha, tint: tint, rotation: rotation,
                     displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
@@ -650,6 +670,27 @@ public struct SceneDocument: Sendable {
                 colorBlendMode: blendMode, brightness: brightness, puppet: puppet,
                 anchorOffset: anchor
         )
+    }
+
+    /// 텍스트 `anchor`가 가리키는 캔버스 가장자리의 좌표.
+    ///
+    /// 씬 좌표는 원점이 캔버스 왼쪽 아래이고 y가 위로 증가한다(렌더러 셰이더가
+    /// `origin/projection`을 그대로 NDC로 옮긴다 — origin (0,0)이 화면 왼쪽 아래,
+    /// (width,height)가 오른쪽 위다). `alignment`(레이어 자기 상자 기준, 중심이
+    /// 원점인 로컬 좌표)와는 기준이 달라 같은 함수를 못 쓴다. none·center는
+    /// 캔버스 중심이다 — 지금까지 origin을 그대로 캔버스 좌표로 써 온 것과
+    /// 같은 자리이므로, 여기 값을 더해도 111/115(값이 none인 실물)는 그대로다.
+    static func canvasAnchorPoint(alignment: String?, canvas: Vec2) -> Vec2 {
+        guard let alignment = alignment?.lowercased(), alignment != "none", alignment != "center"
+        else {
+            return Vec2(x: canvas.x / 2, y: canvas.y / 2)
+        }
+        var x = canvas.x / 2, y = canvas.y / 2
+        if alignment.contains("left") { x = 0 }
+        if alignment.contains("right") { x = canvas.x }
+        if alignment.contains("top") { y = canvas.y }
+        if alignment.contains("bottom") { y = 0 }
+        return Vec2(x: x, y: y)
     }
 
     /// `alignment` 닻에서 그림 중심까지. 씬 좌표는 y가 위로 증가한다.
@@ -760,7 +801,19 @@ public struct SceneDocument: Sendable {
                     blur: doubleValue(object["dropshadowsize"]) ?? 0,
                     opacity: Swift.min(Swift.max(
                         doubleValue(object["dropshadowopacity"]) ?? 1, 0), 1))
-                : nil)
+                : nil,
+            padding: Self.paddingValue(object["padding"]),
+            // 문서화도 안 됐고 실물 115개가 전부 false다. 모르는 값은 지금 동작(false)과
+            // 같게 둔다.
+            blockAlign: boolValue(object["blockalign"]) ?? false)
+    }
+
+    /// `padding`은 수(양쪽 공통) 또는 "x y" 문자열(가로·세로 따로)이다.
+    /// 실물에 둘 다 있다 — 32(수)와 "37.00000 37.00000"(문자열).
+    private static func paddingValue(_ raw: Any?) -> Vec2 {
+        if let s = raw as? String, let v = Vec2.parse(s) { return v }
+        if let d = doubleValue(raw), d.isFinite, d >= 0 { return Vec2(x: d, y: d) }
+        return Vec2(x: 0, y: 0)
     }
 
     /// 파티클 프리셋을 따라가 레이어 내용을 판정한다.

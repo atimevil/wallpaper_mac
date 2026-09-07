@@ -93,6 +93,14 @@ public struct TextLayer: Equatable, Sendable {
     public let wrapping: TextWrapping
     /// 그림자. 씬이 끄면 nil.
     public let shadow: TextShadow?
+    /// 글자 둘레에 더하는 여백(씬의 `padding`). "글자 도형 둘레의 여백"이라는
+    /// 문서 설명대로 굽는 비트맵의 가장자리 여백으로 쓴다 — 상자 안 위치를
+    /// 옮기는 값이 아니다. x·y 따로 올 수 있다(실물 "37 37").
+    public let padding: Vec2
+    /// 여러 줄일 때 정렬 단위. false면 줄마다 자기 폭 기준으로 정렬한다(실물
+    /// 115개 전부 false). true는 문서화되지 않았고 실물에 없다 — 지금 코드가
+    /// 하던 대로 전체 블록을 한 덩어리로 왼쪽에 붙여 정렬한다.
+    public let blockAlign: Bool
 
     /// 폰트가 파일이 아니라 시스템 폰트 이름인지.
     public var usesSystemFont: Bool { fontPath.hasPrefix("systemfont") }
@@ -103,7 +111,9 @@ public struct TextLayer: Equatable, Sendable {
         horizontalAlign: TextAlignment = .center,
         verticalAlign: TextVerticalAlignment = .center,
         wrapping: TextWrapping = .none,
-        shadow: TextShadow? = nil
+        shadow: TextShadow? = nil,
+        padding: Vec2 = Vec2(x: 0, y: 0),
+        blockAlign: Bool = false
     ) {
         self.shadow = shadow
         self.horizontalAlign = horizontalAlign
@@ -114,6 +124,8 @@ public struct TextLayer: Equatable, Sendable {
         self.color = color
         self.script = script
         self.scriptProperties = scriptProperties
+        self.padding = padding
+        self.blockAlign = blockAlign
     }
 }
 

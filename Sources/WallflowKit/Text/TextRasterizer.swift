@@ -37,7 +37,9 @@ public enum TextRasterizer {
     public static func rasterize(
         text: String, fontData: Data?, pointSize: Double, color: Vec3,
         wrapWidth: Double, maxRows: Int, usesEllipsis: Bool,
-        shadow: TextShadow? = nil, shadowScale: Double = 1
+        shadow: TextShadow? = nil, shadowScale: Double = 1,
+        extraPadding: Vec2 = Vec2(x: 0, y: 0),
+        horizontalAlign: TextAlignment = .left, blockAlign: Bool = false
     ) throws -> CGImage {
         // 줄바꿈이 있으면 폭 제한이 없어도 여러 줄이다. **실물 시계 위젯의
         // 날짜가 한 글자씩 줄바꿈으로 세로로 쌓는다** — `"0\n7\n\nS\nE\nP"` 꼴이다.
@@ -47,17 +49,20 @@ public enum TextRasterizer {
             if !hasHardBreak {
                 return try rasterize(text: text, fontData: fontData,
                                      pointSize: pointSize, color: color,
-                                     shadow: shadow, shadowScale: shadowScale)
+                                     shadow: shadow, shadowScale: shadowScale,
+                                     extraPadding: extraPadding)
             }
             return try rasterizeParagraphs(
                 text: text, fontData: fontData, pointSize: pointSize, color: color,
                 wrapWidth: 0, maxRows: maxRows, usesEllipsis: usesEllipsis,
-                shadow: shadow, shadowScale: shadowScale)
+                shadow: shadow, shadowScale: shadowScale, extraPadding: extraPadding,
+                horizontalAlign: horizontalAlign, blockAlign: blockAlign)
         }
         return try rasterizeParagraphs(
             text: text, fontData: fontData, pointSize: pointSize, color: color,
             wrapWidth: wrapWidth, maxRows: maxRows, usesEllipsis: usesEllipsis,
-            shadow: shadow, shadowScale: shadowScale)
+            shadow: shadow, shadowScale: shadowScale, extraPadding: extraPadding,
+            horizontalAlign: horizontalAlign, blockAlign: blockAlign)
     }
 
     /// 줄바꿈으로 먼저 나누고, 각 문단을 폭에 맞춰 다시 접는다.
@@ -67,7 +72,8 @@ public enum TextRasterizer {
     private static func rasterizeParagraphs(
         text: String, fontData: Data?, pointSize: Double, color: Vec3,
         wrapWidth: Double, maxRows: Int, usesEllipsis: Bool,
-        shadow: TextShadow?, shadowScale: Double
+        shadow: TextShadow?, shadowScale: Double, extraPadding: Vec2,
+        horizontalAlign: TextAlignment, blockAlign: Bool
     ) throws -> CGImage {
         guard !text.isEmpty, !text.allSatisfy(\.isWhitespace) else { throw TextRasterError.empty }
         guard pointSize.isFinite, pointSize > 0 else {
@@ -105,11 +111,15 @@ public enum TextRasterizer {
         var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
         _ = CTLineGetTypographicBounds(lines[0], &ascent, &descent, &leading)
         let lineHeight = ceil(ascent + descent + leading)
-        let padding = ceil(pointSize * 0.1 + shadowPadding(shadow, scale: shadowScale))
-        let widest = lines.map { max(CTLineGetTypographicBounds($0, nil, nil, nil),
-                                     CTLineGetImageBounds($0, nil).maxX) }.max() ?? 0
-        let width = Int(ceil(widest) + padding * 2)
-        let height = Int(lineHeight * CGFloat(lines.count) + padding * 2)
+        let paddingX = ceil(pointSize * 0.1 + shadowPadding(shadow, scale: shadowScale))
+            + CGFloat(extraPadding.x)
+        let paddingY = ceil(pointSize * 0.1 + shadowPadding(shadow, scale: shadowScale))
+            + CGFloat(extraPadding.y)
+        let lineWidths = lines.map { max(CTLineGetTypographicBounds($0, nil, nil, nil),
+                                         CTLineGetImageBounds($0, nil).maxX) }
+        let widest = lineWidths.max() ?? 0
+        let width = Int(ceil(widest) + paddingX * 2)
+        let height = Int(lineHeight * CGFloat(lines.count) + paddingY * 2)
         guard width > 0, height > 0, width <= maxDimension, height <= maxDimension else {
             throw TextRasterError.badSize(width: width, height: height)
         }
@@ -124,8 +134,24 @@ public enum TextRasterizer {
         applyShadow(shadow, in: context, scale: shadowScale)
         for (index, line) in lines.enumerated() {
             // CoreGraphics의 원점은 좌하단이라 첫 줄이 맨 위에 오도록 뒤에서 센다.
-            let baseline = CGFloat(lines.count - index - 1) * lineHeight + descent + padding
-            context.textPosition = CGPoint(x: padding, y: baseline)
+            let baseline = CGFloat(lines.count - index - 1) * lineHeight + descent + paddingY
+            // `blockalign`이 꺼져 있으면(실물 115개 전부) 줄마다 자기 폭 기준으로
+            // 정렬한다 — 가운데·오른쪽 정렬인 여러 줄 글자가 지그재그로 벌어지는
+            // 게 아니라 각 줄이 제 폭 안에서 붙는다. 켜져 있으면(실물엔 없다)
+            // 예전처럼 전체 블록을 가장 넓은 줄 기준 왼쪽에 통째로 붙인다 —
+            // 바깥의 상자 정렬이 블록 전체를 한 덩어리로 옮긴다.
+            let lineX: CGFloat
+            if blockAlign {
+                lineX = paddingX
+            } else {
+                let slack = CGFloat(widest) - lineWidths[index]
+                switch horizontalAlign {
+                case .left: lineX = paddingX
+                case .center: lineX = paddingX + slack / 2
+                case .right: lineX = paddingX + slack
+                }
+            }
+            context.textPosition = CGPoint(x: lineX, y: baseline)
             CTLineDraw(line, context)
         }
         guard let image = context.makeImage() else {
@@ -163,7 +189,8 @@ public enum TextRasterizer {
 
     public static func rasterize(
         text: String, fontData: Data?, pointSize: Double, color: Vec3,
-        shadow: TextShadow? = nil, shadowScale: Double = 1
+        shadow: TextShadow? = nil, shadowScale: Double = 1,
+        extraPadding: Vec2 = Vec2(x: 0, y: 0)
     ) throws -> CGImage {
         guard !text.isEmpty, !text.allSatisfy(\.isWhitespace) else { throw TextRasterError.empty }
         guard pointSize.isFinite, pointSize > 0 else {
@@ -187,9 +214,12 @@ public enum TextRasterizer {
         let typographicWidth = CTLineGetTypographicBounds(line, &ascent, &descent, &leading)
         let inkBounds = CTLineGetImageBounds(line, nil)
 
-        let padding = ceil(pointSize * 0.1 + shadowPadding(shadow, scale: shadowScale))
-        let width = Int(ceil(max(typographicWidth, inkBounds.maxX)) + padding * 2)
-        let height = Int(ceil(ascent + descent + leading) + padding * 2)
+        let paddingX = ceil(pointSize * 0.1 + shadowPadding(shadow, scale: shadowScale))
+            + CGFloat(extraPadding.x)
+        let paddingY = ceil(pointSize * 0.1 + shadowPadding(shadow, scale: shadowScale))
+            + CGFloat(extraPadding.y)
+        let width = Int(ceil(max(typographicWidth, inkBounds.maxX)) + paddingX * 2)
+        let height = Int(ceil(ascent + descent + leading) + paddingY * 2)
         guard width > 0, height > 0,
               width <= maxDimension, height <= maxDimension else {
             throw TextRasterError.badSize(width: width, height: height)
@@ -206,7 +236,7 @@ public enum TextRasterizer {
         context.setShouldSmoothFonts(true)
         applyShadow(shadow, in: context, scale: shadowScale)
         // CoreGraphics의 원점은 좌하단이다. baseline을 descent만큼 띄운다.
-        context.textPosition = CGPoint(x: padding, y: descent + padding)
+        context.textPosition = CGPoint(x: paddingX, y: descent + paddingY)
         CTLineDraw(line, context)
 
         guard let image = context.makeImage() else {

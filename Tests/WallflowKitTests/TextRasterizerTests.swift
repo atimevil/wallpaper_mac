@@ -328,4 +328,58 @@ extension TextRasterizerTests {
             authoredWidth: 200, authoredHeight: 50, boxWidth: 400, boxHeight: 60))
         XCTAssertEqual(scale, 1.2, accuracy: 0.0001)
     }
+
+    /// 씬의 `padding`은 "글자 도형 둘레의 여백"이다(문서). 늘어난 만큼
+    /// 비트맵이 커져야 한다 — 안 그러면 씬이 정한 여백이 그냥 무시된다.
+    func testExtraPaddingGrowsBitmap() throws {
+        let bare = try TextRasterizer.rasterize(
+            text: "8", fontData: nil, pointSize: 96, color: white)
+        let padded = try TextRasterizer.rasterize(
+            text: "8", fontData: nil, pointSize: 96, color: white,
+            extraPadding: Vec2(x: 20, y: 10))
+        // 여백은 양쪽에 붙으므로 폭은 대략 2*20, 높이는 2*10만큼 커진다.
+        XCTAssertEqual(padded.width - bare.width, 40, accuracy: 2)
+        XCTAssertEqual(padded.height - bare.height, 20, accuracy: 2)
+    }
+
+    /// 여러 줄일 때 blockAlign이 꺼져 있으면(실물 115개 전부) 줄마다 자기 폭
+    /// 기준으로 정렬한다 — 짧은 줄과 긴 줄이 같은 중심선에 놓여야 한다.
+    /// 지금까지는 항상 왼쪽으로 붙어서, 가운데·오른쪽 정렬을 골라도 여러 줄
+    /// 글자의 안쪽 배치가 바뀌지 않는 버그가 있었다.
+    func testMultiLineCenterAlignsEachLineToItsOwnWidth() throws {
+        let image = try TextRasterizer.rasterize(
+            text: "I\nWWWW", fontData: nil, pointSize: 64, color: white,
+            wrapWidth: 0, maxRows: 0, usesEllipsis: false,
+            horizontalAlign: .center, blockAlign: false)
+        let pixelWidth = image.width
+        let bytesPerRow = image.bytesPerRow
+        let data = try XCTUnwrap(image.dataProvider?.data as Data?)
+        func litRange(rowFromTop: Int) -> (min: Int, max: Int)? {
+            var minX: Int?, maxX: Int?
+            let rowStart = rowFromTop * bytesPerRow
+            for x in 0..<pixelWidth {
+                let alphaOffset = rowStart + x * 4 + 3
+                guard alphaOffset < data.count, data[alphaOffset] > 0 else { continue }
+                if minX == nil { minX = x }
+                maxX = x
+            }
+            guard let minX, let maxX else { return nil }
+            return (minX, maxX)
+        }
+        // "I"(첫 줄)와 "WWWW"(둘째 줄)의 중심 x가, 왼쪽에 붙였을 때보다
+        // 서로 훨씬 가까워야 한다(가운데 정렬이면 거의 같아야 한다).
+        var firstLineCenter: Double?
+        var lastLineCenter: Double?
+        for row in 0..<image.height {
+            if let range = litRange(rowFromTop: row) {
+                let center = Double(range.min + range.max) / 2
+                if firstLineCenter == nil { firstLineCenter = center }
+                lastLineCenter = center
+            }
+        }
+        let a = try XCTUnwrap(firstLineCenter)
+        let b = try XCTUnwrap(lastLineCenter)
+        XCTAssertEqual(a, b, accuracy: Double(pixelWidth) * 0.15,
+                       "가운데 정렬인데 줄마다 중심이 다르다 — 줄 단위 정렬이 안 됐다")
+    }
 }
