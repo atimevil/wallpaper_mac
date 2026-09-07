@@ -240,9 +240,43 @@ extension ParticleOperatorTests {
         XCTAssertEqual(lo, Vec3(x: -200, y: -100, z: 0))
         XCTAssertEqual(hi, Vec3(x: 200, y: -1000, z: 0))
 
+        // 실물 rain_screen*.json이 4곳에서 쓰는 두 번째 연산자. `output: "speed"`는
+        // 속도의 크기만 바꾸는 출력이고, 이제 넣었으니 더 이상 못 넣는 목록에 없다.
+        guard case .remapValue(let output2, _, let scale2, let lo2, let hi2) = preset.operators[1]
+        else { return XCTFail("remapvalue여야 한다") }
+        XCTAssertEqual(output2, .speed)
+        XCTAssertEqual(scale2, 8)
+        XCTAssertEqual(lo2, Vec3(x: -5, y: -5, z: -5))
+        XCTAssertEqual(hi2, Vec3(x: 7, y: 7, z: 7))
+
         let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
-        XCTAssertEqual(system.unimplementedOperators, ["remapvalue(speed)"],
-                       "못 넣는 출력은 이름과 함께 남겨야 한다")
+        XCTAssertEqual(system.unimplementedOperators, [],
+                       "speed 출력을 이제 넣으므로 더 이상 보고하면 안 된다")
+    }
+
+    /// `output: speed`는 방향은 그대로 두고 크기만 갈아끼워야 한다.
+    /// 실물이 이 값을 `output: velocity` 뒤에 붙여 낙하 속력을 2차로 흔든다.
+    func testRemapSpeedKeepsDirectionButChangesMagnitude() throws {
+        // 3:4:0 방향(크기 5)으로 고정한 뒤, speed 출력으로 크기를 10으로 갈아끼운다.
+        // 방향(비율)은 그대로여야 한다.
+        let system = self.system(
+            initializers: [.velocityRandom(min: Vec3(x: 3, y: 4, z: 0),
+                                           max: Vec3(x: 3, y: 4, z: 0))],
+            operators: [.remapValue(output: .speed, transform: .noise, inputScale: 8,
+                                    outputMin: Vec3(x: 10, y: 10, z: 10),
+                                    outputMax: Vec3(x: 10, y: 10, z: 10))],
+            burst: 8)
+        system.update(deltaTime: 1.0 / 60)
+        XCTAssertFalse(system.particles.isEmpty)
+        for particle in system.particles {
+            let magnitude = (particle.velocity.x * particle.velocity.x
+                + particle.velocity.y * particle.velocity.y
+                + particle.velocity.z * particle.velocity.z).squareRoot()
+            // 범위가 10~10으로 고정이라 크기는 항상 10에 가까워야 한다.
+            XCTAssertEqual(magnitude, 10, accuracy: 0.01)
+            // 방향(3:4 비율)은 지켜야 한다 — 통째로 갈아끼우는 `.velocity`와 다르다.
+            XCTAssertEqual(particle.velocity.x / particle.velocity.y, 3.0 / 4.0, accuracy: 0.01)
+        }
     }
 
     /// 방울마다 다른 속도를 받아야 한다. 하나로 뭉치면 전부 같은 줄로 떨어진다.
@@ -337,5 +371,102 @@ extension ParticleOperatorTests {
         let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
         XCTAssertEqual(system.unimplementedOperators, ["controlpointattract(제어점 1)"])
         XCTAssertNil(system.controlPointPosition(1))
+    }
+}
+
+/// `mapsequencearoundcontrolpoint` — 실물에서 `magic_trinity` 프리셋 하나만 쓴다.
+/// 문서 표시 이름은 "Position around control point"지만 원본 JSON 이름은 이거다.
+extension ParticleOperatorTests {
+    private func sequencePreset(
+        controlPoints: String = "[]", initializer: String
+    ) throws -> ParticlePreset {
+        // boxrandom을 쓴다. 세 축의 min==max라 난수를 뽑아도 자리가 항상
+        // (48, 0, 0)으로 고정된다 — sphererandom은 각도가 난수라 z를 0으로
+        // 지워도(2D 기본값) xy 반지름이 sin(phi)만큼 흔들려 "반지름을 지키는지"
+        // 시험이 아니라 "난수가 뭐가 나왔는지" 시험이 돼 버린다.
+        let json = """
+        {"maxcount": 8, "material": "m.json",
+         "emitter": [{"name": "boxrandom", "rate": 0, "instantaneous": 8,
+                      "distancemin": "48 0 0", "distancemax": "48 0 0"}],
+         "controlpoint": \(controlPoints),
+         "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100},
+                         {"name": "sizerandom", "min": 10, "max": 10}, \(initializer)],
+         "operator": []}
+        """
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(json.utf8)) as? [String: Any])
+        return try XCTUnwrap(ParticlePreset.parse(object))
+    }
+
+    /// 실물 `magic_trinity`의 값 그대로 읽는다.
+    func testParsesMapSequenceAroundControlPoint() throws {
+        let preset = try sequencePreset(initializer: """
+            {"bounds": "0 1", "count": 3.02, "id": 4, "limitbehavior": "repeat",
+             "name": "mapsequencearoundcontrolpoint",
+             "speedmax": "0 100 0", "speedmin": "0 10 0"}
+            """)
+        XCTAssertEqual(preset.initializers.count, 3)
+        guard case .mapSequenceAroundControlPoint(let point, let count, let start, let end,
+                                                  let mirror, let lo, let hi) = preset.initializers[2]
+        else { return XCTFail("mapsequencearoundcontrolpoint여야 한다") }
+        XCTAssertEqual(point, 0, "번호가 없으면 0번(시스템 자신의 자리)이다")
+        XCTAssertEqual(count, 3.02)
+        XCTAssertEqual(start, 0)
+        XCTAssertEqual(end, 1)
+        XCTAssertFalse(mirror, "limitbehavior가 repeat이면 왕복이 아니다")
+        XCTAssertEqual(lo, Vec3(x: 0, y: 10, z: 0))
+        XCTAssertEqual(hi, Vec3(x: 0, y: 100, z: 0))
+    }
+
+    /// 반지름은 이 초기화자가 정하지 않는다 — 이미터가 뿌린 거리를 그대로 지켜야 한다.
+    /// 이미터가 항상 (48, 0, 0)에 뿌리므로(boxrandom, min==max) 모든 파티클이
+    /// 원점에서 48이어야 한다 — 각도만 바뀌고 반지름은 그대로.
+    func testMapSequencePreservesEmitterRadius() throws {
+        let preset = try sequencePreset(initializer: """
+            {"bounds": "0 1", "count": 4, "name": "mapsequencearoundcontrolpoint",
+             "speedmin": "0 0 0", "speedmax": "0 0 0"}
+            """)
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        system.update(deltaTime: 1.0 / 60)
+        XCTAssertFalse(system.particles.isEmpty)
+        for particle in system.particles {
+            let radius = (particle.position.x * particle.position.x
+                + particle.position.y * particle.position.y).squareRoot()
+            XCTAssertEqual(radius, 48, accuracy: 0.01, "반지름이 이미터 거리와 달라졌다")
+        }
+    }
+
+    /// count개 자리를 순서대로 돌아야 한다(repeat: 0,1,2,0,1,2,…).
+    func testNextSequenceSlotRepeatsInOrder() {
+        var counter = 0
+        let slots = (0..<6).map { _ in
+            ParticleSystem.nextSequenceSlot(&counter, count: 3, mirror: false)
+        }
+        XCTAssertEqual(slots, [0, 1, 2, 0, 1, 2])
+    }
+
+    /// mirror는 끝에서 되돌아가야 한다(0,1,2,1,0,1,2,1,…).
+    func testNextSequenceSlotMirrorsBackAndForth() {
+        var counter = 0
+        let slots = (0..<8).map { _ in
+            ParticleSystem.nextSequenceSlot(&counter, count: 3, mirror: true)
+        }
+        XCTAssertEqual(slots, [0, 1, 2, 1, 0, 1, 2, 1])
+    }
+
+    /// 0번이 아닌 번호인데 씬이 그 제어점을 안 주면 못 푼다 — 이름과 번호로 남긴다.
+    func testMapSequenceReportsUnresolvableControlPoint() throws {
+        let preset = try sequencePreset(initializer: """
+            {"bounds": "0 1", "controlpoint": 3, "count": 3,
+             "name": "mapsequencearoundcontrolpoint",
+             "speedmin": "0 0 0", "speedmax": "0 0 0"}
+            """)
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        XCTAssertEqual(system.unimplementedOperators, ["mapsequencearoundcontrolpoint(제어점 3)"])
+        // 못 풀어도 파티클은 이미터가 준 자리에 그대로 있어야 한다(원점 순간이동 금지).
+        system.update(deltaTime: 1.0 / 60)
+        for particle in system.particles {
+            XCTAssertTrue(particle.position.x.isFinite && particle.position.y.isFinite)
+        }
     }
 }
