@@ -109,6 +109,43 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertNil(try WallpaperItem.load(from: dir).unsupportedReason)
     }
 
+    /// webm/mkv는 macOS AVFoundation이 컨테이너 단계에서부터 못 연다(실측,
+    /// UnsupportedVideoFormat.swift 참고). VideoRenderer가 검은 화면만 남기고
+    /// 조용히 실패하지 않도록, load() 단계에서부터 이유를 달아 목록에 남긴다.
+    func testVideoWithWebmExtensionIsListedWithReason() throws {
+        let dir = try makeItem(
+            id: "600",
+            json: #"{"type":"video","file":"bg.webm","title":"WebM 배경"}"#,
+            files: ["bg.webm"])
+        let item = try WallpaperItem.load(from: dir)
+        XCTAssertEqual(item.title, "WebM 배경")
+        XCTAssertEqual(item.type, .unsupported)
+        XCTAssertNotNil(item.unsupportedReason)
+        XCTAssertTrue(item.unsupportedReason!.contains("WebM"))
+    }
+
+    func testVideoWithMkvExtensionIsListedWithReason() throws {
+        let dir = try makeItem(
+            id: "601",
+            json: #"{"type":"video","file":"bg.mkv","title":"MKV 배경"}"#,
+            files: ["bg.mkv"])
+        let item = try WallpaperItem.load(from: dir)
+        XCTAssertEqual(item.type, .unsupported)
+        XCTAssertNotNil(item.unsupportedReason)
+    }
+
+    /// web 타입에 붙은 .webm 파일은(있을 법하지 않지만) video가 아니므로
+    /// 컨테이너 검사 대상이 아니다 — video 타입에서만 이 검사를 한다.
+    func testNonVideoTypeIsNotCheckedForContainer() throws {
+        let dir = try makeItem(
+            id: "602",
+            json: #"{"type":"web","file":"clip.webm","title":"안건드림"}"#,
+            files: ["clip.webm"])
+        let item = try WallpaperItem.load(from: dir)
+        XCTAssertEqual(item.type, .web)
+        XCTAssertNil(item.unsupportedReason)
+    }
+
     func testScanReturnsItemsSortedByTitle() throws {
         try makeItem(id: "b", json: #"{"type":"video","file":"a.mp4","title":"Zebra"}"#, files: ["a.mp4"])
         try makeItem(id: "a", json: #"{"type":"video","file":"a.mp4","title":"Apple"}"#, files: ["a.mp4"])
