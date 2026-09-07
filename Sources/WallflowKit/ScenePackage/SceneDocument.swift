@@ -163,7 +163,8 @@ public struct SceneDocument: Sendable {
                 localOrigin: scalarOrScripted(object["origin"]).flatMap(Vec3.parse)
                     ?? Vec3(x: 0, y: 0, z: 0),
                 localScale: scalarOrScripted(object["scale"]).flatMap(Vec3.parse)
-                    ?? Vec3(x: 1, y: 1, z: 1))
+                    ?? Vec3(x: 1, y: 1, z: 1),
+                parentID: object["parent"] as? Int)
         }
         let layers = applyingParticleBudget(rawLayers)
         let scriptModules = loadScriptModules(objects: objects, resolver: resolver)
@@ -615,12 +616,17 @@ public struct SceneDocument: Sendable {
         // 그 레이어를 원본으로 되돌린다.
 
         let content = resolveContent(modelPath: modelPath, object: object, resolver: resolver)
+        // 퍼펫 워프. 모델 JSON이 메시를 가리키고 오브젝트가 애니메이션을 고른다.
+        var puppet: PuppetSpec?
+        if let puppetPath = resolver.json(for: modelPath)?["puppet"] as? String, !puppetPath.isEmpty {
+            puppet = PuppetSpec.parse(path: puppetPath, animationLayers: object["animationlayers"])
+        }
         return SceneLayer(
             id: id, name: name, visible: visible,
             origin: origin, size: size,
             content: content, unrunScripts: unrun, effects: effects, alpha: alpha, tint: tint,
             rotation: rotation, displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
-                colorBlendMode: blendMode, brightness: brightness
+                colorBlendMode: blendMode, brightness: brightness, puppet: puppet
         )
     }
 

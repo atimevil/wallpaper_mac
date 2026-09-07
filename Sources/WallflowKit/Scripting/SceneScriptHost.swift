@@ -70,6 +70,8 @@ public final class SceneScriptHost: @unchecked Sendable {
         public var materialScripts: [MaterialScript] = []
         /// 글자 레이어의 글자 크기(씬 단위). `thisObject.pointsize`로 스크립트가 바꾼다.
         public var pointSize: Double?
+        /// 부모 레이어 id. `thisLayer.getChildren()`이 이걸로 자식을 찾는다.
+        public var parent: Int?
 
         public init(id: Int, name: String, origin: Vec3, angles: Vec3, scale: Vec3,
                     alpha: Double, visible: Bool, color: Vec3 = Vec3(x: 1, y: 1, z: 1),
@@ -110,6 +112,7 @@ public final class SceneScriptHost: @unchecked Sendable {
                       visible: layer.visible, color: layer.tint, size: layer.size,
                       text: text, playing: playing, volume: volume, scripts: layer.scripts)
             self.pointSize = pointSize
+            self.parent = layer.parentID
         }
     }
 
@@ -368,6 +371,7 @@ public final class SceneScriptHost: @unchecked Sendable {
         if let playing = seed.playing { fields["p"] = playing ? "true" : "false" }
         if let volume = seed.volume { fields["vol"] = "\(finite(volume))" }
         if let pointSize = seed.pointSize { fields["pt"] = "\(finite(pointSize))" }
+        if let parent = seed.parent { fields["parent"] = "\(parent)" }
         return "{" + fields.map { "\"\($0.key)\": \($0.value)" }.joined(separator: ", ") + "}"
     }
 
@@ -486,6 +490,19 @@ public final class SceneScriptHost: @unchecked Sendable {
     var scriptProperties = {};
     var MediaPlaybackEvent = { PLAYBACK_PLAYING: 0, PLAYBACK_PAUSED: 1, PLAYBACK_STOPPED: 2 };
     var MediaThumbnailEvent = {};
+    // 실물 미디어 위젯이 재생 상태를 저장한다. 세션 안에서만 남는 메모리 저장소다.
+    var __wfStorage = {};
+    var localStorage = {
+        getItem: function (k) { return Object.prototype.hasOwnProperty.call(__wfStorage, k) ? __wfStorage[k] : null; },
+        setItem: function (k, v) { if (Object.keys(__wfStorage).length < 256 || k in __wfStorage) { __wfStorage[k] = String(v).slice(0, 4096); } },
+        removeItem: function (k) { delete __wfStorage[k]; },
+        clear: function () { __wfStorage = {}; }
+    };
+    // WE의 localStorage는 웹과 달리 get/set이다(실물 미디어 버튼이 `localStorage.get`을 쓴다).
+    localStorage.get = localStorage.getItem;
+    localStorage.set = localStorage.setItem;
+    localStorage.remove = localStorage.removeItem;
+    var sessionStorage = localStorage;
 
     function __wfAnimationStub() {
         return { play: function () {}, pause: function () {}, stop: function () {},
@@ -516,6 +533,16 @@ public final class SceneScriptHost: @unchecked Sendable {
             __playing: (typeof seed.p === 'boolean') ? seed.p : undefined,
             volume: (typeof seed.vol === 'number') ? seed.vol : undefined,
             __asset: seed.asset,
+            __parent: (typeof seed.parent === 'number') ? seed.parent : null,
+            getChildren: function () {
+                var me = this.id, out = [];
+                for (var i = 0; i < __wf.order.length; i++) {
+                    var c = __wf.layers[__wf.order[i]];
+                    if (c && c.__parent === me) { out.push(c); }
+                }
+                return out;
+            },
+            getParent: function () { return this.__parent === null ? null : (__wf.layers[this.__parent] || null); },
             play: function () { this.__playing = true; },
             stop: function () { this.__playing = false; },
             pause: function () { this.__playing = false; },
@@ -710,7 +737,11 @@ public final class SceneScriptHost: @unchecked Sendable {
         // 지금 아무것도 재생 중이 아니다. 미디어 위젯이 이걸로 스스로 숨는다.
         for (i = from; i < __wf.units.length; i++) {
             __wfCall(__wf.units[i], 'mediaPlaybackChanged', [{ state: MediaPlaybackEvent.PLAYBACK_STOPPED }]);
-            __wfCall(__wf.units[i], 'mediaThumbnailChanged', [{ hasThumbnail: false }]);
+            // 레퍼런스의 IMediaThumbnailEvent: 썸네일이 없어도 색 필드는 Vec3다.
+            __wfCall(__wf.units[i], 'mediaThumbnailChanged', [{
+                hasThumbnail: false, primaryColor: new Vec3(0, 0, 0), secondaryColor: new Vec3(0, 0, 0),
+                tertiaryColor: new Vec3(0, 0, 0), textColor: new Vec3(1, 1, 1), highContrastColor: new Vec3(1, 1, 1)
+            }]);
         }
     }
 

@@ -65,6 +65,8 @@ enum LayerSource {
     case solid(SIMD4<Float>)
     /// 파티클. 쿼드 하나가 아니라 인스턴싱으로 직접 그린다.
     case particles(ParticleRenderer)
+    /// 퍼펫 워프 메시. 레이어의 쿼드 자리·크기 안에서 정점이 움직인다.
+    case puppet(PuppetRenderer)
     /// 합성 레이어. 그 지점까지 그려진 화면을 받아 이펙트를 걸고 그 결과를 그린다.
     /// 값은 레이어 번호다 — 렌더러가 그 번호로 어느 체인인지 안다.
     case composition(Int)
@@ -78,6 +80,8 @@ final class MetalCompositor {
     let device: MTLDevice
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
+    /// 퍼펫 워프 메시 파이프라인. 정점 버퍼 2번에서 자리·uv를 읽는다.
+    private let puppetPipeline: MTLRenderPipelineState?
     /// 원근 씬용. 카메라가 있으면 쿼드를 이 파이프라인으로 그린다.
     private let pipeline3D: MTLRenderPipelineState
     /// 원근 씬의 뷰·투영. nil이면 직교 씬이다.
@@ -155,6 +159,29 @@ final class MetalCompositor {
         vertexDescriptor.attributes[0].bufferIndex = 0
         vertexDescriptor.layouts[0].stride = MemoryLayout<SIMD2<Float>>.stride
         descriptor.vertexDescriptor = vertexDescriptor
+        if let puppetVertex = library.makeFunction(name: "puppet_vertex") {
+            let puppetDescriptor = MTLRenderPipelineDescriptor()
+            puppetDescriptor.vertexFunction = puppetVertex
+            puppetDescriptor.fragmentFunction = descriptor.fragmentFunction
+            puppetDescriptor.colorAttachments[0].pixelFormat = Self.colorPixelFormat
+            puppetDescriptor.colorAttachments[0].isBlendingEnabled = true
+            puppetDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            puppetDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            puppetDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+            puppetDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            let puppetLayout = MTLVertexDescriptor()
+            puppetLayout.attributes[0].format = .float2
+            puppetLayout.attributes[0].offset = 0
+            puppetLayout.attributes[0].bufferIndex = 2
+            puppetLayout.attributes[1].format = .float2
+            puppetLayout.attributes[1].offset = 8
+            puppetLayout.attributes[1].bufferIndex = 2
+            puppetLayout.layouts[2].stride = PuppetRenderer.vertexStride
+            puppetDescriptor.vertexDescriptor = puppetLayout
+            puppetPipeline = try? device.makeRenderPipelineState(descriptor: puppetDescriptor)
+        } else {
+            puppetPipeline = nil
+        }
 
         do {
             pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
@@ -524,6 +551,16 @@ final class MetalCompositor {
                 }
                 renderer.encode(into: encoder, world: quad.world, viewProjection: viewProjection,
                                 alpha: quad.color.w, time: Float(CACurrentMediaTime()))
+                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                continue
+
+            case .puppet(let renderer):
+                guard let puppetPipeline, let texture = renderer.texture() else { continue }
+                encoder.setRenderPipelineState(puppetPipeline)
+                encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+                encoder.setFragmentTexture(texture, index: 0)
+                encoder.setFragmentSamplerState(sampler, index: 0)
+                renderer.encode(into: encoder)
                 encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
                 continue
 

@@ -78,6 +78,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var camera: SceneCamera?
     /// 이 씬의 소리들. 사용자가 켤 때만 실제로 난다.
     private var sounds: [SoundEntry] = []
+    /// 퍼펫 워프 레이어들. 매 프레임 뼈대를 움직여 정점을 다시 쓴다.
+    private var puppets: [PuppetRenderer] = []
+    private var puppetStartTime: CFTimeInterval?
 
     /// 소리 하나. `wanted`는 씬이나 스크립트가 지금 나기를 바라는지다 —
     /// `startsilent`인 소리는 스크립트가 `play()`를 부르기 전까지 false다.
@@ -620,6 +623,34 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         return scriptTargets[id] != nil || layerList.count > before
     }
 
+    /// 이미지 레이어를 목록에 붙인다. 퍼펫 워프가 있으면 쿼드 대신 메시로 그린다 —
+    /// 메시는 쿼드와 같은 자리·크기 안에서 정점만 움직인다.
+    private func appendImage(_ quad: QuadInstance, layer: SceneLayer, context: BuildContext,
+                             texture: MTLTexture, provider: (@MainActor () -> MTLTexture?)?) {
+        if let spec = layer.puppet {
+            do {
+                guard let raw = context.resolver.data(for: spec.path) else {
+                    throw MDLError.truncated("퍼펫 메시가 없다: \(spec.path)")
+                }
+                let model = try PuppetModel.parse(raw)
+                let renderer = try PuppetRenderer(
+                    device: context.device, model: model, spec: spec,
+                    imageSize: SIMD2(Float(texture.width), Float(texture.height)),
+                    texture: provider ?? { [texture] in texture })
+                puppets.append(renderer)
+                layerList.append((quad, .puppet(renderer)))
+                return
+            } catch {
+                degraded.append("\(layer.name): 퍼펫 워프를 못 읽어 그림만 그린다: \(error)")
+            }
+        }
+        if let provider {
+            layerList.append((quad, .dynamic(provider)))
+        } else {
+            layerList.append((quad, .fixed(texture)))
+        }
+    }
+
     /// 레이어의 메시·셰이더 이미지 재질에 붙은 상수 스크립트들.
     private func materialScripts(of id: Int) -> [SceneScriptHost.MaterialScript] {
         guard let target = scriptTargets[id] else { return [] }
@@ -1105,7 +1136,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                         makeTexture: { try context.compositor.makeTexture(from: $0) },
                         diagnostics: &degraded) {
                         effectChains.append((chain, texture))
-                        layerList.append((quad, .dynamic { [weak chain] in chain?.texture }))
+                        appendImage(quad, layer: layer, context: context,
+                                    texture: texture, provider: { [weak chain] in chain?.texture })
                     } else {
                         if !layer.effects.isEmpty, Self.effectsEnabled {
                             if !effectBudgetLeft {
@@ -1117,7 +1149,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                                 "\(layer.name): 이펙트 \(layer.effects.count)개를 걸지 못해 "
                                     + "원본 그대로 그린다")
                         }
-                        layerList.append((quad, .fixed(texture)))
+                        appendImage(quad, layer: layer, context: context,
+                                    texture: texture, provider: nil)
                     }
                 }
             } catch {
@@ -1336,6 +1369,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                             Float(document.skylightColor.z)))
         buildContext = context
         layerList = []
+        puppets = []
+        puppetStartTime = nil
         effectChains = []
         compositionLayers = [:]
         postLayers = []
@@ -1453,7 +1488,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         // 멈춘 채로 남는다. 움직이지 않는 이펙트는 여기 해당하지 않는다.
         let hasAnimatedEffect = effectChains.contains { $0.chain.isAnimated }
         if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty || hasAnimatedEffect
-            || scriptHost != nil {
+            || scriptHost != nil || !puppets.isEmpty {
             view.isPaused = false
             view.enableSetNeedsDisplay = false
             // 전력 정책이 30fps를 지시한다. 60fps 소스라도 그 이상 그리지 않는다.
@@ -1499,6 +1534,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         sounds.removeAll()
         particles.removeAll()
         texts.removeAll()
+        puppets.removeAll()
+        puppetStartTime = nil
         lastFrameTime = nil
         lastScriptTick = nil
         scriptHost = nil
@@ -1527,6 +1564,12 @@ extension SceneRenderer: MTKViewDelegate {
         updateParallax(in: view)
         updateCamera(in: view)
         tickScripts(in: view)
+        if !puppets.isEmpty {
+            let now = CACurrentMediaTime()
+            let start = puppetStartTime ?? now
+            puppetStartTime = start
+            for puppet in puppets { puppet.update(time: now - start) }
+        }
         if !particles.isEmpty {
             let now = CACurrentMediaTime()
             // 첫 프레임에는 직전 시각이 없다. 0을 넘기면 시뮬레이션이 그냥 넘어간다.

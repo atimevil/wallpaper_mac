@@ -270,6 +270,49 @@ public struct LayerScript: Equatable, Sendable {
     }
 }
 
+/// 이미지 레이어에 심은 퍼펫 워프. 모델 JSON의 `puppet`이 메시를, 오브젝트의
+/// `animationlayers`가 어떤 애니메이션을 어떻게 틀지 말한다.
+public struct PuppetSpec: Equatable, Sendable {
+    public struct AnimationLayer: Equatable, Sendable {
+        public let id: Int
+        public let rate: Double
+        public let blend: Double
+        public let visible: Bool
+
+        public init(id: Int, rate: Double = 1, blend: Double = 1, visible: Bool = true) {
+            self.id = id
+            self.rate = rate
+            self.blend = blend
+            self.visible = visible
+        }
+    }
+
+    /// `*_puppet.mdl` 경로.
+    public let path: String
+    public let animations: [AnimationLayer]
+
+    public init(path: String, animations: [AnimationLayer]) {
+        self.path = path
+        self.animations = animations
+    }
+
+    /// 씬 오브젝트의 `animationlayers` 배열을 읽는다. 없거나 비었으면 nil.
+    public static func parse(path: String, animationLayers raw: Any?) -> PuppetSpec? {
+        var animations: [AnimationLayer] = []
+        for case let entry as [String: Any] in (raw as? [Any] ?? []) {
+            guard let id = (entry["animation"] as? NSNumber)?.intValue else { continue }
+            func number(_ key: String, _ fallback: Double) -> Double {
+                guard let n = entry[key] as? NSNumber, n.doubleValue.isFinite else { return fallback }
+                return n.doubleValue
+            }
+            animations.append(AnimationLayer(
+                id: id, rate: number("rate", 1), blend: min(max(number("blend", 1), 0), 1),
+                visible: (entry["visible"] as? Bool) ?? true))
+        }
+        return PuppetSpec(path: path, animations: animations)
+    }
+}
+
 /// 씬의 레이어 하나. origin은 오브젝트의 중심이고 직교 공간 좌표다.
 public struct SceneLayer: Equatable, Sendable {
     public let id: Int
@@ -324,6 +367,10 @@ public struct SceneLayer: Equatable, Sendable {
     /// 오브젝트 자체의 origin·scale. 부모를 합치지 않은 값이라 스크립트가 읽고 쓴다.
     public let localOrigin: Vec3
     public let localScale: Vec3
+    /// 이미지 레이어의 퍼펫 워프. 없으면 nil.
+    public let puppet: PuppetSpec?
+    /// 부모 오브젝트의 id. 스크립트의 `getChildren()`이 이걸로 자식을 찾는다.
+    public let parentID: Int?
 
     public init(
         id: Int, name: String, visible: Bool, origin: Vec3, size: Vec2,
@@ -338,8 +385,12 @@ public struct SceneLayer: Equatable, Sendable {
         scripts: [LayerScript] = [],
         angles: Vec3 = Vec3(x: 0, y: 0, z: 0),
         localOrigin: Vec3? = nil,
-        localScale: Vec3? = nil
+        localScale: Vec3? = nil,
+        puppet: PuppetSpec? = nil,
+        parentID: Int? = nil
     ) {
+        self.puppet = puppet
+        self.parentID = parentID
         self.scripts = scripts
         self.angles = angles
         self.localOrigin = localOrigin ?? origin
@@ -370,19 +421,22 @@ public struct SceneLayer: Equatable, Sendable {
             alpha: alpha, tint: tint, rotation: rotation, displayScripts: displayScripts,
             scale: scale, parallaxDepth: parallaxDepth,
             colorBlendMode: colorBlendMode, brightness: brightness,
-            scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale)
+            scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
+            puppet: puppet, parentID: parentID)
     }
 
     /// 스크립트와 오브젝트 자체 변환을 붙인 사본. 나머지는 그대로다.
     public func attachingScripts(_ scripts: [LayerScript], angles: Vec3,
-                                 localOrigin: Vec3, localScale: Vec3) -> SceneLayer {
+                                 localOrigin: Vec3, localScale: Vec3,
+                                 parentID: Int? = nil) -> SceneLayer {
         SceneLayer(
             id: id, name: name, visible: visible, origin: origin, size: size,
             content: content, unrunScripts: unrunScripts, effects: effects,
             alpha: alpha, tint: tint, rotation: rotation, displayScripts: displayScripts,
             scale: scale, parallaxDepth: parallaxDepth,
             colorBlendMode: colorBlendMode, brightness: brightness,
-            scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale)
+            scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
+            puppet: puppet, parentID: parentID)
     }
 }
 

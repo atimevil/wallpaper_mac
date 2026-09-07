@@ -119,7 +119,7 @@ public struct MDLModel: Equatable, Sendable {
     }
 
     /// 앞에서부터 읽는 커서. 끝을 넘으면 던진다 — 잘린 파일이 trap이 되면 안 된다.
-    private struct Cursor {
+    struct Cursor {
         let data: Data
         var offset = 0
 

@@ -79,6 +79,33 @@ enum SceneShaders {
         return out;
     }
 
+    /// 퍼펫 워프 메시. 정점은 단위 쿼드와 같은 공간(-0.5..0.5, +y가 화면 아래)에
+    /// 있고 uv는 정점이 들고 있다 — 자리는 움직여도 그림의 어느 점인지는 그대로다.
+    struct PuppetVertexIn {
+        float2 position [[attribute(0)]];
+        float2 uv [[attribute(1)]];
+    };
+
+    vertex VertexOut puppet_vertex(
+        PuppetVertexIn in [[stage_in]],
+        constant QuadUniforms &u [[buffer(1)]]
+    ) {
+        float2 scaled = in.position * u.size;
+        float c = cos(u.rotation), s = sin(u.rotation);
+        float2 rotated = float2(scaled.x * c - scaled.y * s, scaled.x * s + scaled.y * c);
+        float2 world = float2(u.origin.x, u.projection.y - u.origin.y) + rotated;
+        float2 ndc = float2(
+            (world.x / u.projection.x) * 2.0 - 1.0,
+            1.0 - (world.y / u.projection.y) * 2.0
+        );
+        VertexOut out;
+        out.position = float4(ndc, 0.0, 1.0);
+        out.uv = in.uv;
+        out.color = u.color;
+        out.screenTangents = float4(0.0);
+        return out;
+    }
+
     fragment float4 quad_fragment(
         VertexOut in [[stage_in]],
         texture2d<float> tex [[texture(0)]],
