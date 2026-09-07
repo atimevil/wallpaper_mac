@@ -130,4 +130,98 @@ extension TextLayerTests {
         guard case .text(let t) = doc.layers[0].content else { return XCTFail("텍스트여야 한다") }
         XCTAssertEqual(t.horizontalAlign, .center)
     }
+
+    /// 실물에 `padding`이 수(양쪽 공통)로도 오고 "x y" 문자열로도 온다.
+    func testParsesPadding() throws {
+        for (raw, want) in [("32", Vec2(x: 32, y: 32)),
+                            ("\"37.00000 37.00000\"", Vec2(x: 37, y: 37)),
+                            ("4", Vec2(x: 4, y: 4))] {
+            let reader = try makeScenePkg(scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "T", "origin": "0 0 0", "size": "10 10",
+                          "font": "f.ttf", "padding": \(raw),
+                          "text": {"value": "x"}}]}
+            """)
+            let doc = try SceneDocument.load(from: reader, assets: nil)
+            guard case .text(let t) = doc.layers[0].content else { return XCTFail("텍스트여야 한다") }
+            XCTAssertEqual(t.padding, want, raw)
+        }
+    }
+
+    /// 없으면 여백 0이다 — 옛 씬에도 안전해야 한다.
+    func testMissingPaddingDefaultsToZero() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "T", "origin": "0 0 0", "size": "10 10",
+                      "font": "f.ttf", "text": {"value": "x"}}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .text(let t) = doc.layers[0].content else { return XCTFail("텍스트여야 한다") }
+        XCTAssertEqual(t.padding, Vec2(x: 0, y: 0))
+    }
+
+    /// 실물 115개가 전부 false다. 없거나 모르는 값도 false로 둔다.
+    func testParsesBlockAlign() throws {
+        for (raw, want) in [("true", true), ("false", false)] {
+            let reader = try makeScenePkg(scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "T", "origin": "0 0 0", "size": "10 10",
+                          "font": "f.ttf", "blockalign": \(raw),
+                          "text": {"value": "x"}}]}
+            """)
+            let doc = try SceneDocument.load(from: reader, assets: nil)
+            guard case .text(let t) = doc.layers[0].content else { return XCTFail("텍스트여야 한다") }
+            XCTAssertEqual(t.blockAlign, want, raw)
+        }
+    }
+
+    /// 텍스트 전용 `anchor`는 "화면(캔버스) 닻"이다. 부모가 없는 레이어에서
+    /// 캔버스 가장자리를 기준으로 origin을 다시 잡는다.
+    func testTopLevelTextAnchorShiftsOriginToCanvasEdge() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 200, "height": 100}},
+         "objects": [{"id": 1, "name": "T", "origin": "10 5 0", "size": "10 10",
+                      "font": "f.ttf", "anchor": "topleft",
+                      "text": {"value": "x"}}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        // 씬 좌표는 원점이 캔버스 왼쪽 아래다. topleft 닻은 (0, 100)이고
+        // origin(10, 5)만큼 더한다.
+        XCTAssertEqual(doc.layers[0].origin.x, 10, accuracy: 0.001)
+        XCTAssertEqual(doc.layers[0].origin.y, 105, accuracy: 0.001)
+    }
+
+    /// anchor가 "none"이면(실물 111/115) origin을 그대로 둔다 — 캔버스 중심
+    /// 기준의 기존 동작과 같다.
+    func testNoneAnchorLeavesOriginUnchanged() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 200, "height": 100}},
+         "objects": [{"id": 1, "name": "T", "origin": "10 5 0", "size": "10 10",
+                      "font": "f.ttf", "anchor": "none",
+                      "text": {"value": "x"}}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        XCTAssertEqual(doc.layers[0].origin.x, 10, accuracy: 0.001)
+        XCTAssertEqual(doc.layers[0].origin.y, 5, accuracy: 0.001)
+    }
+
+    /// 부모가 있으면 캔버스 닻을 다시 얹지 않는다 — origin이 이미 부모 안에서
+    /// 자리를 잡은 값이다(실물 노트패드 하위 텍스트 셋: anchor는 "left"인데
+    /// origin이 -319/0/319로 이미 각자 자리를 잡고 있다).
+    func testAnchorIgnoredWhenLayerHasParent() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 200, "height": 100}},
+         "objects": [
+           {"id": 1, "name": "Group", "origin": "0 0 0", "size": "10 10"},
+           {"id": 2, "name": "T", "parent": 1, "origin": "10 5 0", "size": "10 10",
+            "font": "f.ttf", "anchor": "topleft", "text": {"value": "x"}}
+         ]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard let text = doc.layers.first(where: {
+            if case .text = $0.content { return true }; return false
+        }) else { return XCTFail("텍스트 레이어를 찾지 못했다") }
+        XCTAssertEqual(text.origin.x, 10, accuracy: 0.001)
+        XCTAssertEqual(text.origin.y, 5, accuracy: 0.001)
+    }
 }
