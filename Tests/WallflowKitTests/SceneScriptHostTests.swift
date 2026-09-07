@@ -377,6 +377,30 @@ final class SceneScriptHostTests: XCTestCase {
         XCTAssertEqual(host.tick(frametime: 0).layers[1]?.pointSize, 25)
     }
 
+    /// 커서가 움직이면 `cursorMove`가 오고, 안 움직이면 안 온다. 실물 "졸음" 씬의 뼈대.
+    func testCursorMoveFiresOnlyWhenCursorMoves() {
+        let source = """
+        let moves = 0; let lastX = -1;
+        export function cursorMove(e) { moves += 1; lastX = e.worldPosition.x; thisScene.getLayer('zzz').stop(); }
+        export function update(v) { return moves / 10 + lastX / 1000; }
+        """
+        var zzz = seed(2, "zzz", scripts: [])
+        zzz.playing = true
+        let host = SceneScriptHost(layers: [
+            seed(1, "cursor", scripts: [LayerScript(property: "alpha", source: source)]), zzz,
+        ], camera: nil)
+        // 첫 틱: 커서가 처음 알려졌으니 한 번 온다.
+        let first = host.tick(frametime: 0.1, cursorWorld: Vec3(x: 100, y: 5, z: 0))
+        XCTAssertEqual(first.failures, [])
+        // 알파는 0~1로 죄어지므로 (횟수/10 + x/1000)로 부호화한다: 1번, x=100 → 0.2.
+        XCTAssertEqual(first.layers[1]?.alpha ?? 0, 0.2, accuracy: 1e-9)
+        // 같은 자리: 안 온다.
+        XCTAssertEqual(host.tick(frametime: 0.1, cursorWorld: Vec3(x: 100, y: 5, z: 0)).layers[1]?.alpha ?? 0, 0.2, accuracy: 1e-9)
+        let moved = host.tick(frametime: 0.1, cursorWorld: Vec3(x: 300, y: 5, z: 0))
+        XCTAssertEqual(moved.layers[1]?.alpha ?? 0, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(moved.layers[2]?.playing, false, "stop()이 파티클 레이어의 재생 상태를 끈다")
+    }
+
     /// 모듈 import가 스크립트 범위 안에서 풀린다.
     func testModuleImportInsideUnit() {
         let host = SceneScriptHost(layers: [

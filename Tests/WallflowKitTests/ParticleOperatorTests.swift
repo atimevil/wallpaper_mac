@@ -469,4 +469,24 @@ extension ParticleOperatorTests {
             XCTAssertTrue(particle.position.x.isFinite && particle.position.y.isFinite)
         }
     }
+
+    /// `stop()`은 살아 있는 파티클을 거두고 더 뿌리지 않는다. `play()`면 다시 뿌린다.
+    func testStopClearsAndPlayResumes() throws {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data("""
+        {"maxcount": 50, "material": "m.json", "emitter": [{"name": "boxrandom", "rate": 100, "instantaneous": 10}],
+         "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100}], "renderer": [{"name": "sprite"}]}
+        """.utf8)) as? [String: Any])
+        let preset = try XCTUnwrap(ParticlePreset.parse(object))
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        system.update(deltaTime: 0.1)
+        XCTAssertGreaterThan(system.aliveCount, 0)
+        system.stop()
+        XCTAssertEqual(system.aliveCount, 0)
+        XCTAssertFalse(system.isPlaying)
+        system.update(deltaTime: 0.5)
+        XCTAssertEqual(system.aliveCount, 0, "멈춘 동안은 뿌리지 않는다")
+        system.play()
+        system.update(deltaTime: 0.1)
+        XCTAssertGreaterThan(system.aliveCount, 0)
+    }
 }

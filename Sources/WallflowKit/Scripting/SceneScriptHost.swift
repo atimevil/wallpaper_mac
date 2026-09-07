@@ -105,6 +105,9 @@ public final class SceneScriptHost: @unchecked Sendable {
             case .sound(let s):
                 playing = !s.startsSilent
                 volume = s.volume
+            case .particle:
+                // 파티클도 `play()/stop()`의 대상이다. 처음에는 돈다.
+                playing = true
             default: break
             }
             // 보임은 자체 값이다. 부모까지 합친 값은 렌더러가 조상 사슬로 다시 만든다 —
@@ -790,12 +793,37 @@ public final class SceneScriptHost: @unchecked Sendable {
                                 audio: __wf.audio.length });
     }
 
+    // 커서가 움직였으면 모든 스크립트에 cursorMove를 보낸다. 레퍼런스의 CursorEvent는
+    // worldPosition·localPosition·hitBox다. 실물 "졸음" 씬이 이 이벤트로 zzz를 끄고
+    // 타이머를 되감는다. 실물 WE는 Solid 표시된 레이어에만 보내지만, 어느 레이어가
+    // Solid인지는 씬 파일에 없어서 전부에 보낸다 — 이벤트를 아예 안 보내면 그 타이머가
+    // 영영 안 시작된다.
+    var __wfLastCursor = null;
+    function __wfDispatchCursor(cx, cy, cz) {
+        var moved = __wfLastCursor === null
+            || Math.abs(__wfLastCursor.x - cx) > 0.01 || Math.abs(__wfLastCursor.y - cy) > 0.01;
+        __wfLastCursor = new Vec3(cx, cy, cz);
+        if (!moved) { return; }
+        input.cursorDelta = new Vec2(0, 0);
+        for (var i = 0; i < __wf.units.length; i++) {
+            var u = __wf.units[i];
+            if (u.failures >= \(maxConsecutiveFailures) || typeof u.exports.cursorMove !== 'function') { continue; }
+            var o = u.layer.origin || new Vec3(0, 0, 0);
+            __wfCall(u, 'cursorMove', [{
+                worldPosition: new Vec3(cx, cy, cz),
+                localPosition: new Vec3(cx - o.x, cy - o.y, 0),
+                hitBox: null
+            }]);
+        }
+    }
+
     function __wfTick(frametime, runtime, cx, cy, cz, sx, sy, audio) {
         engine.frametime = frametime;
         engine.runtime = runtime;
         input.cursorWorldPosition = new Vec3(cx, cy, cz);
         input.cursorScreenPosition = new Vec2(sx, sy);
         __wfFeedAudio(audio);
+        __wfDispatchCursor(cx, cy, cz);
         for (var i = 0; i < __wf.units.length; i++) {
             var u = __wf.units[i];
             if (u.failures >= \(maxConsecutiveFailures)) { continue; }

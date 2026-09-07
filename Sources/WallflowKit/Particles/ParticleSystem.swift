@@ -213,9 +213,31 @@ public final class ParticleSystem {
     }
 
     /// Update the simulation by deltaTime seconds.
+    /// 스크립트의 `thisLayer.play()/stop()`. 멈추면 살아 있는 파티클과 자식을 전부
+    /// 거두고 더 뿌리지 않는다 — 실물 "졸음" 씬이 마우스가 움직이면 zzz를 `stop()`으로
+    /// 지운다. 다시 틀면 처음처럼 한꺼번에 뿌리는 몫부터 시작한다.
+    public private(set) var isPlaying = true
+
+    public func stop() {
+        isPlaying = false
+        for i in 0..<particleBuffer.count where particleBuffer[i].age < Double.infinity {
+            particleBuffer[i].age = Double.infinity
+            deadSlots.append(i)
+        }
+        numAlive = 0
+        for index in childInstances.indices { childInstances[index].removeAll() }
+    }
+
+    public func play() {
+        guard !isPlaying else { return }
+        isPlaying = true
+        didBurst = false
+        emissionCredits = Array(repeating: 0.0, count: preset.emitters.count)
+    }
+
     public func update(deltaTime: Double) {
         // Check for invalid deltaTime
-        guard deltaTime.isFinite, deltaTime > 0 else { return }
+        guard deltaTime.isFinite, deltaTime > 0, isPlaying else { return }
 
         // Clamp to maxTimeStep
         let dt = Swift.min(deltaTime, Self.maxTimeStep)

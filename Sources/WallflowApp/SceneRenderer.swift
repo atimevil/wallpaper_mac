@@ -82,6 +82,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var sounds: [SoundEntry] = []
     /// 퍼펫 워프 레이어들. 매 프레임 뼈대를 움직여 정점을 다시 쓴다.
     private var puppets: [PuppetRenderer] = []
+    /// 진단용: 프레임 간격 통계를 stderr에 쓴다. "끊긴다"는 말을 수치로 바꾼다.
+    private static let frameDebug = ProcessInfo.processInfo.environment["WALLFLOW_FRAME_DEBUG"] != nil
+    private var frameIntervals: [Double] = []
+    private var lastDrawTime: CFTimeInterval?
     private var puppetStartTime: CFTimeInterval?
 
     /// 소리 하나. `wanted`는 씬이나 스크립트가 지금 나기를 바라는지다 —
@@ -481,12 +485,19 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let cursor = sceneCursorPosition(in: view).map {
             Vec3(x: Double($0.x), y: Double($0.y), z: 0)
         }
+        // 화면 좌표(왼쪽 위 원점, 포인트). `input.cursorScreenPosition`이 된다.
+        var screenCursor: Vec2?
+        if let frame = (view.window?.screen ?? NSScreen.main)?.frame {
+            let mouse = NSEvent.mouseLocation
+            screenCursor = Vec2(x: Double(mouse.x - frame.minX), y: Double(frame.maxY - mouse.y))
+        }
         // 스크립트가 오디오를 달라고 했을 때만 스펙트럼을 넘긴다. 듣고 있지 않으면
         // 빈 사전이라 버퍼가 0으로 남는다 — 가짜 소리를 지어내지 않는다.
         let audio = host.wantsAudio ? Self.audioBands : [:]
         scriptInFlight = true
         scriptQueue.async { [weak self] in
-            let snapshot = host.tick(frametime: dt, cursorWorld: cursor, audio: audio)
+            let snapshot = host.tick(frametime: dt, cursorWorld: cursor, cursorScreen: screenCursor,
+                                     audio: audio)
             Task { @MainActor in
                 guard let self else { return }
                 self.scriptInFlight = false
@@ -531,7 +542,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 let line = "SCRIPTDBG \(id) \(state.name) vis=\(state.visible) a=\(state.alpha) "
                     + "o=\(state.origin) world=\(composed.map { "\($0.origin) s=\($0.scale)" } ?? "-") "
                     + "parent=\(scriptTargets[id].map { "\($0.parentOrigin) x\($0.parentScale)" } ?? "-") "
-                    + "t=\(state.text.map { String($0.prefix(16)) } ?? "-") applied=\(applied)\n"
+                    + "t=\(state.text.map { String($0.prefix(16)) } ?? "-") p=\(state.playing.map { "\($0)" } ?? "-") applied=\(applied)\n"
                 FileHandle.standardError.write(Data(line.utf8))
             }
             if applied { changed = true }
@@ -634,6 +645,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         }
         if let pi = target.particleIndex, pi < particles.count {
             particles[pi].layerOrigin = SIMD2(Float(world.origin.x), Float(world.origin.y))
+            // 스크립트의 play()/stop(). 바뀔 때만 — stop()은 파티클을 거두므로 매 틱 부르면 안 된다.
+            if let playing = state.playing, playing != particles[pi].system.isPlaying {
+                playing ? particles[pi].system.play() : particles[pi].system.stop()
+                changed = true
+            }
         }
         if let si = target.soundIndex, si < sounds.count {
             let entry = sounds[si]
@@ -1631,7 +1647,22 @@ extension SceneRenderer: MTKViewDelegate {
         view.needsDisplay = true
     }
 
+    private func recordFrame() {
+        let now = CACurrentMediaTime()
+        if let last = lastDrawTime { frameIntervals.append(now - last) }
+        lastDrawTime = now
+        guard frameIntervals.count >= 150 else { return }
+        let sorted = frameIntervals.sorted()
+        let ms = { (v: Double) in String(format: "%.1f", v * 1000) }
+        let line = "FRAMEDBG n=\(sorted.count) 중앙값 \(ms(sorted[sorted.count / 2]))ms "
+            + "p95 \(ms(sorted[Int(Double(sorted.count) * 0.95)]))ms 최대 \(ms(sorted.last ?? 0))ms "
+            + "fps상한 \(view?.preferredFramesPerSecond ?? 0)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+        frameIntervals.removeAll(keepingCapacity: true)
+    }
+
     func draw(in view: MTKView) {
+        if Self.frameDebug { recordFrame() }
         updateParallax(in: view)
         updateCamera(in: view)
         tickScripts(in: view)
