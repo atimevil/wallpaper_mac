@@ -232,8 +232,10 @@ final class RealScenesTests: XCTestCase {
                 XCTFail("\(id)에 레이어 '\(name)'이 없다")
                 continue
             }
-            XCTAssertTrue(layer.unrunScripts.contains("origin"),
-                          "\(id)/\(name)의 못 돌린 origin 스크립트를 알리지 않는다")
+            // 이제 origin 스크립트는 `SceneScriptHost`가 돌린다. 문서가 그것을 붙여 두는지 본다.
+            XCTAssertTrue(layer.scripts.contains { $0.property == "origin" },
+                          "\(id)/\(name)의 origin 스크립트를 붙이지 않았다")
+            XCTAssertFalse(layer.unrunScripts.contains("origin"))
             // 좌표를 실제로 읽었는지. 전부 0이면 value를 못 읽고 기본값을 쓴 것이다.
             let o = layer.origin
             XCTAssertFalse(o.x == 0 && o.y == 0 && o.z == 0,

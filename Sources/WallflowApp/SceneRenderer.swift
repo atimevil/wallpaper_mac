@@ -29,11 +29,29 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var lastFrameTime: CFTimeInterval?
     /// 텍스트 레이어마다 스크립트와 구운 글자. 값이 바뀔 때만 다시 굽는다.
     private var texts: [TextState] = []
-    /// `visible`/`alpha` 스크립트를 계속 돌려야 하는 레이어들.
+    /// 씬의 스크립트 전부를 돌리는 호스트. 스크립트가 없는 씬이면 nil이다.
     ///
-    /// 한 번만 돌려서는 안 된다. 실물 음악 위젯의 진행 막대는 0.5초짜리 타이머가
-    /// 끝나야 "재생 중인 음악이 없다"로 판단해 숨는다 — 처음에는 보이라고 답한다.
-    private var displays: [DisplayState] = []
+    /// 렌더 스레드에서 돌리지 않는다. 창작마당 코드라 무한 루프가 있을 수 있고
+    /// 그것을 중단시킬 공개 API가 없다(SceneScriptHost 참고). 직렬 큐 하나에 가둬
+    /// 두면 폭주해도 화면은 계속 돌고 스크립트 값만 마지막 상태에서 멈춘다.
+    private var scriptHost: SceneScriptHost?
+    private let scriptQueue = DispatchQueue(label: "wallflow.scenescript", qos: .userInteractive)
+    /// 이미 돌고 있으면 또 던지지 않는다. 느린 스크립트가 큐에 쌓이면 몇 초 전
+    /// 값을 그리게 된다.
+    private var scriptInFlight = false
+    private var lastScriptTick: CFTimeInterval?
+    /// 레이어 id → 마지막으로 화면에 반영한 스크립트 상태. 같으면 손대지 않는다.
+    private var appliedStates: [Int: SceneScriptHost.LayerState] = [:]
+    /// 레이어 id → 그 레이어의 쿼드·파티클·글자·소리가 어디 있는지.
+    private var scriptTargets: [Int: ScriptTarget] = [:]
+    /// 스크립트가 만들려 했지만 만들 수 없던 레이어. 매 틱 다시 시도하지 않는다.
+    private var unspawnable: Set<Int> = []
+    /// 이미 알린 스크립트 오류. 같은 줄을 매 프레임 찍지 않는다.
+    private var reportedFailures: Set<String> = []
+    /// 씬을 열 때 이미 stderr에 쓴 진단의 수. 그 뒤에 생긴 것만 다시 쓴다.
+    private var reportedSkipped = 0
+    private var reportedDegraded = 0
+    private var buildContext: BuildContext?
     /// 레이어에 걸린 이펙트 체인들. 매 프레임 컴포지터보다 먼저 그린다.
     private var effectChains: [(chain: EffectChain, source: MTLTexture)] = []
     /// 이펙트가 쓰는 `g_Time`. 씬을 켠 뒤 흐른 시간이다.
@@ -41,6 +59,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 화면 전체 후처리. 입력이 "합성이 끝난 화면"이라 첫 프레임에야 만들 수 있다.
     private var postEffects: EffectChain?
     private var postEffectSource: SceneLayer?
+    /// 씬을 열 때 모아 둔 후처리 레이어들. 첫 번째만 건다.
+    private var postLayers: [SceneLayer] = []
     private var postShaderIncludes: [String: String] = [:]
     private var postResolver: ReferenceResolver?
     /// 합성 레이어들. 입력이 "그 지점까지 그려진 화면"이라 첫 프레임에야 체인을 만든다.
@@ -48,10 +68,6 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var compositionChains: [Int: EffectChain] = [:]
     private var compositionResolver: ReferenceResolver?
     private var compositionIncludes: [String: String] = [:]
-    /// 스크립트를 마지막으로 돌린 시각. 시계는 초 단위로 바뀌므로 1초에 한 번이면 된다.
-    private var lastScriptTime: CFTimeInterval?
-    /// 스크립트를 다시 돌리는 주기.
-    private static let scriptInterval: CFTimeInterval = 1.0
     /// 씬이 정한 시차 강도. 0이면 이 씬은 시차를 쓰지 않는다.
     private var parallaxAmount: Double = 0
     /// 부드럽게 따라가는 현재 밀림. 마우스로 바로 튀면 눈에 거슬린다.
@@ -61,7 +77,46 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 원근 씬의 카메라. 직교 씬이면 nil이다. 스크립트가 움직일 수 있어 변수다.
     private var camera: SceneCamera?
     /// 이 씬의 소리들. 사용자가 켤 때만 실제로 난다.
-    private var sounds: [(player: AVAudioPlayer, sceneVolume: Float)] = []
+    private var sounds: [SoundEntry] = []
+
+    /// 소리 하나. `wanted`는 씬이나 스크립트가 지금 나기를 바라는지다 —
+    /// `startsilent`인 소리는 스크립트가 `play()`를 부르기 전까지 false다.
+    private final class SoundEntry {
+        let player: AVAudioPlayer
+        var sceneVolume: Float
+        var wanted: Bool
+        init(player: AVAudioPlayer, sceneVolume: Float, wanted: Bool) {
+            self.player = player
+            self.sceneVolume = sceneVolume
+            self.wanted = wanted
+        }
+    }
+
+    /// 레이어를 만들 때 필요한 것들. 스크립트가 나중에 레이어를 만들 때도 같은 것을 쓴다.
+    private struct BuildContext {
+        let device: MTLDevice
+        let compositor: MetalCompositor
+        let resolver: ReferenceResolver
+        let shaderIncludes: [String: String]
+        let isPerspective: Bool
+        let canvas: Vec2
+        /// 씬의 지운 색. 메시 셰이더의 반사 버퍼 자리에 들어간다.
+        let clearColor: SIMD4<Float>
+    }
+
+    /// 스크립트 상태를 화면의 어디에 반영할지.
+    private struct ScriptTarget {
+        /// `layerList`에서 이 레이어의 쿼드들. 파티클은 그룹마다 하나다.
+        var indices: [Int] = []
+        /// 배율을 곱하기 전의 크기. 스크립트의 scale은 여기에 곱한다.
+        var baseSize: Vec2
+        var brightness: Float
+        /// 메시·파티클은 자기 좌표가 이미 세계 단위라 크기를 곱하지 않는다.
+        var unitWorld = false
+        var particleIndex: Int?
+        var textIndex: Int?
+        var soundIndex: Int?
+    }
     /// 전력 정책이 재생을 멈췄는지.
     ///
     /// `MTKView.isPaused`로 판단하면 안 된다. 정적인 씬은 그릴 것이 없어 뷰가 늘
@@ -88,27 +143,6 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 컴포지터에 준 레이어 목록. 글자 크기가 바뀌면 다시 줘야 해서 들고 있는다.
     private var layerList: [(QuadInstance, LayerSource)] = []
 
-    @MainActor
-    /// 표시 스크립트가 붙은 레이어 하나의 살아 있는 상태.
-    /// 엔진을 유지해야 스크립트 안의 타이머와 플래그가 호출 사이에 남는다.
-    private final class DisplayState {
-        let scripts: [(property: DisplayScript.Property, engine: ScriptEngine)]
-        let layerIndex: Int
-        let baseAlpha: Double
-        let baseVisible: Bool
-        /// 마지막으로 화면에 반영한 알파. 안 바뀌면 레이어 목록을 다시 올리지 않는다.
-        var applied: Float
-
-        init(scripts: [(property: DisplayScript.Property, engine: ScriptEngine)],
-             layerIndex: Int, baseAlpha: Double, baseVisible: Bool, applied: Float) {
-            self.scripts = scripts
-            self.layerIndex = layerIndex
-            self.baseAlpha = baseAlpha
-            self.baseVisible = baseVisible
-            self.applied = applied
-        }
-    }
-
     /// 텍스트 레이어 하나의 상태.
     ///
     /// 스크립트는 **렌더 스레드에서 돌리지 않는다.** 창작마당 코드라 무한 루프가
@@ -127,16 +161,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let verticalAlign: TextVerticalAlignment
         /// 상자의 중심. 정렬에 따라 실제 그리는 중심이 이것과 달라진다.
         let boxCenter: SIMD2<Float>
-        let queue: DispatchQueue
-        let engine: ScriptEngine?
         var value: String
         var texture: MTLTexture?
         var size: SIMD2<Float> = .zero
         /// 실제로 그리는 중심. 정렬 때문에 상자 중심과 다를 수 있다.
         var origin: SIMD2<Float>
-        /// 이미 돌고 있으면 또 던지지 않는다. 느린 스크립트가 큐에 쌓이면
-        /// 나중엔 몇 분 전 시각을 그리게 된다.
-        var inFlight = false
         /// 구운 픽셀 하나가 씬 단위로 몇인지. 저장된 글자와 상자를 견줘 한 번만
         /// 정한다. 실행 중 글자가 길어져도 글자 크기는 그대로여야 한다.
         var unitsPerPixel: Double?
@@ -146,7 +175,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var layerIndex = 0
 
         init(text: TextLayer, fontData: Data?, pointSize: Double, origin: SIMD2<Float>,
-             box: SIMD2<Float>, engine: ScriptEngine?, name: String) {
+             box: SIMD2<Float>) {
             self.align = text.horizontalAlign
             self.verticalAlign = text.verticalAlign
             self.boxCenter = origin
@@ -156,9 +185,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             self.pointSize = pointSize
             self.box = box
             self.origin = origin
-            self.engine = engine
             self.value = text.value
-            self.queue = DispatchQueue(label: "wallflow.script.\(name)", qos: .utility)
         }
     }
 
@@ -183,54 +210,17 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         root: FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Wallflow/Properties"))
 
-    /// `alpha`/`visible` 스크립트를 돌려 표시 상태를 정한다.
-    ///
-    /// 여러 스크립트가 붙어 있으면 가장 숨기는 쪽을 따른다. 이 위젯들은 조건이
-    /// 맞지 않을 때 자기를 감추는 용도라, 하나라도 숨기라면 숨기는 것이 의도에 맞다.
-    private static func applyDisplayScripts(
-        _ layer: SceneLayer, degraded: inout [String],
-        environment: SceneScriptRuntime.Environment, modules: [String: String]
-    ) -> SceneLayer {
-        guard !layer.displayScripts.isEmpty else { return layer }
-        var alpha = layer.alpha
-        var visible = layer.visible
-        var ran = false
-        for script in layer.displayScripts {
-            let engine = ScriptEngine(source: script.source,
-                                      environment: environment, modules: modules)
-            // 콜백 전용 스크립트에는 update가 없다. 그건 실패가 아니다 —
-            // 미디어 위젯은 이벤트로만 동작한다. 본문 평가 실패만 건너뛴다.
-            if case .evaluationFailed = engine.failure { continue }
-            if let state = engine.runLayerCallbacks(
-                initial: LayerScriptState(alpha: layer.alpha, visible: layer.visible)) {
-                alpha = Swift.min(alpha, state.alpha)
-                visible = visible && state.visible
-                ran = true
-            }
-            // 콜백만이 아니라 `update(value)`도 돌린다. 실물 진행 막대는
-            // 콜백이 아니라 update에서 "재생 중이 없으니 숨어라"를 돌려준다.
-            switch script.property {
-            case .visible:
-                if let shown = engine.update(value: layer.visible, frametime: 0) {
-                    visible = visible && shown
-                    ran = true
-                }
-            case .alpha:
-                if let a = engine.update(value: layer.alpha, frametime: 0) {
-                    alpha = Swift.min(alpha, Swift.min(Swift.max(a, 0), 1))
-                    ran = true
-                }
+    /// 스크립트의 `applyUserProperties`에 줄 값. project.json의 기본값 위에
+    /// 사용자가 설정 창에서 바꾼 값을 얹는다.
+    static func userPropertyValues(for item: WallpaperItem) -> [String: UserPropertyValue] {
+        var values: [String: UserPropertyValue] = [:]
+        if let data = try? Data(contentsOf: item.directory.appendingPathComponent("project.json")) {
+            for property in UserProperty.load(projectJSON: data) {
+                values[property.name] = property.defaultValue
             }
         }
-        guard ran else {
-            degraded.append("\(layer.name): 표시 스크립트를 돌리지 못해 저장된 값으로 그린다")
-            return layer
-        }
-        return SceneLayer(
-            id: layer.id, name: layer.name, visible: visible,
-            origin: layer.origin, size: layer.size, content: layer.content,
-            unrunScripts: layer.unrunScripts, alpha: alpha, tint: layer.tint,
-            rotation: layer.rotation, displayScripts: layer.displayScripts)
+        for (name, value) in propertyStore.overrides(for: item.id) { values[name] = value }
+        return values
     }
 
     /// 소리 파일을 찾아 재생기를 만든다.
@@ -258,12 +248,13 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let on = Self.soundEnabled && !playbackPaused
         let volume = Float(Self.soundVolume)
         var failed = 0
-        for (player, sceneVolume) in sounds {
+        for entry in sounds {
+            let player = entry.player
             // 크기는 켜고 끌 때마다 다시 맞춘다. 설정이 바뀌는 경로가 이것뿐이다.
-            player.volume = sceneVolume * volume
-            if on, !player.isPlaying {
+            player.volume = entry.sceneVolume * volume
+            if on, entry.wanted, !player.isPlaying {
                 if !player.play() { failed += 1 }
-            } else if !on, player.isPlaying {
+            } else if !(on && entry.wanted), player.isPlaying {
                 player.pause()
             }
         }
@@ -411,24 +402,150 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     ///
     /// 스크립트는 레이어의 직렬 큐에서 돌고, 결과만 메인으로 돌아온다. 굽는 것과
     /// 텍스처 업로드는 메인에서 한다(Metal 객체가 메인 격리라서).
-    private func runScripts() {
-        guard let compositor else { return }
-        for state in texts {
-            guard let engine = state.engine, !state.inFlight else { continue }
-            state.inFlight = true
-            let current = state.value
-            state.queue.async { [weak self, weak state] in
-                let produced = engine.update(value: current)
-                Task { @MainActor in
-                    guard let self, let state else { return }
-                    state.inFlight = false
-                    guard let produced, produced != state.value else { return }
-                    state.value = produced
-                    self.rasterize(state, compositor: compositor)
-                    self.refreshLayers()
-                }
+    /// 스크립트를 한 틱 돌린다. 직렬 큐에서 돌고 결과는 메인에서 반영한다.
+    private func tickScripts(in view: MTKView) {
+        guard let host = scriptHost, !scriptInFlight else { return }
+        let now = CACurrentMediaTime()
+        let dt = lastScriptTick.map { now - $0 } ?? 0
+        lastScriptTick = now
+        let cursor = sceneCursorPosition(in: view).map {
+            Vec3(x: Double($0.x), y: Double($0.y), z: 0)
+        }
+        // 스크립트가 오디오를 달라고 했을 때만 스펙트럼을 넘긴다. 듣고 있지 않으면
+        // 빈 사전이라 버퍼가 0으로 남는다 — 가짜 소리를 지어내지 않는다.
+        let audio = host.wantsAudio ? Self.audioBands : [:]
+        scriptInFlight = true
+        scriptQueue.async { [weak self] in
+            let snapshot = host.tick(frametime: dt, cursorWorld: cursor, audio: audio)
+            Task { @MainActor in
+                guard let self else { return }
+                self.scriptInFlight = false
+                self.apply(snapshot)
             }
         }
+    }
+
+    /// 스크립트가 정한 상태를 화면에 옮긴다. 바뀐 레이어만 손댄다.
+    private func apply(_ snapshot: SceneScriptHost.Snapshot) {
+        guard let compositor else { return }
+        var changed = false
+        for id in snapshot.order {
+            guard let state = snapshot.layers[id] else { continue }
+            if scriptTargets[id] == nil, id < 0, !unspawnable.contains(id) {
+                // 스크립트가 만든 레이어. 자산에서 레이어를 세워 목록 끝에 붙인다.
+                if let asset = state.asset, spawnLayer(id: id, asset: asset) {
+                    changed = true
+                } else {
+                    unspawnable.insert(id)
+                    degraded.append("스크립트가 만든 레이어를 세우지 못했다: \(state.asset ?? "?")")
+                }
+            }
+            guard appliedStates[id] != state else { continue }
+            appliedStates[id] = state
+            if applyScriptState(state, to: id) { changed = true }
+        }
+        if let camera = snapshot.camera { self.camera = camera }
+        // 스크립트가 만든 레이어의 진단은 씬을 연 뒤에 생긴다. 그때그때 알린다.
+        if skipped.count > reportedSkipped || degraded.count > reportedDegraded {
+            let fresh = skipped[reportedSkipped...] + degraded[reportedDegraded...]
+            reportedSkipped = skipped.count
+            reportedDegraded = degraded.count
+            FileHandle.standardError.write(Data(
+                "씬 \(item.title)의 스크립트가 만든 레이어 진단:\n  "
+                    .appending(fresh.joined(separator: "\n  ")).appending("\n").utf8))
+        }
+        for failure in snapshot.failures where !reportedFailures.contains(failure) {
+            reportedFailures.insert(failure)
+            FileHandle.standardError.write(Data("씬 \(item.title) 스크립트 오류: \(failure)\n".utf8))
+        }
+        if changed { compositor.setLayers(layerList) }
+    }
+
+    /// 상태 하나를 레이어의 쿼드·파티클·글자·소리에 옮긴다. 화면이 바뀌면 true.
+    private func applyScriptState(_ state: SceneScriptHost.LayerState, to id: Int) -> Bool {
+        guard let target = scriptTargets[id], let context = buildContext else { return false }
+        var changed = false
+        let alpha = state.visible ? Float(state.alpha) : 0
+        for index in target.indices where index < layerList.count {
+            var quad = layerList[index].0
+            quad.color = SIMD4(
+                Float(state.color.x) * target.brightness,
+                Float(state.color.y) * target.brightness,
+                Float(state.color.z) * target.brightness, alpha)
+            if context.isPerspective {
+                quad.world = Scene3D.world(
+                    origin: state.origin, anglesDegrees: state.angles, scale: state.scale,
+                    size: target.unitWorld ? Vec2(x: 1, y: 1) : target.baseSize)
+            } else if target.textIndex == nil {
+                quad.origin = SIMD2(Float(state.origin.x), Float(state.origin.y))
+                quad.size = SIMD2(Float(target.baseSize.x * state.scale.x),
+                                  Float(target.baseSize.y * state.scale.y))
+                quad.rotation = Float(state.angles.z * .pi / 180)
+            }
+            layerList[index].0 = quad
+            if !state.material.isEmpty, case .model(let renderer) = layerList[index].1 {
+                renderer.setConstants(state.material)
+            }
+            changed = true
+        }
+        if let ti = target.textIndex, ti < texts.count, let compositor {
+            let text = texts[ti]
+            if let value = state.text, value != text.value {
+                text.value = value
+                rasterize(text, compositor: compositor)
+                // 글자 폭이 바뀌면 상자 안 자리도 바뀐다.
+                if let index = target.indices.first, index < layerList.count {
+                    layerList[index].0.origin = text.origin
+                    layerList[index].0.size = text.size
+                }
+                changed = true
+            }
+        }
+        if let pi = target.particleIndex, pi < particles.count {
+            particles[pi].layerOrigin = SIMD2(Float(state.origin.x), Float(state.origin.y))
+        }
+        if let si = target.soundIndex, si < sounds.count {
+            let entry = sounds[si]
+            if let volume = state.volume { entry.sceneVolume = Float(volume) }
+            if let playing = state.playing, playing != entry.wanted {
+                entry.wanted = playing
+            }
+            entry.player.volume = entry.sceneVolume * Float(Self.soundVolume)
+            let on = Self.soundEnabled && !playbackPaused && entry.wanted
+            if on, !entry.player.isPlaying { _ = entry.player.play() }
+            if !on, entry.player.isPlaying { entry.player.pause() }
+        }
+        return changed
+    }
+
+    /// 스크립트가 `createLayer(asset)`으로 만든 레이어를 세운다.
+    private func spawnLayer(id: Int, asset: String) -> Bool {
+        guard let context = buildContext,
+              let layer = SceneDocument.layer(
+                fromAsset: asset, id: id, resolver: context.resolver,
+                isPerspective: context.isPerspective, canvas: context.canvas)
+        else { return false }
+        let before = layerList.count
+        addLayer(layer, context: context)
+        // 새 레이어의 재질에도 상수 스크립트가 있을 수 있다(실물 프리즘의 Alpha·색).
+        // 호스트는 자기 큐에서만 만진다.
+        let scripts = materialScripts(of: id)
+        if !scripts.isEmpty, let host = scriptHost {
+            scriptQueue.async { host.attachMaterialScripts(layerID: id, scripts) }
+        }
+        return scriptTargets[id] != nil || layerList.count > before
+    }
+
+    /// 레이어의 메시·셰이더 이미지 재질에 붙은 상수 스크립트들.
+    private func materialScripts(of id: Int) -> [SceneScriptHost.MaterialScript] {
+        guard let target = scriptTargets[id] else { return [] }
+        var scripts: [SceneScriptHost.MaterialScript] = []
+        for index in target.indices where index < layerList.count {
+            if case .model(let renderer) = layerList[index].1 {
+                scripts.append(contentsOf: renderer.constantScripts)
+            }
+        }
+        return scripts
     }
 
     /// 이펙트 체인을 켤지. **기본은 꺼짐이다.**
@@ -619,33 +736,6 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     ///
     /// - Parameter elapsed: 지난 호출 이후 실제로 흐른 시간(초).
     ///   스크립트의 타이머가 이 값으로 흐른다.
-    private func runDisplayScripts(elapsed: Double) {
-        guard let compositor, !displays.isEmpty else { return }
-        var changed = false
-        for state in displays where state.layerIndex < layerList.count {
-            var alpha = state.baseAlpha
-            var visible = state.baseVisible
-            for (property, engine) in state.scripts {
-                switch property {
-                case .visible:
-                    if let shown = engine.update(value: state.baseVisible, frametime: elapsed) {
-                        visible = visible && shown
-                    }
-                case .alpha:
-                    if let a = engine.update(value: state.baseAlpha, frametime: elapsed) {
-                        alpha = Swift.min(alpha, Swift.min(Swift.max(a, 0), 1))
-                    }
-                }
-            }
-            let wanted = visible ? Float(alpha) : 0
-            guard abs(wanted - state.applied) > 0.002 else { continue }
-            state.applied = wanted
-            layerList[state.layerIndex].0.color.w = wanted
-            changed = true
-        }
-        if changed { compositor.setLayers(layerList) }
-    }
-
     /// 글자 폭은 글자 수에 따라 바뀐다. 쿼드를 그대로 두면 "9:59"와 "10:00"이
     /// 같은 상자에 늘어나 붙는다. 바뀐 크기를 레이어 목록에 반영해 다시 준다.
     /// 1초에 한 번 남짓이라 비용이 문제되지 않는다.
@@ -778,6 +868,326 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         return view
     }
 
+    /// 레이어 하나를 세워 목록 끝에 붙인다. 씬을 열 때와 스크립트가 레이어를
+    /// 만들 때 같은 길을 쓴다. 그릴 수 없으면 이유만 남기고 돌아온다.
+    private func addLayer(_ layer: SceneLayer, context: BuildContext) {
+        let firstIndex = layerList.count
+        let particlesBefore = particles.count
+        let textsBefore = texts.count
+        let soundsBefore = sounds.count
+        defer {
+            // 스크립트가 이 레이어를 움직일 수 있게 어디에 뭐가 붙었는지 적어 둔다.
+            var target = ScriptTarget(
+                baseSize: Vec2(x: layer.size.x / Swift.max(layer.scale.x, 1e-9),
+                               y: layer.size.y / Swift.max(layer.scale.y, 1e-9)),
+                brightness: Float(layer.brightness))
+            target.indices = Array(firstIndex..<layerList.count)
+            switch layer.content {
+            case .model, .particle: target.unitWorld = true
+            default: break
+            }
+            if particles.count > particlesBefore { target.particleIndex = particlesBefore }
+            if texts.count > textsBefore { target.textIndex = textsBefore }
+            if sounds.count > soundsBefore { target.soundIndex = soundsBefore }
+            if !target.indices.isEmpty || target.soundIndex != nil {
+                scriptTargets[layer.id] = target
+            }
+        }
+        if !layer.unrunScripts.isEmpty {
+            // 조용히 무시하면 사용자가 레이어가 왜 안 움직이는지 알 수 없다.
+            degraded.append(
+                "\(layer.name): \(layer.unrunScripts.joined(separator: ", "))의 스크립트를 "
+                    + "아직 돌리지 못해 저장된 값으로 그린다")
+        }
+        // 밝기는 색에 곱한다. 섞는 방식과 짝이라, 실물 시계는 밝기 5.56에
+        // 오버레이로 섞이는 것을 전제로 그 값이다.
+        let brightness = Float(layer.brightness)
+        var quad = QuadInstance(
+            origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
+            size: SIMD2(Float(layer.size.x), Float(layer.size.y)),
+            color: SIMD4(Float(layer.tint.x) * brightness,
+                         Float(layer.tint.y) * brightness,
+                         Float(layer.tint.z) * brightness,
+                         layer.visible ? Float(layer.alpha) : 0),
+            rotation: Float(layer.rotation),
+            parallaxDepth: Float(layer.parallaxDepth),
+            blendMode: Int32(layer.colorBlendMode))
+        if context.isPerspective {
+            // 원근 씬에서는 자리·크기가 픽셀이 아니라 세계 단위다. 크기에는
+            // 배율이 곱해진다 — 실물 배경 구름이 size 64 × scale 10이다.
+            // 직교 경로의 `size`는 배율이 이미 곱해져 있으므로 여기서는
+            // 배율을 원본 크기와 함께 따로 넣는다. 파티클은 좌표가 이미
+            // 세계 단위라 크기를 곱하지 않는다(size가 0이라 곱하면 사라진다).
+            var worldSize = Vec2(x: layer.size.x, y: layer.size.y)
+            if case .particle = layer.content { worldSize = Vec2(x: 1, y: 1) }
+            quad.world = Scene3D.world(
+                origin: layer.origin,
+                anglesDegrees: Vec3(x: layer.angles.x, y: layer.angles.y, z: layer.rotation * 180 / .pi),
+                scale: Vec3(x: 1, y: 1, z: 1),
+                size: worldSize)
+        }
+        if layer.colorBlendMode != 0, let reason = context.compositor.blendUnavailableReason {
+            degraded.append(
+                "\(layer.name): 색 섞기(\(layer.colorBlendMode))를 못 걸어 보통으로 그린다: "
+                    + reason)
+        }
+
+        switch layer.content {
+        case .composition:
+            // 합성 레이어는 그 지점까지 그려진 화면이 입력이라, 체인을 여기서
+            // 만들 수 없다(화면 텍스처가 아직 없다). 자리만 잡아 두고
+            // 첫 프레임에 만든다. 오디오 막대가 이 형태다.
+            guard !layer.effects.isEmpty, Self.effectsEnabled else {
+                degraded.append("\(layer.name): 합성 레이어인데 걸 이펙트가 없다")
+                return
+            }
+            compositionLayers[layerList.count] = layer
+            layerList.append((quad, .composition(layerList.count)))
+
+        case .postProcess:
+            // 화면 전체 후처리. 다른 레이어처럼 그리지 않는다 — 합성이 끝난
+            // 화면을 입력으로 받아야 해서, 컴포지터가 마지막에 따로 부른다.
+            postLayers.append(layer)
+
+        case .solidColor(let c):
+            // 도형 레이어는 그림이 없고 이펙트가 그림을 만든다(실물 빛줄기).
+            // 흰 판을 만들어 체인에 넣고 그 결과를 그린다.
+            if !layer.effects.isEmpty, Self.effectsEnabled,
+               let blank = Self.makeBlankTexture(
+                width: layer.size.x, height: layer.size.y, compositor: context.compositor),
+               let chain = EffectChain(
+                device: context.device,
+                effects: layer.effects.map(\.definition),
+                effectBases: layer.effects.map(\.base),
+                source: blank, resolver: context.resolver,
+                includes: context.shaderIncludes,
+                makeTexture: { try context.compositor.makeTexture(from: $0) },
+                diagnostics: &degraded) {
+                effectChains.append((chain, blank))
+                layerList.append((quad, .dynamic { [weak chain] in chain?.texture }))
+            } else {
+                layerList.append((quad, .solid(SIMD4(Float(c.x), Float(c.y), Float(c.z), 1))))
+            }
+
+        case .image(let path), .video(let path):
+            guard let raw = context.resolver.data(for: path) else {
+                skipped.append("\(layer.name): 텍스처를 찾을 수 없다: \(path)")
+                return
+            }
+            do {
+                let decoded = try TexDecoder.decode(raw)
+                if case .video(let mp4) = decoded {
+                    guard mp4.count <= Self.maxVideoPayloadBytes else {
+                        skipped.append(
+                            "\(layer.name): 비디오 페이로드가 상한(\(Self.maxVideoPayloadBytes) bytes)을 "
+                                + "넘는다 (\(mp4.count) bytes)")
+                        return
+                    }
+                    guard videos.count < Self.maxConcurrentVideoLayers else {
+                        skipped.append(
+                            "\(layer.name): 씬당 비디오 레이어 상한(\(Self.maxConcurrentVideoLayers)개)을 "
+                                + "넘어 건너뛴다")
+                        return
+                    }
+                    let video = try VideoTexture(mp4: mp4, device: context.device)
+                    // status는 init 직후 대개 .unknown이라 이 검사는 이미 동기적으로
+                    // 실패가 확정된 드문 경우만 잡는다. 나머지는 VideoTexture.currentTexture()가
+                    // 매 프레임 다시 확인해 stderr에 알린다 (VideoTexture 참고).
+                    guard !video.hasFailed else {
+                        skipped.append("\(layer.name): 비디오를 재생할 수 없다")
+                        return
+                    }
+                    video.play()
+                    videos.append(video)
+                    layerList.append((quad, .dynamic { [weak video] in video?.currentTexture() }))
+                } else {
+                    let texture = try context.compositor.makeTexture(from: decoded)
+                    // 이펙트가 걸려 있으면 그 결과를 대신 그린다. 컴파일이 안 되면
+                    // 체인이 nil이라 원본을 그대로 쓴다 — 레이어를 버리지 않는다.
+                    // 씬 전체 예산을 넘으면 더 걸지 않는다. 레이어는 원본으로 그린다.
+                    let effectBudgetLeft = effectChains.reduce(0) { $0 + $1.chain.textureBytes }
+                        < EffectChain.maxSceneTextureBytes
+                    if !layer.effects.isEmpty, Self.effectsEnabled, effectBudgetLeft,
+                       let chain = EffectChain(
+                        device: context.device,
+                        effects: layer.effects.map(\.definition),
+                        effectBases: layer.effects.map(\.base),
+                        source: texture, resolver: context.resolver,
+                        includes: context.shaderIncludes,
+                        makeTexture: { try context.compositor.makeTexture(from: $0) },
+                        diagnostics: &degraded) {
+                        effectChains.append((chain, texture))
+                        layerList.append((quad, .dynamic { [weak chain] in chain?.texture }))
+                    } else {
+                        if !layer.effects.isEmpty, Self.effectsEnabled {
+                            if !effectBudgetLeft {
+                                degraded.append(
+                                    "\(layer.name): 씬의 이펙트 텍스처 예산을 넘어 "
+                                        + "원본 그대로 그린다")
+                            }
+                            degraded.append(
+                                "\(layer.name): 이펙트 \(layer.effects.count)개를 걸지 못해 "
+                                    + "원본 그대로 그린다")
+                        }
+                        layerList.append((quad, .fixed(texture)))
+                    }
+                }
+            } catch {
+                skipped.append("\(layer.name): 텍스처 로드 실패 \(error)")
+            }
+
+        case .particle(let preset, let texturePath, let blend, let normalPath, let refractAmount):
+            // 자식까지 한 번에 만든다. 자식 파티클은 부모와 **다른 텍스처와
+            // 다른 혼합**을 쓴다(불꽃 잔해는 가산, 빗줄기 꼬리는 반투명) —
+            // 그래서 렌더러가 그룹마다 하나씩 필요하다.
+            var built: [(key: String, renderer: ParticleRenderer, ratio: Float)] = []
+            Self.buildParticleRenderers(
+                preset: preset, texturePath: texturePath, blend: blend,
+                normalPath: normalPath, refractAmount: refractAmount, key: "0",
+                instances: 1, layer: layer, compositor: context.compositor, resolver: context.resolver,
+                into: &built, skipped: &skipped)
+            guard let root = built.first, root.key == "0" else {
+                skipped.append("\(layer.name): 파티클 렌더러를 만들지 못했다: \(texturePath)")
+                return
+            }
+            // 시드를 레이어 id로 나눠 레이어마다 다른 수열을 쓴다.
+            // 같은 시드를 공유하면 눈과 벚꽃이 똑같이 움직인다.
+            let system = ParticleSystem(
+                preset: preset,
+                random: SeededRandom(seed: UInt64(bitPattern: Int64(layer.id))))
+            if !system.unimplementedOperators.isEmpty {
+                degraded.append(
+                    "\(layer.name): 아직 처리하지 않는 연산자 "
+                        + system.unimplementedOperators.joined(separator: ", "))
+            }
+            var groups: [String: (ParticleRenderer, Float)] = [:]
+            for entry in built {
+                groups[entry.key] = (entry.renderer, entry.ratio)
+                // 만든 순서대로 그린다 — 부모가 먼저, 자식이 그 위에.
+                layerList.append((quad, .particles(entry.renderer)))
+            }
+            // 레이어 원점을 함께 들고 있는다. 커서를 이 시스템의 좌표계로
+            // 옮기려면 필요하다 — 파티클 좌표는 레이어 기준 상대 좌표다.
+            particles.append((system, groups,
+                              SIMD2(Float(layer.origin.x), Float(layer.origin.y))))
+
+        case .sound(let sound):
+            // 그리지 않는다. 소리만 준비해 둔다.
+            guard let player = Self.makePlayer(sound, resolver: context.resolver) else {
+                skipped.append(
+                    "\(layer.name): 재생할 수 없는 소리 형식이다 "
+                        + "(\(sound.paths.map { ($0 as NSString).pathExtension }.joined(separator: ", ")))")
+                return
+            }
+            // startsilent인 소리는 스크립트가 켜기 전까지 나지 않는다.
+            // 스크립트를 아직 돌리지 않으므로 준비만 하고 재생 목록에는 넣지 않는다.
+            // 씬이 정한 볼륨을 따로 들고 있어야 사용자 설정을 곱할 수 있다.
+            // AVAudioPlayer는 원래 값을 기억하지 않는다. startsilent인 소리는
+            // 스크립트가 `play()`를 부르기 전까지 준비만 해 둔다.
+            sounds.append(SoundEntry(player: player, sceneVolume: Float(sound.volume),
+                                     wanted: !sound.startsSilent))
+
+        case .text(let text):
+            // 폰트가 없어도 그린다 — 시스템 폰트로 대체된다. 글자가 아예
+            // 안 나오는 것보다 다른 폰트로라도 나오는 게 낫다.
+            let fontData = text.usesSystemFont ? nil : context.resolver.data(for: text.fontPath)
+            if fontData == nil && !text.usesSystemFont {
+                degraded.append("\(layer.name): 폰트를 찾을 수 없어 시스템 폰트로 그린다: \(text.fontPath)")
+            }
+            // 오브젝트의 size는 글자 크기가 아니라 **상자**다. 실물에서 411x5300짜리도
+            // 있어서 그대로 점 크기로 쓰면 글자가 화면 밖으로 밀려난다. 대신 고정
+            // 크기로 굽고 상자에 맞춰 줄인다. 256은 레티나에서 흐리지 않을 만큼 크다.
+            let pointSize = 256.0
+            // 글자 스크립트는 씬 호스트가 돌린다. 저장된 글자로 먼저 굽고,
+            // 첫 틱의 결과가 오면 바꾼다.
+            let state = TextState(
+                text: text, fontData: fontData, pointSize: pointSize,
+                origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
+                box: SIMD2(Float(layer.size.x), Float(layer.size.y)))
+            texts.append(state)
+            rasterize(state, compositor: context.compositor)
+            state.layerIndex = layerList.count
+            // 글자 색은 래스터화할 때 이미 칠했다. 여기서 또 곱하면 색이 제곱된다.
+            // 틴트는 흰색으로 두고 레이어 투명도만 넘긴다.
+            //
+            // 밝기는 색과 별개라 여기서 곱한다. **실물에서 섞기가 걸린
+            // 레이어 여덟 중 여섯이 글자다**(시계·요일·날짜) — 이미지 쪽만
+            // 이어 두면 정작 필요한 곳에 안 걸린다.
+            let textBrightness = Float(layer.brightness)
+            layerList.append((QuadInstance(
+                origin: state.origin, size: state.size,
+                color: SIMD4(textBrightness, textBrightness, textBrightness,
+                             layer.visible ? Float(layer.alpha) : 0),
+                rotation: Float(layer.rotation),
+                parallaxDepth: Float(layer.parallaxDepth),
+                blendMode: Int32(layer.colorBlendMode)),
+                .dynamic { [weak state] in state?.texture }))
+
+        case .shadedImage(let materialPath, _):
+            // 재질의 셰이더가 그림을 만든다. 메시 렌더러에 단위 사각형을 준다 —
+            // 셰이더 컴파일·유니폼·텍스처가 메시와 똑같기 때문이다.
+            guard context.isPerspective else {
+                skipped.append("\(layer.name): 직교 씬의 셰이더 이미지는 아직 그리지 않는다: \(materialPath)")
+                return
+            }
+            do {
+                let renderer = try ModelRenderer(
+                    device: context.compositor.device, model: MDLModel.unitQuad(),
+                    materialPath: materialPath, resolver: context.resolver, includes: context.shaderIncludes,
+                    makeTexture: { try context.compositor.makeTexture(from: $0) },
+                    sampler: context.compositor.sharedSampler,
+                    eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
+                        clearColor: context.clearColor)
+                // 판의 크기는 size × scale 세계 단위다(실물 배경 구름 64 × 10).
+                quad.world = Scene3D.world(
+                    origin: layer.origin,
+                    anglesDegrees: Vec3(x: layer.angles.x, y: layer.angles.y, z: layer.rotation * 180 / .pi),
+                    scale: Vec3(x: 1, y: 1, z: 1),
+                    size: Vec2(x: layer.size.x, y: layer.size.y))
+                layerList.append((quad, .model(renderer)))
+            } catch {
+                skipped.append("\(layer.name): 셰이더 이미지를 그리지 못한다: \(error)")
+            }
+
+        case .model(let path, let skin):
+            guard context.isPerspective else {
+                skipped.append("\(layer.name): 직교 씬의 3D 메시는 아직 그리지 않는다: \(path)")
+                return
+            }
+            guard let raw = context.resolver.data(for: path) else {
+                skipped.append("\(layer.name): 메시를 찾을 수 없다: \(path)")
+                return
+            }
+            do {
+                let model = try MDLModel.parse(raw)
+                // `skin`은 메시의 재질 목록 번호다. 벗어나면 첫 재질로 간다.
+                guard !model.materials.isEmpty else {
+                    skipped.append("\(layer.name): 메시에 재질이 없다: \(path)")
+                    return
+                }
+                let materialPath = model.materials[min(skin, model.materials.count - 1)]
+                let renderer = try ModelRenderer(
+                    device: context.compositor.device, model: model, materialPath: materialPath,
+                    resolver: context.resolver, includes: context.shaderIncludes,
+                    makeTexture: { try context.compositor.makeTexture(from: $0) },
+                    sampler: context.compositor.sharedSampler,
+                    eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
+                        clearColor: context.clearColor)
+                quad.world = Scene3D.world(
+                    origin: layer.origin,
+                    anglesDegrees: Vec3(x: layer.angles.x, y: layer.angles.y, z: layer.rotation * 180 / .pi),
+                    scale: layer.scale)
+                layerList.append((quad, .model(renderer)))
+            } catch {
+                skipped.append("\(layer.name): 3D 메시를 그리지 못한다: \(error)")
+            }
+
+        case .unsupported(let reason):
+            skipped.append("\(layer.name): \(reason)")
+        }
+    
+    }
+
     func start() throws {
         guard let view, let device = view.device else {
             throw RendererError.unsupportedType(.scene)
@@ -817,16 +1227,23 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let shaderIncludes = Self.collectShaderHeaders(reader: reader, assets: assets)
         var chains: [(chain: EffectChain, source: MTLTexture)] = []
 
-        var videos: [VideoTexture] = []
-        var particles: [(system: ParticleSystem,
-                         groups: [String: (ParticleRenderer, Float)],
-                         layerOrigin: SIMD2<Float>)] = []
-        var texts: [TextState] = []
-        var sounds: [(player: AVAudioPlayer, sceneVolume: Float)] = []
-        var drawable: [(QuadInstance, LayerSource)] = []
-        var displayStates: [DisplayState] = []
-        var postLayers: [SceneLayer] = []
-        var compositions: [Int: SceneLayer] = [:]
+        let context = BuildContext(
+            device: device, compositor: compositor, resolver: resolver,
+            shaderIncludes: shaderIncludes, isPerspective: document.isPerspective,
+            canvas: Vec2(x: Double(document.orthoWidth), y: Double(document.orthoHeight)),
+            clearColor: document.clearEnabled
+                ? SIMD4(Float(document.clearColor.x), Float(document.clearColor.y),
+                        Float(document.clearColor.z), 1)
+                : SIMD4(0, 0, 0, 1))
+        buildContext = context
+        layerList = []
+        effectChains = []
+        compositionLayers = [:]
+        postLayers = []
+        scriptTargets = [:]
+        appliedStates = [:]
+        unspawnable = []
+        reportedFailures = []
         // 스크립트가 화면·캔버스 크기를 물어본다(실물에서 `engine.screenResolution` 13회).
         // 없으면 참조 오류로 스크립트가 통째로 죽는다.
         let screen = view.window?.screen ?? NSScreen.main
@@ -836,346 +1253,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             canvasWidth: Double(document.orthoWidth),
             canvasHeight: Double(document.orthoHeight))
 
-        for rawLayer in document.layers where rawLayer.visible {
-            // 표시 스크립트를 먼저 돌린다. 미디어 위젯이 "지금 재생 중이 아니다"를
-            // 알고 스스로 숨는다 — 저장된 alpha로 그리면 반투명한 검은 상자가 남는다.
-            let layer = Self.applyDisplayScripts(
-                rawLayer, degraded: &degraded,
-                environment: scriptEnvironment, modules: document.scriptModules)
-            guard layer.visible, layer.alpha > 0.004 else {
-                if rawLayer.alpha != layer.alpha || rawLayer.visible != layer.visible {
-                    degraded.append("\(layer.name): 스크립트가 숨김으로 정했다")
-                }
-                continue
-            }
-            if !layer.unrunScripts.isEmpty {
-                // 조용히 무시하면 사용자가 레이어가 왜 안 움직이는지 알 수 없다.
-                degraded.append(
-                    "\(layer.name): \(layer.unrunScripts.joined(separator: ", "))의 스크립트를 "
-                        + "아직 돌리지 못해 저장된 값으로 그린다")
-            }
-            // 밝기는 색에 곱한다. 섞는 방식과 짝이라, 실물 시계는 밝기 5.56에
-            // 오버레이로 섞이는 것을 전제로 그 값이다.
-            let brightness = Float(layer.brightness)
-            var quad = QuadInstance(
-                origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
-                size: SIMD2(Float(layer.size.x), Float(layer.size.y)),
-                color: SIMD4(Float(layer.tint.x) * brightness,
-                             Float(layer.tint.y) * brightness,
-                             Float(layer.tint.z) * brightness,
-                             Float(layer.alpha)),
-                rotation: Float(layer.rotation),
-                parallaxDepth: Float(layer.parallaxDepth),
-                blendMode: Int32(layer.colorBlendMode))
-            if document.isPerspective {
-                // 원근 씬에서는 자리·크기가 픽셀이 아니라 세계 단위다. 크기에는
-                // 배율이 곱해진다 — 실물 배경 구름이 size 64 × scale 10이다.
-                // 직교 경로의 `size`는 배율이 이미 곱해져 있으므로 여기서는
-                // 배율을 원본 크기와 함께 따로 넣는다.
-                quad.world = Scene3D.world(
-                    origin: layer.origin,
-                    anglesDegrees: Vec3(x: 0, y: 0, z: layer.rotation * 180 / .pi),
-                    scale: Vec3(x: 1, y: 1, z: 1),
-                    size: Vec2(x: layer.size.x, y: layer.size.y))
-            }
-            if layer.colorBlendMode != 0, let reason = compositor.blendUnavailableReason {
-                degraded.append(
-                    "\(layer.name): 색 섞기(\(layer.colorBlendMode))를 못 걸어 보통으로 그린다: "
-                        + reason)
-            }
-
-            // 표시 스크립트는 한 번으로 끝나지 않는다. 진행 막대는 타이머가 끝나야
-            // 숨기라고 답하므로, 엔진을 살려 두고 주기적으로 다시 묻는다.
-            if !layer.displayScripts.isEmpty {
-                let engines = layer.displayScripts.compactMap {
-                    script -> (property: DisplayScript.Property, engine: ScriptEngine)? in
-                    let engine = ScriptEngine(source: script.source,
-                                              environment: scriptEnvironment,
-                                              modules: document.scriptModules)
-                    if case .evaluationFailed = engine.failure { return nil }
-                    if case .noUpdateFunction = engine.failure { return nil }
-                    return (script.property, engine)
-                }
-                if !engines.isEmpty {
-                    displayStates.append(DisplayState(
-                        scripts: engines, layerIndex: drawable.count,
-                        baseAlpha: layer.alpha, baseVisible: layer.visible,
-                        applied: Float(layer.alpha)))
-                }
-            }
-
-            switch layer.content {
-            case .composition:
-                // 합성 레이어는 그 지점까지 그려진 화면이 입력이라, 체인을 여기서
-                // 만들 수 없다(화면 텍스처가 아직 없다). 자리만 잡아 두고
-                // 첫 프레임에 만든다. 오디오 막대가 이 형태다.
-                guard !layer.effects.isEmpty, Self.effectsEnabled else {
-                    degraded.append("\(layer.name): 합성 레이어인데 걸 이펙트가 없다")
-                    continue
-                }
-                compositions[drawable.count] = layer
-                drawable.append((quad, .composition(drawable.count)))
-
-            case .postProcess:
-                // 화면 전체 후처리. 다른 레이어처럼 그리지 않는다 — 합성이 끝난
-                // 화면을 입력으로 받아야 해서, 컴포지터가 마지막에 따로 부른다.
-                postLayers.append(layer)
-
-            case .solidColor(let c):
-                // 도형 레이어는 그림이 없고 이펙트가 그림을 만든다(실물 빛줄기).
-                // 흰 판을 만들어 체인에 넣고 그 결과를 그린다.
-                if !layer.effects.isEmpty, Self.effectsEnabled,
-                   let blank = Self.makeBlankTexture(
-                    width: layer.size.x, height: layer.size.y, compositor: compositor),
-                   let chain = EffectChain(
-                    device: device,
-                    effects: layer.effects.map(\.definition),
-                    effectBases: layer.effects.map(\.base),
-                    source: blank, resolver: resolver,
-                    includes: shaderIncludes,
-                    makeTexture: { try compositor.makeTexture(from: $0) },
-                    diagnostics: &degraded) {
-                    chains.append((chain, blank))
-                    drawable.append((quad, .dynamic { [weak chain] in chain?.texture }))
-                } else {
-                    drawable.append((quad, .solid(SIMD4(Float(c.x), Float(c.y), Float(c.z), 1))))
-                }
-
-            case .image(let path), .video(let path):
-                guard let raw = resolver.data(for: path) else {
-                    skipped.append("\(layer.name): 텍스처를 찾을 수 없다: \(path)")
-                    continue
-                }
-                do {
-                    let decoded = try TexDecoder.decode(raw)
-                    if case .video(let mp4) = decoded {
-                        guard mp4.count <= Self.maxVideoPayloadBytes else {
-                            skipped.append(
-                                "\(layer.name): 비디오 페이로드가 상한(\(Self.maxVideoPayloadBytes) bytes)을 "
-                                    + "넘는다 (\(mp4.count) bytes)")
-                            continue
-                        }
-                        guard videos.count < Self.maxConcurrentVideoLayers else {
-                            skipped.append(
-                                "\(layer.name): 씬당 비디오 레이어 상한(\(Self.maxConcurrentVideoLayers)개)을 "
-                                    + "넘어 건너뛴다")
-                            continue
-                        }
-                        let video = try VideoTexture(mp4: mp4, device: device)
-                        // status는 init 직후 대개 .unknown이라 이 검사는 이미 동기적으로
-                        // 실패가 확정된 드문 경우만 잡는다. 나머지는 VideoTexture.currentTexture()가
-                        // 매 프레임 다시 확인해 stderr에 알린다 (VideoTexture 참고).
-                        guard !video.hasFailed else {
-                            skipped.append("\(layer.name): 비디오를 재생할 수 없다")
-                            continue
-                        }
-                        video.play()
-                        videos.append(video)
-                        drawable.append((quad, .dynamic { [weak video] in video?.currentTexture() }))
-                    } else {
-                        let texture = try compositor.makeTexture(from: decoded)
-                        // 이펙트가 걸려 있으면 그 결과를 대신 그린다. 컴파일이 안 되면
-                        // 체인이 nil이라 원본을 그대로 쓴다 — 레이어를 버리지 않는다.
-                        // 씬 전체 예산을 넘으면 더 걸지 않는다. 레이어는 원본으로 그린다.
-                        let effectBudgetLeft = chains.reduce(0) { $0 + $1.chain.textureBytes }
-                            < EffectChain.maxSceneTextureBytes
-                        if !layer.effects.isEmpty, Self.effectsEnabled, effectBudgetLeft,
-                           let chain = EffectChain(
-                            device: device,
-                            effects: layer.effects.map(\.definition),
-                            effectBases: layer.effects.map(\.base),
-                            source: texture, resolver: resolver,
-                            includes: shaderIncludes,
-                            makeTexture: { try compositor.makeTexture(from: $0) },
-                            diagnostics: &degraded) {
-                            chains.append((chain, texture))
-                            drawable.append((quad, .dynamic { [weak chain] in chain?.texture }))
-                        } else {
-                            if !layer.effects.isEmpty, Self.effectsEnabled {
-                                if !effectBudgetLeft {
-                                    degraded.append(
-                                        "\(layer.name): 씬의 이펙트 텍스처 예산을 넘어 "
-                                            + "원본 그대로 그린다")
-                                }
-                                degraded.append(
-                                    "\(layer.name): 이펙트 \(layer.effects.count)개를 걸지 못해 "
-                                        + "원본 그대로 그린다")
-                            }
-                            drawable.append((quad, .fixed(texture)))
-                        }
-                    }
-                } catch {
-                    skipped.append("\(layer.name): 텍스처 로드 실패 \(error)")
-                }
-
-            case .particle(let preset, let texturePath, let blend, let normalPath, let refractAmount):
-                // 자식까지 한 번에 만든다. 자식 파티클은 부모와 **다른 텍스처와
-                // 다른 혼합**을 쓴다(불꽃 잔해는 가산, 빗줄기 꼬리는 반투명) —
-                // 그래서 렌더러가 그룹마다 하나씩 필요하다.
-                var built: [(key: String, renderer: ParticleRenderer, ratio: Float)] = []
-                Self.buildParticleRenderers(
-                    preset: preset, texturePath: texturePath, blend: blend,
-                    normalPath: normalPath, refractAmount: refractAmount, key: "0",
-                    instances: 1, layer: layer, compositor: compositor, resolver: resolver,
-                    into: &built, skipped: &skipped)
-                guard let root = built.first, root.key == "0" else {
-                    skipped.append("\(layer.name): 파티클 렌더러를 만들지 못했다: \(texturePath)")
-                    continue
-                }
-                // 시드를 레이어 id로 나눠 레이어마다 다른 수열을 쓴다.
-                // 같은 시드를 공유하면 눈과 벚꽃이 똑같이 움직인다.
-                let system = ParticleSystem(
-                    preset: preset,
-                    random: SeededRandom(seed: UInt64(bitPattern: Int64(layer.id))))
-                if !system.unimplementedOperators.isEmpty {
-                    degraded.append(
-                        "\(layer.name): 아직 처리하지 않는 연산자 "
-                            + system.unimplementedOperators.joined(separator: ", "))
-                }
-                var groups: [String: (ParticleRenderer, Float)] = [:]
-                for entry in built {
-                    groups[entry.key] = (entry.renderer, entry.ratio)
-                    // 만든 순서대로 그린다 — 부모가 먼저, 자식이 그 위에.
-                    drawable.append((quad, .particles(entry.renderer)))
-                }
-                // 레이어 원점을 함께 들고 있는다. 커서를 이 시스템의 좌표계로
-                // 옮기려면 필요하다 — 파티클 좌표는 레이어 기준 상대 좌표다.
-                particles.append((system, groups,
-                                  SIMD2(Float(layer.origin.x), Float(layer.origin.y))))
-
-            case .sound(let sound):
-                // 그리지 않는다. 소리만 준비해 둔다.
-                guard let player = Self.makePlayer(sound, resolver: resolver) else {
-                    skipped.append(
-                        "\(layer.name): 재생할 수 없는 소리 형식이다 "
-                            + "(\(sound.paths.map { ($0 as NSString).pathExtension }.joined(separator: ", ")))")
-                    continue
-                }
-                // startsilent인 소리는 스크립트가 켜기 전까지 나지 않는다.
-                // 스크립트를 아직 돌리지 않으므로 준비만 하고 재생 목록에는 넣지 않는다.
-                if sound.startsSilent {
-                    degraded.append("\(layer.name): 시작할 때 조용한 소리라 스크립트 없이는 나지 않는다")
-                } else {
-                    // 씬이 정한 볼륨을 따로 들고 있어야 사용자 설정을 곱할 수 있다.
-                    // AVAudioPlayer는 원래 값을 기억하지 않는다.
-                    sounds.append((player, Float(sound.volume)))
-                }
-
-            case .text(let text):
-                // 폰트가 없어도 그린다 — 시스템 폰트로 대체된다. 글자가 아예
-                // 안 나오는 것보다 다른 폰트로라도 나오는 게 낫다.
-                let fontData = text.usesSystemFont ? nil : resolver.data(for: text.fontPath)
-                if fontData == nil && !text.usesSystemFont {
-                    degraded.append("\(layer.name): 폰트를 찾을 수 없어 시스템 폰트로 그린다: \(text.fontPath)")
-                }
-                // 오브젝트의 size는 글자 크기가 아니라 **상자**다. 실물에서 411x5300짜리도
-                // 있어서 그대로 점 크기로 쓰면 글자가 화면 밖으로 밀려난다. 대신 고정
-                // 크기로 굽고 상자에 맞춰 줄인다. 256은 레티나에서 흐리지 않을 만큼 크다.
-                let pointSize = 256.0
-                let engine = text.script.map {
-                    ScriptEngine(
-                        source: $0,
-                        properties: text.scriptProperties.mapValues(\.jsValue),
-                        environment: scriptEnvironment,
-                        modules: document.scriptModules)
-                }
-                if let failure = engine?.failure {
-                    skipped.append("\(layer.name): 스크립트를 쓸 수 없다: \(failure)")
-                }
-                let state = TextState(
-                    text: text, fontData: fontData, pointSize: pointSize,
-                    origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
-                    box: SIMD2(Float(layer.size.x), Float(layer.size.y)),
-                    engine: engine?.failure == nil ? engine : nil, name: layer.name)
-                texts.append(state)
-                // 첫 값을 바로 구워 둔다. 스크립트가 처음 도는 1초 동안 비어 보이면
-                // 사용자는 고장으로 읽는다.
-                if let engine = state.engine, let first = engine.update(value: state.value) {
-                    state.value = first
-                }
-                rasterize(state, compositor: compositor)
-                state.layerIndex = drawable.count
-                // 글자 색은 래스터화할 때 이미 칠했다. 여기서 또 곱하면 색이 제곱된다.
-                // 틴트는 흰색으로 두고 레이어 투명도만 넘긴다.
-                //
-                // 밝기는 색과 별개라 여기서 곱한다. **실물에서 섞기가 걸린
-                // 레이어 여덟 중 여섯이 글자다**(시계·요일·날짜) — 이미지 쪽만
-                // 이어 두면 정작 필요한 곳에 안 걸린다.
-                let textBrightness = Float(layer.brightness)
-                drawable.append((QuadInstance(
-                    origin: state.origin, size: state.size,
-                    color: SIMD4(textBrightness, textBrightness, textBrightness,
-                                 Float(layer.alpha)),
-                    rotation: Float(layer.rotation),
-                    parallaxDepth: Float(layer.parallaxDepth),
-                    blendMode: Int32(layer.colorBlendMode)),
-                    .dynamic { [weak state] in state?.texture }))
-
-            case .shadedImage(let materialPath, _):
-                // 재질의 셰이더가 그림을 만든다. 메시 렌더러에 단위 사각형을 준다 —
-                // 셰이더 컴파일·유니폼·텍스처가 메시와 똑같기 때문이다.
-                guard document.isPerspective else {
-                    skipped.append("\(layer.name): 직교 씬의 셰이더 이미지는 아직 그리지 않는다: \(materialPath)")
-                    continue
-                }
-                do {
-                    let renderer = try ModelRenderer(
-                        device: compositor.device, model: MDLModel.unitQuad(),
-                        materialPath: materialPath, resolver: resolver, includes: shaderIncludes,
-                        makeTexture: { try compositor.makeTexture(from: $0) },
-                        sampler: compositor.sharedSampler,
-                        eye: { [weak compositor] in compositor?.cameraEye ?? .zero })
-                    // 판의 크기는 size × scale 세계 단위다(실물 배경 구름 64 × 10).
-                    quad.world = Scene3D.world(
-                        origin: layer.origin,
-                        anglesDegrees: Vec3(x: 0, y: 0, z: layer.rotation * 180 / .pi),
-                        scale: Vec3(x: 1, y: 1, z: 1),
-                        size: Vec2(x: layer.size.x, y: layer.size.y))
-                    drawable.append((quad, .model(renderer)))
-                } catch {
-                    skipped.append("\(layer.name): 셰이더 이미지를 그리지 못한다: \(error)")
-                }
-
-            case .model(let path, let skin):
-                guard document.isPerspective else {
-                    skipped.append("\(layer.name): 직교 씬의 3D 메시는 아직 그리지 않는다: \(path)")
-                    continue
-                }
-                guard let raw = resolver.data(for: path) else {
-                    skipped.append("\(layer.name): 메시를 찾을 수 없다: \(path)")
-                    continue
-                }
-                do {
-                    let model = try MDLModel.parse(raw)
-                    // `skin`은 메시의 재질 목록 번호다. 벗어나면 첫 재질로 간다.
-                    guard !model.materials.isEmpty else {
-                        skipped.append("\(layer.name): 메시에 재질이 없다: \(path)")
-                        continue
-                    }
-                    let materialPath = model.materials[min(skin, model.materials.count - 1)]
-                    let renderer = try ModelRenderer(
-                        device: compositor.device, model: model, materialPath: materialPath,
-                        resolver: resolver, includes: shaderIncludes,
-                        makeTexture: { try compositor.makeTexture(from: $0) },
-                        sampler: compositor.sharedSampler,
-                        eye: { [weak compositor] in compositor?.cameraEye ?? .zero })
-                    quad.world = Scene3D.world(
-                        origin: layer.origin,
-                        anglesDegrees: Vec3(x: 0, y: 0, z: layer.rotation * 180 / .pi),
-                        scale: layer.scale)
-                    drawable.append((quad, .model(renderer)))
-                } catch {
-                    skipped.append("\(layer.name): 3D 메시를 그리지 못한다: \(error)")
-                }
-
-            case .unsupported(let reason):
-                skipped.append("\(layer.name): \(reason)")
-            }
+        // 숨은 레이어도 스크립트가 있으면 세운다 — 스크립트가 나중에 보이게 할 수 있고,
+        // 실물 원근 씬은 카메라·프리즘 로직을 숨은 레이어에 둔다. 알파 0으로 시작한다.
+        for layer in document.layers where layer.visible || !layer.scripts.isEmpty {
+            addLayer(layer, context: context)
         }
-        self.videos = videos
-        self.particles = particles
-        self.texts = texts
-        self.sounds = sounds
 
         // 건너뛴 이유는 drawable이 비어 폴백하는 경우에 사용자가 가장 필요로 한다.
         // isEmpty 가드보다 먼저 써야 그 경로에서도 진단이 버려지지 않는다.
@@ -1194,7 +1276,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             ))
         }
 
-        guard !drawable.isEmpty else {
+        reportedSkipped = skipped.count
+        reportedDegraded = degraded.count
+        guard !layerList.isEmpty else {
             // Metal 자체가 없는 경우(unsupportedType)와는 원인이 다르다 — 여기 도달했다는
             // 것 자체가 device가 있었다는 뜻이다. DisplayManager.attach는 어떤 오류든
             // 잡아 preview로 폴백하므로(WallflowApp/DisplayManager.swift 참고) 동작은
@@ -1202,23 +1286,19 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             throw RendererError.noDrawableLayers
         }
 
-        self.layerList = drawable
-        self.displays = displayStates
-        if !chains.isEmpty {
-            let bytes = chains.reduce(0) { $0 + $1.chain.textureBytes }
+        if !effectChains.isEmpty {
+            let bytes = effectChains.reduce(0) { $0 + $1.chain.textureBytes }
             FileHandle.standardError.write(Data(
-                ("이펙트 체인 \(chains.count)개, "
-                    + "패스 \(chains.reduce(0) { $0 + $1.chain.passCount })개, "
+                ("이펙트 체인 \(effectChains.count)개, "
+                    + "패스 \(effectChains.reduce(0) { $0 + $1.chain.passCount })개, "
                     + "텍스처 \(bytes / 1_000_000)MB\n").utf8))
         }
-        self.effectChains = chains
         self.effectStartTime = nil
         self.postEffects = nil
-        self.compositionLayers = compositions
         self.compositionChains = [:]
         self.compositionResolver = resolver
         self.compositionIncludes = shaderIncludes
-        if !compositions.isEmpty {
+        if !compositionLayers.isEmpty {
             compositor.composite = { [weak self] id, commands, frame in
                 self?.renderComposition(id, commands: commands, frame: frame)
             }
@@ -1243,14 +1323,38 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 self?.renderPostProcess(commands, frame: frame)
             }
         }
-        compositor.setLayers(drawable)
+        compositor.setLayers(layerList)
         self.compositor = compositor
+
+        // 씬의 스크립트를 한 컨텍스트에 올린다. **숨은 레이어도** 넣는다 — 실물
+        // 원근 씬의 카메라·프리즘 로직이 거기 산다. 첫 틱은 여기서 바로 돌려
+        // 첫 프레임부터 스크립트가 정한 자리에 그린다.
+        let seeds = document.layers.map { layer -> SceneScriptHost.LayerSeed in
+            var seed = SceneScriptHost.LayerSeed(layer)
+            seed.materialScripts = materialScripts(of: layer.id)
+            return seed
+        }
+        if seeds.contains(where: { !$0.scripts.isEmpty || !$0.materialScripts.isEmpty }) {
+            let host = SceneScriptHost(
+                layers: seeds,
+                camera: document.camera, environment: scriptEnvironment,
+                modules: document.scriptModules,
+                userProperties: Self.userPropertyValues(for: item))
+            if let fatal = host.fatalFailure {
+                degraded.append("스크립트를 돌리지 못한다: \(fatal)")
+            } else {
+                scriptHost = host
+                lastScriptTick = CACurrentMediaTime()
+                apply(host.tick(frametime: 0))
+            }
+        }
 
         // 비디오·파티클·텍스트는 모두 시간에 따라 바뀐다.
         // 시간을 쓰는 이펙트(`g_Time`)도 마찬가지다 — 빼면 빛줄기가 첫 프레임에
         // 멈춘 채로 남는다. 움직이지 않는 이펙트는 여기 해당하지 않는다.
-        let hasAnimatedEffect = chains.contains { $0.chain.isAnimated }
-        if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty || hasAnimatedEffect {
+        let hasAnimatedEffect = effectChains.contains { $0.chain.isAnimated }
+        if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty || hasAnimatedEffect
+            || scriptHost != nil {
             view.isPaused = false
             view.enableSetNeedsDisplay = false
             // 전력 정책이 30fps를 지시한다. 60fps 소스라도 그 이상 그리지 않는다.
@@ -1292,15 +1396,19 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     func stop() {
         for video in videos { video.stop() }
         videos.removeAll()
-        for (player, _) in sounds { player.stop() }
+        for entry in sounds { entry.player.stop() }
         sounds.removeAll()
         particles.removeAll()
         texts.removeAll()
         lastFrameTime = nil
-        lastScriptTime = nil
+        lastScriptTick = nil
+        scriptHost = nil
+        scriptInFlight = false
+        scriptTargets = [:]
+        appliedStates = [:]
+        buildContext = nil
         compositor = nil
         layerList = []
-        displays = []
         effectChains = []
         effectStartTime = nil
         postEffects = nil
@@ -1319,17 +1427,7 @@ extension SceneRenderer: MTKViewDelegate {
     func draw(in view: MTKView) {
         updateParallax(in: view)
         updateCamera(in: view)
-        if !texts.isEmpty || !displays.isEmpty {
-            let now = CACurrentMediaTime()
-            let since = lastScriptTime.map { now - $0 }
-            if since.map({ $0 >= Self.scriptInterval }) ?? true {
-                lastScriptTime = now
-                runScripts()
-                // 첫 호출에는 직전 시각이 없다. 0을 주면 스크립트의 타이머가
-                // 영영 안 흐른다 — 진행 막대가 계속 보인다.
-                runDisplayScripts(elapsed: since ?? Self.scriptInterval)
-            }
-        }
+        tickScripts(in: view)
         if !particles.isEmpty {
             let now = CACurrentMediaTime()
             // 첫 프레임에는 직전 시각이 없다. 0을 넘기면 시뮬레이션이 그냥 넘어간다.

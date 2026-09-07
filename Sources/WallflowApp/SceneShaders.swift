@@ -297,7 +297,11 @@ enum SceneShaders {
         float2 frameScale;
         float textureRatio;
         float framesPerRow;
-        float2 _pad;
+        // 원근 씬이면 1. 그때는 projection 대신 transform으로 클립 공간에 놓는다.
+        float useTransform;
+        float _pad;
+        // 레이어의 세계 변환 × 카메라 뷰·투영. 파티클 좌표는 레이어 기준이다.
+        float4x4 transform;
     };
 
     // common_particles.h의 ComputeParticleTangents를 옮긴 것.
@@ -344,7 +348,11 @@ enum SceneShaders {
         float row = floor(p.frame / u.framesPerRow);
 
         VertexOut out;
-        out.position = float4(ndc, 0.0, 1.0);
+        // 원근 씬에서는 파티클이 레이어의 세계 공간에 놓인 판이다. 실물 시계의
+        // 오브가 그것이다 — 스크립트가 레이어 원점을 3D로 돌린다.
+        out.position = u.useTransform > 0.5
+            ? u.transform * float4(world, 1.0)
+            : float4(ndc, 0.0, 1.0);
         out.uv = (corner + float2(col, row)) * u.frameScale;
         out.color = p.color;
         // `common_particles.h`의 `ComputeScreenRefractionTangents` 그대로다.

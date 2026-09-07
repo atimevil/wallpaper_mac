@@ -1,4 +1,5 @@
 import Metal
+import simd
 import WallflowKit
 
 /// GPU에 넘기는 파티클 하나. MSL의 `ParticleInstance`와 배치가 **정확히** 같아야 한다.
@@ -31,7 +32,11 @@ struct ParticleUniforms {
     var frameScale: SIMD2<Float>
     var textureRatio: Float
     var framesPerRow: Float
-    var padding: SIMD2<Float> = .zero
+    /// 원근 씬이면 1. MSL 쪽 `useTransform`과 같은 자리다.
+    var useTransform: Float = 0
+    var padding: Float = 0
+    /// 레이어 세계 변환 × 뷰·투영. 직교 씬에서는 쓰지 않는다.
+    var transform: simd_float4x4 = matrix_identity_float4x4
 }
 
 /// 텍스처가 스프라이트 시트일 때의 배치. `rosepetals.tex`가 512x128에 102x128
@@ -218,13 +223,17 @@ final class ParticleRenderer {
 
     /// 살아 있는 파티클이 없으면 아무것도 인코딩하지 않는다.
     /// `instanceCount: 0`으로 draw를 부르는 것은 낭비다.
-    func encode(into encoder: MTLRenderCommandEncoder, projection: SIMD2<Float>) {
+    /// - Parameter transform: 원근 씬이면 레이어 세계 변환 × 뷰·투영. 직교면 nil.
+    func encode(into encoder: MTLRenderCommandEncoder, projection: SIMD2<Float>,
+                transform: simd_float4x4? = nil) {
         guard instanceCount > 0 else { return }
         var uniforms = ParticleUniforms(
             projection: projection,
             frameScale: sheet?.frameScale ?? SIMD2(1, 1),
             textureRatio: sheet?.frameRatio ?? textureRatio,
-            framesPerRow: Float(max(1, sheet?.framesPerRow ?? 1)))
+            framesPerRow: Float(max(1, sheet?.framesPerRow ?? 1)),
+            useTransform: transform == nil ? 0 : 1,
+            transform: transform ?? matrix_identity_float4x4)
         encoder.setRenderPipelineState(pipeline)
         // index 2·3을 쓴다. index 0은 컴포지터가 루프 밖에서 묶어 둔 쿼드 정점
         // 버퍼이고 루프 안에서 다시 묶지 않는다. 여기서 0을 덮으면 파티클 다음에

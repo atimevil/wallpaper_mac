@@ -251,6 +251,25 @@ public struct LayerEffect: Equatable, Sendable {
     }
 }
 
+/// 레이어 속성 하나에 붙은 스크립트. `SceneScriptHost`가 씬 단위로 돌린다.
+///
+/// `property`는 씬 JSON의 키 그대로다(`origin`, `angles`, `scale`, `alpha`,
+/// `color`, `visible`, `size`, `text`). 스크립트의 `update(value)`는 그 속성의
+/// 현재 값을 받고 새 값을 돌려준다.
+public struct LayerScript: Equatable, Sendable {
+    public let property: String
+    public let source: String
+    /// 그 속성에 딸린 `scriptproperties`. 스크립트 안의 빌더 기본값을 덮어쓴다.
+    public let scriptProperties: [String: ScriptPropertyValue]
+
+    public init(property: String, source: String,
+                scriptProperties: [String: ScriptPropertyValue] = [:]) {
+        self.property = property
+        self.source = source
+        self.scriptProperties = scriptProperties
+    }
+}
+
 /// 씬의 레이어 하나. origin은 오브젝트의 중심이고 직교 공간 좌표다.
 public struct SceneLayer: Equatable, Sendable {
     public let id: Int
@@ -296,6 +315,15 @@ public struct SceneLayer: Equatable, Sendable {
     /// `cursor` 레이어의 origin은 `input.cursorWorldPosition`을, `Audio bar`는
     /// 오디오를 요구한다 — 둘 다 M6다. 그동안은 편집기에 저장된 좌표로 그린다.
     public let unrunScripts: [String]
+    /// 이 레이어의 속성 스크립트 전부. 숨은 레이어의 것도 돈다 — 실물 원근 씬은
+    /// 카메라·프리즘 로직을 **보이지 않는** 레이어의 `visible` 스크립트에 둔다.
+    public let scripts: [LayerScript]
+    /// 오브젝트 자체의 회전(도, XYZ). 부모를 합치지 않은 값이다 —
+    /// 스크립트의 `thisLayer.angles`가 이것이고, 3D 메시의 세 축 회전이 여기서 온다.
+    public let angles: Vec3
+    /// 오브젝트 자체의 origin·scale. 부모를 합치지 않은 값이라 스크립트가 읽고 쓴다.
+    public let localOrigin: Vec3
+    public let localScale: Vec3
 
     public init(
         id: Int, name: String, visible: Bool, origin: Vec3, size: Vec2,
@@ -306,8 +334,16 @@ public struct SceneLayer: Equatable, Sendable {
         scale: Vec3 = Vec3(x: 1, y: 1, z: 1),
         parallaxDepth: Double = 0,
         colorBlendMode: Int = 0,
-        brightness: Double = 1
+        brightness: Double = 1,
+        scripts: [LayerScript] = [],
+        angles: Vec3 = Vec3(x: 0, y: 0, z: 0),
+        localOrigin: Vec3? = nil,
+        localScale: Vec3? = nil
     ) {
+        self.scripts = scripts
+        self.angles = angles
+        self.localOrigin = localOrigin ?? origin
+        self.localScale = localScale ?? scale
         self.colorBlendMode = colorBlendMode
         self.brightness = brightness
         self.displayScripts = displayScripts
@@ -332,7 +368,21 @@ public struct SceneLayer: Equatable, Sendable {
             id: id, name: name, visible: visible, origin: origin, size: size,
             content: content, unrunScripts: unrunScripts, effects: effects,
             alpha: alpha, tint: tint, rotation: rotation, displayScripts: displayScripts,
-            scale: scale, parallaxDepth: parallaxDepth)
+            scale: scale, parallaxDepth: parallaxDepth,
+            colorBlendMode: colorBlendMode, brightness: brightness,
+            scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale)
+    }
+
+    /// 스크립트와 오브젝트 자체 변환을 붙인 사본. 나머지는 그대로다.
+    public func attachingScripts(_ scripts: [LayerScript], angles: Vec3,
+                                 localOrigin: Vec3, localScale: Vec3) -> SceneLayer {
+        SceneLayer(
+            id: id, name: name, visible: visible, origin: origin, size: size,
+            content: content, unrunScripts: unrunScripts, effects: effects,
+            alpha: alpha, tint: tint, rotation: rotation, displayScripts: displayScripts,
+            scale: scale, parallaxDepth: parallaxDepth,
+            colorBlendMode: colorBlendMode, brightness: brightness,
+            scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale)
     }
 }
 

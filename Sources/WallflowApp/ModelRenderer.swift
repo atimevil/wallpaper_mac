@@ -24,14 +24,31 @@ final class ModelRenderer {
     private let sampler: MTLSamplerState
     private let vertexLayout: UniformPacker.Layout
     private let fragmentLayout: UniformPacker.Layout
-    private let vertexBytes: [UInt8]
-    private let fragmentBytes: [UInt8]
+    private var vertexBytes: [UInt8]
+    private var fragmentBytes: [UInt8]
+    private let vertexUniforms: [GLSLTranslator.Uniform]
+    private let fragmentUniforms: [GLSLTranslator.Uniform]
+    /// 재질이 정한 상수. 스크립트가 덮어쓰면 다시 싼다.
+    private var constants: [String: EffectConstant]
+    /// 재질 상수에 붙은 스크립트. 씬 스크립트 호스트가 돌린다.
+    let constantScripts: [SceneScriptHost.MaterialScript]
     private let textures: [GLSLTranslator.Texture]
     private var bound: [Int: MTLTexture] = [:]
-    /// `_rt_FullFrameBuffer`·`_rt_Reflection` 슬롯. 뒤 화면 사본이 들어간다.
+    /// `_rt_FullFrameBuffer` 슬롯. 뒤 화면 사본이 들어간다.
     private let backgroundSlots: [Int]
     private var background: MTLTexture?
     private let placeholder: MTLTexture
+    /// `_rt_Reflection` 같은 나머지 `_rt_*` 슬롯에 주는 한 픽셀 텍스처.
+    ///
+    /// 반사 버퍼는 WE가 반사를 켠 레이어가 있을 때만 그린다. 이 씬들처럼 그런
+    /// 레이어가 없으면 버퍼에는 **지운 색**만 남는다 — 실물 crystal 셰이더가 이
+    /// 버퍼를 최대 8배로 곱해 굴절을 만드는데, 뒤 화면을 주면 하얗게 타고 지운
+    /// 색(어두운 남색)을 주면 미리보기와 같은 푸른 면이 나온다. 이것은 실물
+    /// 미리보기와 견준 추론이지 문서에 있는 규칙은 아니다. `WALLFLOW_REFLECTION=frame`이면
+    /// 뒤 화면을 준다.
+    private let reflection: MTLTexture
+    private let reflectionSlots: [Int]
+    private let reflectionUsesFrame = ProcessInfo.processInfo.environment["WALLFLOW_REFLECTION"] == "frame"
     private let eyeProvider: () -> SIMD3<Float>
 
     var needsBackground: Bool { !backgroundSlots.isEmpty }
@@ -41,11 +58,13 @@ final class ModelRenderer {
     ///   - model: 읽어 둔 메시.
     ///   - materialPath: `skin`이 고른 재질 JSON 경로.
     ///   - eye: 카메라 눈 위치. 매 프레임 물어본다.
+    ///   - clearColor: 씬의 지운 색. 반사 버퍼 자리에 들어간다.
     init(
         device: MTLDevice, model: MDLModel, materialPath: String,
         resolver: ReferenceResolver, includes: [String: String],
         makeTexture: (TextureData) throws -> MTLTexture,
-        sampler: MTLSamplerState, eye: @escaping () -> SIMD3<Float>
+        sampler: MTLSamplerState, eye: @escaping () -> SIMD3<Float>,
+        clearColor: SIMD4<Float> = SIMD4(0, 0, 0, 1)
     ) throws {
         // 재질 셰이더는 텍스처가 **반복**된다고 본다. 실물 `ps2menu`가 `0.3/r`로
         // 0~1 밖을 읽어 터널을 만든다. 이미지 쿼드의 샘플러는 가장자리 고정이라
@@ -67,10 +86,17 @@ final class ModelRenderer {
             throw Failure.badMaterial(materialPath)
         }
         var constants: [String: EffectConstant] = [:]
+        var constantScripts: [SceneScriptHost.MaterialScript] = []
         for (key, raw) in pass["constantshadervalues"] as? [String: Any] ?? [:] {
             let unwrapped = (raw as? [String: Any])?["value"] ?? raw
-            if let constant = EffectConstant.parse(unwrapped) { constants[key] = constant }
+            let constant = EffectConstant.parse(unwrapped)
+            if let constant { constants[key] = constant }
+            if let script = (raw as? [String: Any])?["script"] as? String {
+                constantScripts.append(.init(key: key, source: script, value: constant))
+            }
         }
+        self.constants = constants
+        self.constantScripts = constantScripts.sorted { $0.key < $1.key }
         var combos: [String: Int] = [:]
         for (key, value) in pass["combos"] as? [String: Any] ?? [:] {
             if let n = (value as? NSNumber)?.intValue { combos[key] = n }
@@ -157,31 +183,29 @@ final class ModelRenderer {
         // 유니폼: 씬 값(재질 상수)과 주석 기본값. 엔진 값은 그릴 때 덮는다.
         vertexLayout = UniformPacker.layout(for: vertex.uniforms.map { ($0.name, $0.type, $0.count) })
         fragmentLayout = UniformPacker.layout(for: fragment.uniforms.map { ($0.name, $0.type, $0.count) })
-        func packed(_ uniforms: [GLSLTranslator.Uniform], _ layout: UniformPacker.Layout) -> [UInt8] {
-            var values: [String: [Float]] = [:]
-            for uniform in uniforms {
-                guard let field = layout.field(named: uniform.name) else { continue }
-                let constant = uniform.materialKey.flatMap { constants[$0] }
-                    ?? uniform.defaultValue.flatMap { EffectConstant.parse($0) }
-                if let constant { values[uniform.name] = constant.components(field.count) }
-            }
-            return UniformPacker.pack(values, into: layout)
-        }
-        vertexBytes = packed(vertex.uniforms, vertexLayout)
-        fragmentBytes = packed(fragment.uniforms, fragmentLayout)
+        vertexUniforms = vertex.uniforms
+        fragmentUniforms = fragment.uniforms
+        vertexBytes = Self.packed(vertex.uniforms, vertexLayout, constants: constants)
+        fragmentBytes = Self.packed(fragment.uniforms, fragmentLayout, constants: constants)
 
         // 텍스처. 씬이 준 것 → 주석 기본값 → 흰색. `_rt_*`는 뒤 화면 사본이다.
         textures = fragment.textures
-        guard let white = Self.makeWhitePixel(device: device) else {
+        guard let white = Self.makePixel(device: device, color: SIMD4(1, 1, 1, 1)),
+              let clear = Self.makePixel(device: device, color: clearColor) else {
             throw CompositorError.bufferAllocationFailed
         }
         placeholder = white
+        reflection = clear
         var backgroundSlots: [Int] = []
+        var reflectionSlots: [Int] = []
         for slot in fragment.textures {
             let path = (slot.index < sceneTextures.count ? sceneTextures[slot.index] : nil)
                 ?? slot.defaultPath
             guard let path else { continue }
-            if path.hasPrefix("_rt_") { backgroundSlots.append(slot.index); continue }
+            if path == "_rt_FullFrameBuffer" || reflectionUsesFrame && path.hasPrefix("_rt_") {
+                backgroundSlots.append(slot.index); continue
+            }
+            if path.hasPrefix("_rt_") { reflectionSlots.append(slot.index); continue }
             for candidate in EffectChain.textureCandidates(path, base: "") {
                 guard let data = resolver.data(for: candidate),
                       let decoded = try? TexDecoder.decode(data),
@@ -191,6 +215,7 @@ final class ModelRenderer {
             }
         }
         self.backgroundSlots = backgroundSlots
+        self.reflectionSlots = reflectionSlots
         if ProcessInfo.processInfo.environment["WALLFLOW_EFFECT_DEBUG"] != nil {
             FileHandle.standardError.write(Data("""
             MODELDBG \(materialPath) shader=\(shaderName) 정점 \(model.vertexCount) 색인 \(model.indices.count) \
@@ -199,6 +224,30 @@ final class ModelRenderer {
 
             """.utf8))
         }
+    }
+
+    private static func packed(_ uniforms: [GLSLTranslator.Uniform], _ layout: UniformPacker.Layout,
+                               constants: [String: EffectConstant]) -> [UInt8] {
+        var values: [String: [Float]] = [:]
+        for uniform in uniforms {
+            guard let field = layout.field(named: uniform.name) else { continue }
+            let constant = uniform.materialKey.flatMap { constants[$0] }
+                ?? uniform.defaultValue.flatMap { EffectConstant.parse($0) }
+            if let constant { values[uniform.name] = constant.components(field.count) }
+        }
+        return UniformPacker.pack(values, into: layout)
+    }
+
+    /// 스크립트가 정한 재질 상수를 얹는다. 키는 재질의 `constantshadervalues` 키다.
+    func setConstants(_ overrides: [String: EffectConstant]) {
+        var changed = false
+        for (key, value) in overrides where constants[key] != value {
+            constants[key] = value
+            changed = true
+        }
+        guard changed else { return }
+        vertexBytes = Self.packed(vertexUniforms, vertexLayout, constants: constants)
+        fragmentBytes = Self.packed(fragmentUniforms, fragmentLayout, constants: constants)
     }
 
     /// 이름 → `.mdl` 정점 안의 자리. 배치는 `MDLModel` 문서와 같다.
@@ -212,11 +261,13 @@ final class ModelRenderer {
         }
     }
 
-    private static func makeWhitePixel(device: MTLDevice) -> MTLTexture? {
+    private static func makePixel(device: MTLDevice, color: SIMD4<Float>) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
         guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
-        var pixel: UInt32 = 0xFFFF_FFFF
+        var pixel: [UInt8] = [color.x, color.y, color.z, color.w].map {
+            UInt8(min(max($0, 0), 1) * 255 + 0.5)
+        }
         texture.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
                         withBytes: &pixel, bytesPerRow: 4)
         return texture
@@ -269,7 +320,9 @@ final class ModelRenderer {
         }
         for slot in textures {
             let texture = backgroundSlots.contains(slot.index)
-                ? (background ?? placeholder) : (bound[slot.index] ?? placeholder)
+                ? (background ?? placeholder)
+                : reflectionSlots.contains(slot.index) ? reflection
+                : (bound[slot.index] ?? placeholder)
             encoder.setFragmentTexture(texture, index: slot.index)
             encoder.setFragmentSamplerState(sampler, index: slot.index)
         }

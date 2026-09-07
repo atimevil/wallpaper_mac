@@ -410,6 +410,9 @@ final class MetalCompositor {
         guard var encoder = startEncoder(clear: true) else { return }
 
         for (quad, source) in layers {
+            // 스크립트가 숨긴 레이어. 알파 0으로 그려도 보이지 않지만, 메시·파티클은
+            // 알파와 무관하게 그리므로 아예 건너뛴다.
+            if quad.color.w <= 0.001 { continue }
             var uniforms = QuadUniforms(
                 origin: quad.origin + parallax * quad.parallaxDepth,
                 size: quad.size, projection: projection,
@@ -547,7 +550,8 @@ final class MetalCompositor {
                 }
                 // 파티클은 자기 draw를 인코딩한다. 아래 공통 drawPrimitives까지
                 // 실행되면 파티클 위에 정체불명의 쿼드가 한 장 더 그려진다.
-                renderer.encode(into: encoder, projection: projection)
+                renderer.encode(into: encoder, projection: projection,
+                                transform: viewProjection.map { $0 * quad.world })
                 // 파티클 파이프라인이 정점 버퍼 결합을 바꿨을 수 있으므로
                 // 다음 쿼드 레이어를 위해 index 0을 되돌린다.
                 encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)

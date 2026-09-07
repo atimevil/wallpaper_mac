@@ -143,11 +143,19 @@ public struct SceneDocument: Sendable {
         // 부모-자식 변환을 먼저 푼다. 자식의 origin과 scale은 부모 기준 상대값이라,
         // 무시하면 시계가 화면 밖에 그려지고 글자 크기가 어긋난다(실물에서 확인).
         let transforms = resolveTransforms(objects)
-        let rawLayers = objects.enumerated().map { index, object in
+        let rawLayers = objects.enumerated().map { index, object -> SceneLayer in
             let id = object["id"] as? Int ?? index
-            return makeLayer(isPerspective: camera != nil, object, fallbackID: index, resolver: resolver,
-                             transform: transforms[id] ?? .identity,
-                             canvas: Vec2(x: Double(width), y: Double(height)))
+            let layer = makeLayer(isPerspective: camera != nil, object, fallbackID: index, resolver: resolver,
+                                  transform: transforms[id] ?? .identity,
+                                  canvas: Vec2(x: Double(width), y: Double(height)))
+            // 스크립트는 레이어가 숨어 있어도 붙인다. 실물 원근 씬의 카메라·프리즘
+            // 로직이 보이지 않는 레이어의 `visible` 스크립트에 산다.
+            return layer.attachingScripts(
+                layerScripts(of: object), angles: ownAngles(of: object),
+                localOrigin: scalarOrScripted(object["origin"]).flatMap(Vec3.parse)
+                    ?? Vec3(x: 0, y: 0, z: 0),
+                localScale: scalarOrScripted(object["scale"]).flatMap(Vec3.parse)
+                    ?? Vec3(x: 1, y: 1, z: 1))
         }
         let layers = applyingParticleBudget(rawLayers)
         let scriptModules = loadScriptModules(objects: objects, resolver: resolver)
@@ -164,6 +172,68 @@ public struct SceneDocument: Sendable {
         )
     }
 
+    /// 스크립트가 붙을 수 있는 속성 키. 이 순서로 돈다.
+    public static let scriptableProperties = [
+        "visible", "origin", "angles", "scale", "size", "alpha", "color", "text",
+    ]
+
+    /// 오브젝트의 속성 스크립트 전부. `text`는 `text` 객체 안에 있다.
+    static func layerScripts(of object: [String: Any]) -> [LayerScript] {
+        var scripts: [LayerScript] = []
+        for key in scriptableProperties {
+            guard let holder = object[key] as? [String: Any],
+                  let source = holder["script"] as? String else { continue }
+            var properties: [String: ScriptPropertyValue] = [:]
+            for (name, raw) in (holder["scriptproperties"] as? [String: Any] ?? [:]) {
+                if let n = raw as? NSNumber, !(raw is String) {
+                    properties[name] = .number(n.doubleValue)
+                } else if let t = raw as? String {
+                    properties[name] = .text(t)
+                }
+            }
+            scripts.append(LayerScript(property: key, source: source, scriptProperties: properties))
+        }
+        return scripts
+    }
+
+    /// 오브젝트 자체의 회전(도). 부모를 합치지 않는다.
+    static func ownAngles(of object: [String: Any]) -> Vec3 {
+        scalarOrScripted(object["angles"]).flatMap(Vec3.parse) ?? Vec3(x: 0, y: 0, z: 0)
+    }
+
+    /// 스크립트가 `thisScene.createLayer(asset)`으로 만든 레이어.
+    ///
+    /// 자산 경로만으로 레이어를 만든다 — `.mdl`이면 3D 메시, 파티클 프리셋이면
+    /// 파티클, 소리 파일이면 소리다. 배치는 원점·배율 1이고 스크립트가 곧 옮긴다.
+    /// 만들 수 없는 자산은 nil — 스크립트 쪽에는 빈 레이어 객체가 남아 오류 없이 돈다.
+    public static func layer(
+        fromAsset path: String, id: Int, resolver: ReferenceResolver,
+        isPerspective: Bool, canvas: Vec2
+    ) -> SceneLayer? {
+        let ext = (path as NSString).pathExtension.lowercased()
+        let name = (path as NSString).lastPathComponent
+        var object: [String: Any] = ["id": id, "name": name, "origin": "0 0 0", "visible": true]
+        switch ext {
+        case "mdl":
+            object["model"] = path
+        case "json":
+            // 파티클 프리셋은 `emitter`가 있다. 재질(`passes`)은 레이어가 못 된다.
+            guard let json = resolver.json(for: path), json["emitter"] != nil else { return nil }
+            object["particle"] = path
+        case "ogg", "mp3", "wav", "flac":
+            object["sound"] = [path]
+            object["startsilent"] = true
+            object["playbackmode"] = "loop"
+            object["volume"] = 1.0
+        default:
+            return nil
+        }
+        let layer = makeLayer(isPerspective: isPerspective, object, fallbackID: id,
+                              resolver: resolver, transform: .identity, canvas: canvas)
+        if case .unsupported = layer.content { return nil }
+        return layer
+    }
+
     /// 스크립트들이 import하는 모듈을 assets에서 읽어 온다.
     ///
     /// 실물에 `WEMath`·`WEColor`·`WEVector` 셋이 있고 전부
@@ -174,7 +244,7 @@ public struct SceneDocument: Sendable {
     ) -> [String: String] {
         var wanted: Set<String> = []
         for object in objects {
-            for key in ["origin", "size", "scale", "alpha", "color", "visible", "text"] {
+            for key in scriptableProperties {
                 guard let script = (object[key] as? [String: Any])?["script"] as? String
                 else { continue }
                 for line in script.split(whereSeparator: \.isNewline) {
@@ -376,13 +446,15 @@ public struct SceneDocument: Sendable {
         for key in ["origin", "size", "scale", "alpha", "color", "visible"] {
             guard let script = (object[key] as? [String: Any])?["script"] as? String
             else { continue }
-            // alpha와 visible 스크립트는 실제로 돌린다. 미디어 위젯이 여기서
-            // "지금 재생 중이 아니다"를 알고 스스로 숨는다.
+            // 속성 스크립트는 전부 `SceneScriptHost`가 돌린다. 이 목록은
+            // 테스트가 보는 것이라 유지한다.
             if let property = DisplayScript.Property(rawValue: key) {
                 displayScripts.append(DisplayScript(property: property, source: script))
-            } else {
-                unrun.append(key)
             }
+        }
+        // 호스트가 모르는 키만 못 돌린 것으로 남긴다.
+        for key in ["pointsize"] where (object[key] as? [String: Any])?["script"] != nil {
+            unrun.append(key)
         }
 
         // 레이어에 걸린 이펙트. 못 읽는 것은 조용히 빠진다 — 이펙트 하나 때문에
