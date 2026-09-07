@@ -144,12 +144,21 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
             return unopenable("project.json에 file이 없다")
         }
 
+        let contentURL = directory.appendingPathComponent(file)
+
+        // video인데 컨테이너 자체를 AVFoundation이 못 여는 경우(.webm, .mkv)는
+        // 실제로 재생을 시도해보기 전에 걸러낸다. 그냥 두면 VideoRenderer가
+        // 검은 화면만 남기고 왜 안 뜨는지 사용자에게 아무 말도 못 한다.
+        if type == .video, let reason = UnsupportedVideoFormat.reason(forFile: contentURL) {
+            return unopenable(reason)
+        }
+
         return WallpaperItem(
             id: id,
             title: title,
             type: type,
             directory: directory,
-            contentURL: directory.appendingPathComponent(file),
+            contentURL: contentURL,
             previewURL: preview
         )
     }
