@@ -89,6 +89,9 @@ public final class ParticleSystem {
     /// 마우스 커서의 자리(이 시스템의 좌표계). 매 프레임 렌더러가 넣어 준다.
     /// 없으면 커서를 따라가는 제어점이 시스템 자리에 머문다.
     public var cursorPosition: Vec3?
+    /// `mapsequencearoundcontrolpoint` 초기화자별로 다음에 쓸 자리 번호.
+    /// 초기화자가 배열에 여럿 있어도 서로 안 섞이게 `initializers` 안 위치로 키를 잡는다.
+    private var sequenceCounters: [Int: Int] = [:]
 
     public init(preset: ParticlePreset, random: RandomSource) {
         self.preset = preset
@@ -128,6 +131,12 @@ public final class ParticleSystem {
             if case .remapValue(let output, _, _, _, _) = op,
                case .unsupported(let name) = output {
                 unimplemented.insert("remapvalue(\(name))")
+            }
+        }
+        for initializer in preset.initializers {
+            if case .mapSequenceAroundControlPoint(let point, _, _, _, _, _, _) = initializer,
+               Self.unresolvableControlPoint(point, in: preset) {
+                unimplemented.insert("mapsequencearoundcontrolpoint(제어점 \(point))")
             }
         }
         self.unimplementedOperators = Array(unimplemented).sorted()
@@ -425,8 +434,8 @@ public final class ParticleSystem {
         }
 
         // Apply initializers
-        for initializer in preset.initializers {
-            applyInitializer(initializer, to: &particle)
+        for (index, initializer) in preset.initializers.enumerated() {
+            applyInitializer(initializer, index: index, to: &particle)
         }
 
         // 초기화자가 끝난 값이 기준값이다.
@@ -458,7 +467,9 @@ public final class ParticleSystem {
         )
     }
 
-    private func applyInitializer(_ initializer: ParticleInitializer, to particle: inout Particle) {
+    private func applyInitializer(
+        _ initializer: ParticleInitializer, index: Int, to particle: inout Particle
+    ) {
         switch initializer {
         case .lifetimeRandom(let min, let max):
             particle.lifetime = min + random.next() * (max - min)
@@ -512,7 +523,58 @@ public final class ParticleSystem {
                 y: particle.velocity.y + turbulence.y,
                 z: particle.velocity.z + turbulence.z
             )
+
+        case .mapSequenceAroundControlPoint(let controlPoint, let count, let boundsStart,
+                                            let boundsEnd, let mirror, let speedMin, let speedMax):
+            // 못 푸는 제어점이면(0번이 아닌데 씬이 자리를 안 줬거나 알 수 없는
+            // 묶임) 생성자가 이미 `unimplementedOperators`로 보고했다. 여기서는
+            // 이미터가 준 자리를 그대로 두고 속도만 준다 — 아무것도 안 하면
+            // 파티클이 원점(0,0,0)으로 순간이동해 더 눈에 띈다.
+            let center = controlPointPosition(controlPoint) ?? originOffset
+
+            // 순번을 count로 나눠 원 위의 0~1 자리를 고른다. mirror면 왕복
+            // (0→1→0→…), 아니면 반복(0→1, 0→1, …)한다 — 문서의 "Orientation"
+            // (Repeat/Mirror) 그대로다.
+            let slot = Self.nextSequenceSlot(&sequenceCounters[index, default: 0], count: count,
+                                             mirror: mirror)
+            let fraction = count > 0 ? slot / count : 0
+            let angle = (boundsStart + (boundsEnd - boundsStart) * fraction) * 2 * .pi
+
+            // 반지름은 이미터가 이미 뿌린 자리에서 온다(문서: 같은 제어점에
+            // 이미터를 묶지 않으면 원 크기가 거리에 따라 달라진다 — 즉 반지름은
+            // 이 초기화자가 정하지 않고 넘겨받는다). z는 손대지 않는다(2D 배경화면
+            // 기준, 문서의 "Axis"는 3D에서만 의미가 있다고 적혀 있다).
+            let toParticle = Vec3(x: particle.position.x - center.x,
+                                  y: particle.position.y - center.y,
+                                  z: 0)
+            let radius = (toParticle.x * toParticle.x + toParticle.y * toParticle.y).squareRoot()
+
+            particle.position = Vec3(
+                x: center.x + cos(angle) * radius,
+                y: center.y + sin(angle) * radius,
+                z: particle.position.z)
+
+            // speedmin/speedmax가 실물에서 벡터라 축별 독립 난수로 읽는다
+            // (근거는 타입 선언부 주석 참고).
+            particle.velocity = Vec3(
+                x: speedMin.x + random.next() * (speedMax.x - speedMin.x),
+                y: speedMin.y + random.next() * (speedMax.y - speedMin.y),
+                z: speedMin.z + random.next() * (speedMax.z - speedMin.z))
         }
+    }
+
+    /// `mapsequencearoundcontrolpoint`가 다음에 쓸 자리 번호를 뽑고 카운터를 넘긴다.
+    /// `mirror`면 0→count-1→0으로 왕복하고, 아니면 0→count-1을 반복한다.
+    static func nextSequenceSlot(_ counter: inout Int, count: Double, mirror: Bool) -> Double {
+        // count가 정수가 아닐 수 있다(실물 `magic_trinity`가 3.02다). 주기는
+        // 정수 자리 개수로 잡되, 자리 자체는 count를 그대로 나눠 쓴다 —
+        // 정수부만 쓰면 실물 값 3.02가 3과 다를 이유가 사라진다.
+        let period = Swift.max(1, Int(count.rounded(.down)))
+        let span = mirror ? Swift.max(1, period * 2 - 2) : period
+        let phase = counter % span
+        counter += 1
+        let slot = mirror && phase >= period ? span - phase : phase
+        return Double(slot)
     }
 
     private func applyOperators(dt: Double) {
@@ -749,6 +811,15 @@ public final class ParticleSystem {
                 particle.size = max(0, particle.baseSize * value.x)
             case .color:
                 particle.color = value
+            case .speed:
+                // 방향은 그대로 두고 크기만 바꾼다. 속도가 0이면(가만히 있는
+                // 파티클) 바꿀 방향이 없으니 손대지 않는다.
+                let vx = particle.velocity.x, vy = particle.velocity.y, vz = particle.velocity.z
+                let magnitude = (vx * vx + vy * vy + vz * vz).squareRoot()
+                if magnitude > 1e-9 {
+                    let scale = value.x / magnitude
+                    particle.velocity = Vec3(x: vx * scale, y: vy * scale, z: vz * scale)
+                }
             case .unsupported:
                 // 여기 오면 생성자가 이미 이름과 함께 보고했다.
                 break

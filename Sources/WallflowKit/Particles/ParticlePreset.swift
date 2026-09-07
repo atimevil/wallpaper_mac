@@ -71,6 +71,27 @@ public enum ParticleInitializer: Equatable, Sendable {
     case rotationRandom(min: Vec3, max: Vec3)
     case angularVelocityRandom(min: Vec3, max: Vec3)
     case turbulentVelocityRandom(offset: Double, scale: Double, speedMin: Double, speedMax: Double)
+    /// 제어점을 중심으로 한 원 위에 자리를 잡고 속도를 준다(실물 1곳, `magic_trinity`).
+    ///
+    /// 공식 문서의 "Position around control point"(표시 이름)와 필드가 정확히
+    /// 일치한다 — `count`/`bounds`/`limitbehavior`/`speedmin`/`speedmax`. 다만
+    /// 원본 JSON의 연산자 이름은 `mapsequencearoundcontrolpoint`다(문서와 내부
+    /// 이름이 다른 사례가 이미 `remapvalue` 계열에도 있다).
+    ///
+    /// 문서: "Make sure to also bind your emitter to the same control point,
+    /// otherwise the size of the circle will change depending on the distance
+    /// to the control point." — 반지름을 이 초기화자가 정하지 않고 이미터가
+    /// 뿌린 자리의 거리를 그대로 쓴다는 뜻으로 읽었다. 그래서 반지름 필드가
+    /// 따로 없다: 파티클이 이미터에서 받은 원점까지의 거리를 유지한 채
+    /// 각도만 `count`개 자리 중 하나로 옮긴다.
+    ///
+    /// `speedmin`/`speedmax`가 `"0 10 0"`처럼 **벡터**다(실물 값). 문서는
+    /// 스칼라 "Speed min/max"라고만 적어 방향까지는 말하지 않는데, 실물이
+    /// 축마다 다른 범위를 주므로 `velocityrandom`과 같은 방식(축별 독립
+    /// 난수)으로 읽었다 — 접선 방향이라는 근거가 없어 지어내지 않는다.
+    case mapSequenceAroundControlPoint(controlPoint: Int, count: Double,
+                                       boundsStart: Double, boundsEnd: Double,
+                                       mirror: Bool, speedMin: Vec3, speedMax: Vec3)
 
     /// 씬의 조정값을 얹는다. 크기·속도·수명·투명도는 배율이고 색은 갈아끼운다.
     func scaled(size: Double, speed: Double, lifetime: Double, alpha: Double,
@@ -94,6 +115,13 @@ public enum ParticleInitializer: Equatable, Sendable {
                                             speedMin: lo * speed, speedMax: hi * speed)
         case .rotationRandom, .angularVelocityRandom:
             return self
+        case .mapSequenceAroundControlPoint(let point, let count, let start, let end,
+                                            let mirror, let lo, let hi):
+            // speedmin/speedmax는 속도이므로 `velocityrandom`과 같이 배율을 받는다.
+            // count/bounds/제어점 번호는 자리를 고르는 값이지 속도가 아니라 그대로 둔다.
+            return .mapSequenceAroundControlPoint(
+                controlPoint: point, count: count, boundsStart: start, boundsEnd: end,
+                mirror: mirror, speedMin: mul(lo, speed), speedMax: mul(hi, speed))
         }
     }
 }
@@ -167,6 +195,17 @@ public enum ParticleRemapOutput: Equatable, Sendable {
     case opacity
     case size
     case color
+    /// 속도의 **크기만** 바꾼다. 방향은 지금 속도를 그대로 쓴다.
+    ///
+    /// 실물 `rain_screen*.json`이 이 출력을 4곳에서 쓴다(`output: "speed"`,
+    /// 값은 스칼라 -5~7). `velocity` 출력은 벡터를 통째로 갈아끼우는데,
+    /// 여기는 스칼라라 방향까지 지정할 수 없다 — 공식 문서가 이 연산자의
+    /// 입력 예로 "Speed"를 든 것과 짝을 이루는 출력으로 보인다(입력은
+    /// "지금 속력을 읽는다", 출력은 "속력을 쓴다"). `remapvalue` 하나가
+    /// 이미 `output: velocity`로 방향+크기를 노이즈로 흔들어 두므로,
+    /// 뒤이은 `speed` 출력은 그 결과의 크기만 다시 흔드는 2차 보정으로
+    /// 읽었다 — 빗방울마다 낙하 속력이 한 번 더 갈라진다.
+    case speed
     /// 우리가 아직 안 넣는 출력. 이름을 들고 있다가 보고한다.
     case unsupported(String)
 
@@ -176,6 +215,7 @@ public enum ParticleRemapOutput: Equatable, Sendable {
         case "opacity", "alpha": return .opacity
         case "size": return .size
         case "color": return .color
+        case "speed": return .speed
         case let other: return .unsupported(other ?? "(없음)")
         }
     }
@@ -186,6 +226,7 @@ public enum ParticleRemapOutput: Equatable, Sendable {
         case .opacity: return "opacity"
         case .size: return "size"
         case .color: return "color"
+        case .speed: return "speed"
         case .unsupported(let name): return name
         }
     }
@@ -503,7 +544,8 @@ public struct ParticlePreset: Equatable, Sendable {
         let knownEmitterNames = Set<String>(["sphererandom", "boxrandom"])
         let knownInitializerNames = Set<String>([
             "lifetimerandom", "sizerandom", "alpharandom", "velocityrandom",
-            "colorrandom", "rotationrandom", "angularvelocityrandom", "turbulentvelocityrandom"
+            "colorrandom", "rotationrandom", "angularvelocityrandom", "turbulentvelocityrandom",
+            "mapsequencearoundcontrolpoint"
         ])
         let knownOperatorNames = Set<String>([
             "movement", "angularmovement", "alphafade", "sizechange", "colorchange",
@@ -820,6 +862,42 @@ public struct ParticlePreset: Equatable, Sendable {
             else { return nil }
             return .turbulentVelocityRandom(
                 offset: offset, scale: scale, speedMin: speedMin, speedMax: speedMax)
+
+        case "mapsequencearoundcontrolpoint":
+            // 번호를 안 적으면 0번(시스템 자신의 자리)이다. `controlpointattract`와
+            // 같은 관례다. 실물 `magic_trinity`도 이렇게 생략돼 있다.
+            let controlPoint: Int
+            if dict["controlpoint"] == nil {
+                controlPoint = 0
+            } else if let parsed = getInt(dict["controlpoint"]) {
+                controlPoint = parsed
+            } else {
+                return nil
+            }
+            // count는 원 위의 자리 개수다. 0이나 음수, NaN이면 나눗셈이 깨지므로
+            // 최솟값 1로 죈다. 파일이 1e9를 줘도 각도 계산에 상한이 있으므로
+            // 굳이 위쪽도 죌 필요는 없지만(오버플로 위험이 없다), 유한하지
+            // 않으면 버린다.
+            let rawCount = num(dict, "count", 1) ?? 1
+            let count = rawCount.isFinite ? Swift.max(1, rawCount) : 1
+            // bounds는 "시작 끝" 두 수다(예: "0 1" = 원 한 바퀴 전체).
+            var boundsStart = 0.0, boundsEnd = 1.0
+            if let text = dict["bounds"] as? String {
+                let parts = text.split(separator: " ").compactMap { Double($0) }
+                if parts.count == 2, parts.allSatisfy(\.isFinite) {
+                    boundsStart = parts[0]
+                    boundsEnd = parts[1]
+                }
+            }
+            // "repeat"(기본)는 원을 계속 돌고, "mirror"는 왕복한다. 공식 문서의
+            // "Orientation" 필드다.
+            let mirror = (dict["limitbehavior"] as? String)?.lowercased() == "mirror"
+            guard let speedMin = vec(dict, "speedmin", zero), let speedMax = vec(dict, "speedmax", zero)
+            else { return nil }
+            return .mapSequenceAroundControlPoint(
+                controlPoint: controlPoint, count: count,
+                boundsStart: boundsStart, boundsEnd: boundsEnd,
+                mirror: mirror, speedMin: speedMin, speedMax: speedMax)
 
         default:
             return nil
