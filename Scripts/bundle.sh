@@ -5,6 +5,8 @@ set -euo pipefail
 CONFIG="${1:-debug}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/build/Wallflow.app"
+# shellcheck source=version.sh
+source "$ROOT/Scripts/version.sh"
 
 swift build -c "$CONFIG" --package-path "$ROOT"
 BIN="$(swift build -c "$CONFIG" --package-path "$ROOT" --show-bin-path)/WallflowApp"
@@ -13,21 +15,25 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Wallflow"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key><string>Wallflow</string>
     <key>CFBundleDisplayName</key><string>Wallflow</string>
-    <key>CFBundleIdentifier</key><string>dev.timevil.wallflow</string>
+    <key>CFBundleIdentifier</key><string>$WALLFLOW_BUNDLE_ID</string>
     <key>CFBundleExecutable</key><string>Wallflow</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>$WALLFLOW_VERSION</string>
+    <key>CFBundleVersion</key><string>$WALLFLOW_BUILD</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
+    <!-- AudioSpectrum.swift가 SCStream(capturesAudio: true)로 시스템 소리를 듣는다.
+         마이크가 아니라 화면·시스템 오디오 녹화 권한(kTCCServiceAudioCapture) 아래
+         있고, 사용자가 오디오 반응을 켜기 전에는 요청하지 않는다. -->
+    <key>NSAudioCaptureUsageDescription</key><string>배경화면의 오디오 비주얼라이저가 지금 나고 있는 시스템 소리의 크기만 읽어 화면에 반영합니다. 소리를 저장하거나 어디로 보내지 않습니다.</string>
 </dict>
 </plist>
 PLIST
