@@ -107,9 +107,11 @@ public final class SceneScriptHost: @unchecked Sendable {
                 volume = s.volume
             default: break
             }
+            // 보임은 자체 값이다. 부모까지 합친 값은 렌더러가 조상 사슬로 다시 만든다 —
+            // 스크립트가 부모를 숨기면 자식도 같이 숨어야 한다.
             self.init(id: layer.id, name: layer.name, origin: layer.localOrigin,
                       angles: layer.angles, scale: layer.localScale, alpha: layer.alpha,
-                      visible: layer.visible, color: layer.tint, size: layer.size,
+                      visible: layer.localVisible, color: layer.tint, size: layer.size,
                       text: text, playing: playing, volume: volume, scripts: layer.scripts)
             self.pointSize = pointSize
             self.parent = layer.parentID

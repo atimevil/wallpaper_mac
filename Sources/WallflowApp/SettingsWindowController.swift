@@ -74,8 +74,9 @@ final class SettingsWindowController: NSWindowController {
             ?? Data()
         properties = UserProperty.load(projectJSON: data)
         let overrides = store.overrides(for: item.id)
+        // 프리셋 항목이면 프리셋의 값이 기본값 노릇을 한다.
         values = Dictionary(uniqueKeysWithValues: properties.map {
-            ($0.name, overrides[$0.name] ?? $0.defaultValue)
+            ($0.name, overrides[$0.name] ?? item.presetValues[$0.name] ?? $0.defaultValue)
         })
         propertiesTitle.stringValue = properties.isEmpty
             ? "\(item.title) — 이 배경화면은 조절할 것이 없다"
@@ -292,6 +293,16 @@ final class SettingsWindowController: NSWindowController {
             let note = NSTextField(wrappingLabelWithString: property.label)
             note.textColor = .secondaryLabelColor
             note.font = .systemFont(ofSize: 11)
+            row.addArrangedSubview(note)
+        case .texture:
+            // 파일 고르기는 아직 없다. 프리셋이 준 파일이면 그 이름을 보여 준다.
+            row.addArrangedSubview(label(property.label))
+            var name = "(기본 그림)"
+            if case .text(let path) = value, !path.isEmpty {
+                name = (path as NSString).lastPathComponent
+            }
+            let note = NSTextField(labelWithString: name)
+            note.textColor = .secondaryLabelColor
             row.addArrangedSubview(note)
         }
         return row

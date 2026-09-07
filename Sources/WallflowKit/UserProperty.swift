@@ -17,10 +17,14 @@ public struct UserProperty: Equatable, Sendable, Identifiable {
         case textInput
         /// 조절할 수 없는 설명글. 링크·안내가 여기 온다.
         case text
+        /// 사용자가 고른 그림·영상으로 레이어의 텍스처를 바꾼다(`scenetexture`).
+        /// 값은 파일 경로다. 창작마당 프리셋이 자기 `files/` 안의 파일을 준다.
+        case texture
 
         public static func == (lhs: Kind, rhs: Kind) -> Bool {
             switch (lhs, rhs) {
-            case (.toggle, .toggle), (.color, .color), (.textInput, .textInput), (.text, .text):
+            case (.toggle, .toggle), (.color, .color), (.textInput, .textInput), (.text, .text),
+                 (.texture, .texture):
                 return true
             case (.slider(let a, let b, let c), .slider(let d, let e, let f)):
                 return a == d && b == e && c == f
@@ -108,6 +112,9 @@ public struct UserProperty: Equatable, Sendable, Identifiable {
             case "text":
                 kind = .text
                 value = .text("")
+            case "scenetexture":
+                kind = .texture
+                value = .text(dict["value"] as? String ?? "")
             default:
                 // 파일·디렉터리 고르기 같은 것은 아직 안 한다. 조용히 빼지 않고
                 // 설명글로 남겨 "여기 뭔가 있었다"는 것은 보이게 한다.
@@ -219,6 +226,28 @@ public enum UserPropertyValue: Equatable, Sendable {
         case .number(let d): return JSValue(double: d, in: context)
         case .color(let c): return JSValue(object: "\(c.x) \(c.y) \(c.z)", in: context)
         case .text(let s): return JSValue(object: s, in: context)
+        }
+    }
+
+    /// 프리셋(`project.json`의 `preset`)이나 씬 JSON에 있는 날것을 속성 종류에 맞춰 읽는다.
+    /// 맞지 않는 값은 nil — 기본값이 남는다.
+    public static func parse(preset raw: Any, kind: UserProperty.Kind) -> UserPropertyValue? {
+        switch kind {
+        case .toggle:
+            guard let n = raw as? NSNumber else { return nil }
+            return .toggle(n.boolValue)
+        case .slider(let lo, let hi, _):
+            guard let n = raw as? NSNumber, !(raw is String), n.doubleValue.isFinite else { return nil }
+            return .number(Swift.min(Swift.max(n.doubleValue, lo), hi))
+        case .color:
+            guard let text = raw as? String, let color = Vec3.parse(text) else { return nil }
+            return .color(color)
+        case .combo, .textInput, .texture:
+            if let text = raw as? String { return .text(text) }
+            if let n = raw as? NSNumber { return .text("\(n)") }
+            return nil
+        case .text:
+            return nil
         }
     }
 

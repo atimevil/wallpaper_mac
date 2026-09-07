@@ -620,9 +620,16 @@ final class WorkshopWindowController: NSWindowController {
                         String(line.prefix(70))
                 }
             }
+            let installer = self?.installer
             let result: Result<Void, Error> = await Task.detached(priority: .utility) {
                 do {
-                    try steam.download(workshopID: item.id, login: account, progress: report)
+                    let folder = try steam.download(workshopID: item.id, login: account, progress: report)
+                    // 프리셋 항목은 알맹이가 다른 항목에 있다. 같이 받아야 열린다.
+                    if let dependency = Self.dependencyID(inProjectAt: folder),
+                       installer.map({ !$0.isInstalled(id: dependency) }) ?? true {
+                        report("Downloading dependency \(dependency) ...")
+                        try steam.download(workshopID: dependency, login: account, progress: report)
+                    }
                     return .success(())
                 } catch {
                     return .failure(error)
@@ -653,6 +660,15 @@ final class WorkshopWindowController: NSWindowController {
                 }
             }
         }
+    }
+
+    /// 받은 폴더의 project.json이 다른 항목에 딸린 프리셋이면 그 번호.
+    nonisolated static func dependencyID(inProjectAt folder: URL) -> String? {
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent("project.json")),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let dependency = json["dependency"] as? String,
+              !dependency.isEmpty, dependency.allSatisfy(\.isNumber) else { return nil }
+        return dependency
     }
 
     /// 자격 증명은 이 앱이 만지지 않는다. 사용자가 터미널에서 한 번 로그인해야 한다.

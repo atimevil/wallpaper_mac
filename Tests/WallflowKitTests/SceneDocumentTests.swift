@@ -682,31 +682,38 @@ extension SceneDocumentTests {
 
 extension SceneDocumentTests {
     /// 그룹의 투명도는 자식에게 곱해진다.
-    /// 실물 음악 재생기 UI가 부모 alpha 0으로 숨는데, 전파하지 않으면
-    /// 흰 막대가 배경화면에 그대로 남는다.
-    func testParentAlphaPropagatesToChildren() throws {
+    /// 투명도는 부모에게서 물려받지 **않는다.** 실물 픽셀 씬이 alpha 0인 solidlayer를
+    /// 닻으로 삼아 글자를 매다는데, 미리보기에는 그 글자가 다 보인다. 곱하면 패널이 빈다.
+    func testParentAlphaDoesNotPropagateToChildren() throws {
         let reader = try makeScenePkg(scene: """
         {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
          "objects": [
-           {"id": 1, "name": "그룹", "origin": "0 0 0", "size": "10 10", "alpha": 0},
-           {"id": 2, "name": "자식", "parent": 1, "origin": "0 0 0", "size": "10 10"}]}
+           {"id": 1, "name": "닻", "origin": "0 0 0", "size": "10 10", "alpha": 0},
+           {"id": 2, "name": "자식", "parent": 1, "origin": "0 0 0", "size": "10 10"},
+           {"id": 3, "name": "반투명 자식", "parent": 1, "origin": "0 0 0", "size": "10 10", "alpha": 0.5}]}
         """)
         let doc = try SceneDocument.load(from: reader, assets: nil)
         let child = try XCTUnwrap(doc.layers.first { $0.name == "자식" })
-        XCTAssertEqual(child.alpha, 0, "부모의 투명도가 자식에게 곱해져야 한다")
+        XCTAssertEqual(child.alpha, 1, "부모의 투명도는 자식에게 곱해지지 않는다")
+        let half = try XCTUnwrap(doc.layers.first { $0.name == "반투명 자식" })
+        XCTAssertEqual(half.alpha, 0.5, accuracy: 0.001)
+        let anchor = try XCTUnwrap(doc.layers.first { $0.name == "닻" })
+        XCTAssertEqual(anchor.alpha, 0)
     }
 
-    /// 반투명끼리는 곱해진다.
-    func testParentAlphaMultiplies() throws {
+    /// 자체 보임은 따로 남는다. 스크립트가 부모를 숨길 때 렌더러가 다시 합치는 재료다.
+    func testLocalVisibleIsKeptSeparately() throws {
         let reader = try makeScenePkg(scene: """
         {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
          "objects": [
-           {"id": 1, "name": "그룹", "origin": "0 0 0", "size": "10 10", "alpha": 0.5},
-           {"id": 2, "name": "자식", "parent": 1, "origin": "0 0 0", "size": "10 10", "alpha": 0.5}]}
+           {"id": 1, "name": "창", "origin": "0 0 0", "size": "10 10", "visible": false},
+           {"id": 2, "name": "글", "parent": 1, "origin": "0 0 0", "size": "10 10"}]}
         """)
         let doc = try SceneDocument.load(from: reader, assets: nil)
-        let child = try XCTUnwrap(doc.layers.first { $0.name == "자식" })
-        XCTAssertEqual(child.alpha, 0.25, accuracy: 0.001)
+        let child = try XCTUnwrap(doc.layers.first { $0.name == "글" })
+        XCTAssertFalse(child.visible)
+        XCTAssertTrue(child.localVisible)
+        XCTAssertEqual(child.parentID, 1)
     }
 
     /// 부모가 숨겨져 있으면 자식도 숨는다.
@@ -1081,5 +1088,35 @@ extension SceneDocumentTests {
             scene: #"{"general": {"orthogonalprojection": {"width": 1, "height": 1}}, "objects": []}"#))
         XCTAssertEqual(plain.ambientColor, Vec3(x: 0.302, y: 0.302, z: 0.302))
         XCTAssertEqual(plain.skylightColor, Vec3(x: 1, y: 1, z: 1))
+    }
+
+    /// `alignment`가 있으면 origin은 닻이다. 실물 픽셀 씬의 창들이 `topleft`·`left`다.
+    /// 자식의 origin은 닻 기준 그대로라 부모의 닻 거리는 자식에게 더해지지 않는다.
+    func testAlignmentAnchorsTheDrawnCenter() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 1000, "height": 1000}},
+         "objects": [
+           {"id": 1, "name": "창", "image": "models/solid.json", "origin": "0 900 0", "size": "600 40", "alignment": "topleft"},
+           {"id": 2, "name": "배경", "image": "models/solid.json", "parent": 1, "origin": "3 -100 0", "size": "594 200", "alignment": "left"},
+           {"id": 3, "name": "글", "image": "models/solid.json", "parent": 1, "origin": "300 -60 0", "size": "10 10"},
+           {"id": 4, "name": "보통", "image": "models/solid.json", "origin": "50 50 0", "size": "20 20", "alignment": "center"},
+           {"id": 5, "name": "오른아래", "image": "models/solid.json", "origin": "100 100 0", "size": "20 40", "alignment": "bottomright"}]}
+        """, extras: [
+            "models/solid.json": #"{"material": "materials/solid.json"}"#,
+            "materials/solid.json": #"{"passes": [{"shader": "flat"}]}"#,
+        ])
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        func layer(_ name: String) throws -> SceneLayer {
+            try XCTUnwrap(doc.layers.first { $0.name == name })
+        }
+        // 왼쪽 위 모서리가 (0, 900)이니 중심은 (300, 880)이다.
+        XCTAssertEqual(try layer("창").origin, Vec3(x: 300, y: 880, z: 0))
+        XCTAssertEqual(try layer("창").anchorOffset, Vec2(x: 300, y: -20))
+        XCTAssertEqual(try layer("창").localOrigin, Vec3(x: 0, y: 900, z: 0))
+        // 자식은 부모의 닻(0, 900) 기준이다. 자기 닻이 left라 중심은 오른쪽으로 반 칸.
+        XCTAssertEqual(try layer("배경").origin, Vec3(x: 3 + 297, y: 800, z: 0))
+        XCTAssertEqual(try layer("글").origin, Vec3(x: 300, y: 840, z: 0))
+        XCTAssertEqual(try layer("보통").origin, Vec3(x: 50, y: 50, z: 0))
+        XCTAssertEqual(try layer("오른아래").origin, Vec3(x: 90, y: 120, z: 0))
     }
 }

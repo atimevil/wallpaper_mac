@@ -92,9 +92,14 @@ public struct SceneDocument: Sendable {
         return candidates.first ?? "scene.json"
     }
 
+    /// - Parameters:
+    ///   - userOverrides: 사용자 속성 값. 씬 JSON의 `{"user": 이름, "value": …}` 자리를 덮는다.
+    ///   - userTextures: 텍스처 사용자 속성 이름 → 절대 파일 경로. 재질의 `usertextures`
+    ///     슬롯이 이것을 가리키면 그 레이어는 그 파일을 그린다(실물 프리셋의 사용자 그림).
     public static func load(
         from reader: PkgReader, assets: AssetsStore?,
-        userOverrides: [String: UserPropertyValue] = [:]
+        userOverrides: [String: UserPropertyValue] = [:],
+        userTextures: [String: String] = [:]
     ) throws -> SceneDocument {
         let raw = try reader.data(for: Self.sceneEntryName(in: reader))
         guard let parsed = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] else {
@@ -155,7 +160,8 @@ public struct SceneDocument: Sendable {
             let id = object["id"] as? Int ?? index
             let layer = makeLayer(isPerspective: camera != nil, object, fallbackID: index, resolver: resolver,
                                   transform: transforms[id] ?? .identity,
-                                  canvas: Vec2(x: Double(width), y: Double(height)))
+                                  canvas: Vec2(x: Double(width), y: Double(height)),
+                                  userTextures: userTextures)
             // 스크립트는 레이어가 숨어 있어도 붙인다. 실물 원근 씬의 카메라·프리즘
             // 로직이 보이지 않는 레이어의 `visible` 스크립트에 산다.
             return layer.attachingScripts(
@@ -164,7 +170,8 @@ public struct SceneDocument: Sendable {
                     ?? Vec3(x: 0, y: 0, z: 0),
                 localScale: scalarOrScripted(object["scale"]).flatMap(Vec3.parse)
                     ?? Vec3(x: 1, y: 1, z: 1),
-                parentID: object["parent"] as? Int)
+                parentID: object["parent"] as? Int,
+                localVisible: boolValue(object["visible"]) ?? true)
         }
         let layers = applyingParticleBudget(rawLayers)
         let scriptModules = loadScriptModules(objects: objects, resolver: resolver)
@@ -359,9 +366,12 @@ public struct SceneDocument: Sendable {
                     y: parent.scale.y * child.scale.y,
                     z: parent.scale.z * child.scale.z),
                 rotation: parent.rotation + child.rotation,
-                // 그룹의 투명도는 자식에게 곱해진다. 전파하지 않으면 숨겨진 음악
-                // 재생기 UI가 흰 막대로 화면에 남는다(실물에서 확인).
-                alpha: parent.alpha * child.alpha,
+                // **투명도는 부모에게서 물려받지 않는다.** 실물 픽셀 씬이 alpha 0인
+                // `solidlayer`를 닻으로 삼아 글자·달력 숫자를 그 밑에 매다는데,
+                // 곱해 버리면 그 패널이 전부 빈 채로 남는다(미리보기에는 다 보인다).
+                // 한때 곱했던 근거였던 음악 재생기 UI는 자식마다 자기 스크립트로 숨는다.
+                // 보임은 물려받는다 — 창을 숨기면 그 안의 글자도 사라진다.
+                alpha: child.alpha,
                 visible: parent.visible && child.visible)
         }
 
@@ -398,7 +408,8 @@ public struct SceneDocument: Sendable {
     private static func makeLayer(
         isPerspective: Bool = false,
         _ object: [String: Any], fallbackID: Int, resolver: ReferenceResolver,
-        transform: LayerTransform, canvas: Vec2
+        transform: LayerTransform, canvas: Vec2,
+        userTextures: [String: String] = [:]
     ) -> SceneLayer {
         let id = object["id"] as? Int ?? fallbackID
         let name = object["name"] as? String ?? "object\(fallbackID)"
@@ -615,7 +626,17 @@ public struct SceneDocument: Sendable {
         // 때문이다. 이제 이펙트를 걸 수 있으므로 그린다 — 걸지 못하면 렌더러가
         // 그 레이어를 원본으로 되돌린다.
 
-        let content = resolveContent(modelPath: modelPath, object: object, resolver: resolver)
+        let content = resolveContent(modelPath: modelPath, object: object, resolver: resolver,
+                                     userTextures: userTextures)
+        // `alignment`가 있으면 origin은 중심이 아니라 그 닻(모서리·변)이다. 실물 픽셀 씬의
+        // 창들이 `topleft`·`left`로 놓여 있어서, 중심으로 그리면 창이 반 칸씩 밀려
+        // 아래 창을 덮어야 할 배경이 절반만 덮는다. 자식의 origin은 닻 기준 그대로다.
+        let anchor = Self.anchorOffset(alignment: object["alignment"] as? String, size: size)
+        let cosR = cos(rotation), sinR = sin(rotation)
+        let drawOrigin = Vec3(
+            x: origin.x + anchor.x * cosR - anchor.y * sinR,
+            y: origin.y + anchor.x * sinR + anchor.y * cosR,
+            z: origin.z)
         // 퍼펫 워프. 모델 JSON이 메시를 가리키고 오브젝트가 애니메이션을 고른다.
         var puppet: PuppetSpec?
         if let puppetPath = resolver.json(for: modelPath)?["puppet"] as? String, !puppetPath.isEmpty {
@@ -623,11 +644,26 @@ public struct SceneDocument: Sendable {
         }
         return SceneLayer(
             id: id, name: name, visible: visible,
-            origin: origin, size: size,
+            origin: drawOrigin, size: size,
             content: content, unrunScripts: unrun, effects: effects, alpha: alpha, tint: tint,
             rotation: rotation, displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
-                colorBlendMode: blendMode, brightness: brightness, puppet: puppet
+                colorBlendMode: blendMode, brightness: brightness, puppet: puppet,
+                anchorOffset: anchor
         )
+    }
+
+    /// `alignment` 닻에서 그림 중심까지. 씬 좌표는 y가 위로 증가한다.
+    /// 값은 편집기의 아홉 자리다: center(기본)·left·right·top·bottom과 그 조합.
+    static func anchorOffset(alignment: String?, size: Vec2) -> Vec2 {
+        guard let alignment = alignment?.lowercased(), alignment != "center" else {
+            return Vec2(x: 0, y: 0)
+        }
+        var x = 0.0, y = 0.0
+        if alignment.contains("left") { x = size.x / 2 }
+        if alignment.contains("right") { x = -size.x / 2 }
+        if alignment.contains("top") { y = -size.y / 2 }
+        if alignment.contains("bottom") { y = size.y / 2 }
+        return Vec2(x: x, y: y)
     }
 
     /// Bool이거나 수(0/1)이거나, `{"value": ...}` 객체면 그 값.
@@ -698,7 +734,8 @@ public struct SceneDocument: Sendable {
             value: text["value"] as? String ?? "",
             fontPath: object["font"] as? String ?? "systemfont",
             // 실물 텍스트의 color는 이미 0~1이다. 파티클(0~255)과 다르니 나누지 마라.
-            color: (object["color"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 1, y: 1, z: 1),
+            // 사용자 속성에 묶인 색은 `{"user": …, "value": …}` 객체다.
+            color: scalarOrScripted(object["color"]).flatMap(Vec3.parse) ?? Vec3(x: 1, y: 1, z: 1),
             script: text["script"] as? String,
             scriptProperties: properties,
             // 실물에 left·center·right가 모두 나온다. 모르는 값은 가운데로 둔다.
@@ -857,7 +894,8 @@ public struct SceneDocument: Sendable {
 
     /// 머티리얼을 읽어 이 레이어가 무엇인지 판정한다.
     private static func resolveContent(
-        modelPath: String, object: [String: Any], resolver: ReferenceResolver
+        modelPath: String, object: [String: Any], resolver: ReferenceResolver,
+        userTextures: [String: String] = [:]
     ) -> LayerContent {
         guard let model = resolver.json(for: modelPath),
               let materialPath = model["material"] as? String,
@@ -868,6 +906,14 @@ public struct SceneDocument: Sendable {
         }
 
         let textures = pass["textures"] as? [Any]
+        // 재질이 슬롯마다 텍스처 사용자 속성을 걸어 둘 수 있다(`usertextures`).
+        // 사용자가(또는 프리셋이) 파일을 줬으면 첫 슬롯은 그 파일이다. 실물 프리셋의
+        // 사용자 그림 셋이 이 길로 들어온다.
+        if let userSlots = pass["usertextures"] as? [Any],
+           let property = userSlots.first as? String,
+           let file = userTextures[property], !file.isEmpty {
+            return .image(texturePath: ReferenceResolver.externalPrefix + file)
+        }
         // 셰이더 flat이면서 텍스처가 없을 때만 단색이다. 실물 solidlayer가 그 모양이다.
         // OR로 쓰면 flat + _rt_ 조합이 렌더 타깃 검사에 닿지 못하고 삼켜지고,
         // textures가 없는 다른 셰이더도 전부 단색이 되어버린다. 반드시 AND다.
@@ -881,7 +927,9 @@ public struct SceneDocument: Sendable {
                                 texturePath: name.isEmpty ? "" : "materials/\(name).tex")
         }
         if (pass["shader"] as? String) == "flat", textures == nil {
-            let color = (object["color"] as? String).flatMap(Vec3.parse)
+            // 색이 사용자 속성에 묶여 있으면 `{"user": …, "value": …}` 객체다. 문자열만
+            // 보면 값이 버려져 창이 흰 판이 된다 — 실물 픽셀 씬의 창 몸통이 그랬다.
+            let color = Self.scalarOrScripted(object["color"]).flatMap(Vec3.parse)
                 ?? Vec3(x: 1, y: 1, z: 1)
             return .solidColor(color)
         }

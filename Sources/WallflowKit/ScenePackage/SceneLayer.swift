@@ -371,6 +371,12 @@ public struct SceneLayer: Equatable, Sendable {
     public let puppet: PuppetSpec?
     /// 부모 오브젝트의 id. 스크립트의 `getChildren()`이 이걸로 자식을 찾는다.
     public let parentID: Int?
+    /// 오브젝트 자체의 보임. `visible`은 부모까지 합친 값이다. 스크립트가 부모를 숨기면
+    /// 렌더러가 이 값과 조상들의 값을 다시 합친다.
+    public let localVisible: Bool
+    /// `alignment`가 정한 닻에서 그림 중심까지의 거리(씬 단위, 배율 적용, 회전 전).
+    /// `origin`에는 이미 더해져 있다. 스크립트가 origin을 옮길 때 다시 더하려고 따로 둔다.
+    public let anchorOffset: Vec2
 
     public init(
         id: Int, name: String, visible: Bool, origin: Vec3, size: Vec2,
@@ -387,10 +393,14 @@ public struct SceneLayer: Equatable, Sendable {
         localOrigin: Vec3? = nil,
         localScale: Vec3? = nil,
         puppet: PuppetSpec? = nil,
-        parentID: Int? = nil
+        parentID: Int? = nil,
+        localVisible: Bool? = nil,
+        anchorOffset: Vec2 = Vec2(x: 0, y: 0)
     ) {
         self.puppet = puppet
         self.parentID = parentID
+        self.localVisible = localVisible ?? visible
+        self.anchorOffset = anchorOffset
         self.scripts = scripts
         self.angles = angles
         self.localOrigin = localOrigin ?? origin
@@ -422,13 +432,14 @@ public struct SceneLayer: Equatable, Sendable {
             scale: scale, parallaxDepth: parallaxDepth,
             colorBlendMode: colorBlendMode, brightness: brightness,
             scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
-            puppet: puppet, parentID: parentID)
+            puppet: puppet, parentID: parentID, localVisible: localVisible,
+            anchorOffset: anchorOffset)
     }
 
     /// 스크립트와 오브젝트 자체 변환을 붙인 사본. 나머지는 그대로다.
     public func attachingScripts(_ scripts: [LayerScript], angles: Vec3,
                                  localOrigin: Vec3, localScale: Vec3,
-                                 parentID: Int? = nil) -> SceneLayer {
+                                 parentID: Int? = nil, localVisible: Bool? = nil) -> SceneLayer {
         SceneLayer(
             id: id, name: name, visible: visible, origin: origin, size: size,
             content: content, unrunScripts: unrunScripts, effects: effects,
@@ -436,7 +447,8 @@ public struct SceneLayer: Equatable, Sendable {
             scale: scale, parallaxDepth: parallaxDepth,
             colorBlendMode: colorBlendMode, brightness: brightness,
             scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
-            puppet: puppet, parentID: parentID)
+            puppet: puppet, parentID: parentID, localVisible: localVisible,
+            anchorOffset: anchorOffset)
     }
 }
 

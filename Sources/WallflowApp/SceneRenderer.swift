@@ -52,6 +52,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var reportedSkipped = 0
     private var reportedDegraded = 0
     private var buildContext: BuildContext?
+    /// 레이어 id → 부모 id. 스크립트가 부모를 숨기면 자식도 숨긴다.
+    private var parentOf: [Int: Int] = [:]
     /// 레이어에 걸린 이펙트 체인들. 매 프레임 컴포지터보다 먼저 그린다.
     private var effectChains: [(chain: EffectChain, source: MTLTexture)] = []
     /// 이펙트가 쓰는 `g_Time`. 씬을 켠 뒤 흐른 시간이다.
@@ -125,6 +127,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var parentScale = Vec3(x: 1, y: 1, z: 1)
         /// 라디안.
         var parentRotation = 0.0
+        /// `alignment` 닻에서 그림 중심까지. 스크립트의 origin은 닻 자리다.
+        var anchorOffset = Vec2(x: 0, y: 0)
         var particleIndex: Int?
         var textIndex: Int?
         var soundIndex: Int?
@@ -141,7 +145,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             let sc = Vec3(x: parentScale.x * scale.x, y: parentScale.y * scale.y,
                           z: parentScale.z * scale.z)
             let a = Vec3(x: angles.x, y: angles.y, z: angles.z + parentRotation * 180 / .pi)
-            return (o, a, sc)
+            let total = a.z * .pi / 180
+            let ct = cos(total), st = sin(total)
+            let drawn = Vec3(x: o.x + anchorOffset.x * ct - anchorOffset.y * st,
+                             y: o.y + anchorOffset.x * st + anchorOffset.y * ct, z: o.z)
+            return (drawn, a, sc)
         }
     }
 
@@ -157,8 +165,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let rotation = layer.rotation - layer.angles.z * .pi / 180
         let sx = layer.localOrigin.x * scale.x, sy = layer.localOrigin.y * scale.y
         let c = cos(rotation), sn = sin(rotation)
-        let origin = Vec3(x: layer.origin.x - (sx * c - sy * sn),
-                          y: layer.origin.y - (sx * sn + sy * c),
+        // 합쳐진 origin에는 닻 거리가 더해져 있다. 빼고 되짚는다.
+        let ct = cos(layer.rotation), st = sin(layer.rotation)
+        let anchorX = layer.anchorOffset.x * ct - layer.anchorOffset.y * st
+        let anchorY = layer.anchorOffset.x * st + layer.anchorOffset.y * ct
+        let origin = Vec3(x: layer.origin.x - anchorX - (sx * c - sy * sn),
+                          y: layer.origin.y - anchorY - (sx * sn + sy * c),
                           z: layer.origin.z - layer.localOrigin.z * scale.z)
         return (origin, scale, rotation)
     }
@@ -266,6 +278,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 values[property.name] = property.defaultValue
             }
         }
+        // 프리셋 값이 기본값을 덮고, 사용자가 바꾼 값이 그 위에 온다.
+        for (name, value) in item.presetValues { values[name] = value }
         for (name, value) in propertyStore.overrides(for: item.id) { values[name] = value }
         return values
     }
@@ -478,7 +492,18 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         guard let compositor else { return }
         var changed = false
         for id in snapshot.order {
-            guard let state = snapshot.layers[id] else { continue }
+            guard var state = snapshot.layers[id] else { continue }
+            // 보임은 조상 사슬을 따라 합친다. 실물 픽셀 씬이 창 하나를 숨기면 그 안의
+            // 막대·테두리·글자가 전부 따라 사라져야 한다.
+            var ancestor = parentOf[id]
+            var hops = 0
+            while let current = ancestor, hops < 32, state.visible {
+                if let parentState = snapshot.layers[current], !parentState.visible {
+                    state.visible = false
+                }
+                ancestor = parentOf[current]
+                hops += 1
+            }
             if scriptTargets[id] == nil, id < 0, !unspawnable.contains(id) {
                 // 스크립트가 만든 레이어. 자산에서 레이어를 세워 목록 끝에 붙인다.
                 if let asset = state.asset, spawnLayer(id: id, asset: asset) {
@@ -490,7 +515,18 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             }
             guard appliedStates[id] != state else { continue }
             appliedStates[id] = state
-            if applyScriptState(state, to: id) { changed = true }
+            let applied = applyScriptState(state, to: id)
+            if Self.scriptDebug {
+                let composed = scriptTargets[id].map {
+                    $0.composed(origin: state.origin, angles: state.angles, scale: state.scale)
+                }
+                let line = "SCRIPTDBG \(id) \(state.name) vis=\(state.visible) a=\(state.alpha) "
+                    + "o=\(state.origin) world=\(composed.map { "\($0.origin) s=\($0.scale)" } ?? "-") "
+                    + "parent=\(scriptTargets[id].map { "\($0.parentOrigin) x\($0.parentScale)" } ?? "-") "
+                    + "t=\(state.text.map { String($0.prefix(16)) } ?? "-") applied=\(applied)\n"
+                FileHandle.standardError.write(Data(line.utf8))
+            }
+            if applied { changed = true }
         }
         if let camera = snapshot.camera { self.camera = camera }
         // 스크립트가 만든 레이어의 진단은 씬을 연 뒤에 생긴다. 그때그때 알린다.
@@ -682,6 +718,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 지금 듣고 있는 소리의 대역 크기. 앱 전체가 하나를 공유한다 —
     /// 화면이 여럿이어도 시스템 소리는 하나다.
     static var audioSource: AudioSpectrum?
+
+    /// 진단용: 스크립트가 바꾼 레이어 상태를 틱마다 stderr에 쓴다.
+    static let scriptDebug = ProcessInfo.processInfo.environment["WALLFLOW_SCRIPT_DEBUG"] != nil
 
     static var audioBands: [Int: (left: [Float], right: [Float])] {
         // 진단용: 스펙트럼을 고정값으로 채운다. 씬 자체 애니메이션과 섞이지 않아
@@ -1001,6 +1040,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             target.parentOrigin = parent.origin
             target.parentScale = parent.scale
             target.parentRotation = parent.rotation
+            target.anchorOffset = layer.anchorOffset
             switch layer.content {
             case .model, .particle: target.unitWorld = true
             default: break
@@ -1094,7 +1134,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 return
             }
             do {
-                let decoded = try TexDecoder.decode(raw)
+                // 사용자 그림(프리셋의 `files/`)은 .tex가 아니라 보통 파일이다.
+                let decoded = path.hasPrefix(ReferenceResolver.externalPrefix)
+                    ? try TexDecoder.decodeFile(raw) : try TexDecoder.decode(raw)
                 if case .video(let mp4) = decoded {
                     guard mp4.count <= Self.maxVideoPayloadBytes else {
                         skipped.append(
@@ -1333,9 +1375,18 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let assets = Self.defaultAssetsStore()
         // 사용자가 설정 창에서 바꾼 값을 얹는다. 씬을 읽을 때 한 번 얹히므로
         // 값이 바뀌면 배경화면을 다시 연다.
+        // 프리셋이 정한 값 위에 사용자가 바꾼 값을 얹는다. 텍스처 속성은 파일 경로다.
+        let overrides = Self.userPropertyValues(for: item)
+        var userTextures: [String: String] = [:]
+        if let data = try? Data(contentsOf: item.directory.appendingPathComponent("project.json")) {
+            for property in UserProperty.load(projectJSON: data) {
+                guard case .texture = property.kind,
+                      case .text(let path)? = overrides[property.name], !path.isEmpty else { continue }
+                userTextures[property.name] = path
+            }
+        }
         let document = try SceneDocument.load(
-            from: reader, assets: assets,
-            userOverrides: Self.propertyStore.overrides(for: item.id))
+            from: reader, assets: assets, userOverrides: overrides, userTextures: userTextures)
 
         let compositor = try MetalCompositor(device: device)
         compositor.setProjection(width: document.orthoWidth, height: document.orthoHeight)
@@ -1349,7 +1400,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             ))
         }
 
-        let resolver = ReferenceResolver(pkg: reader, assets: assets)
+        // 바깥 파일은 이 배경화면과 프리셋의 폴더 안에서만 읽는다.
+        let resolver = ReferenceResolver(
+            pkg: reader, assets: assets,
+            externalRoots: [item.directory] + (item.presetDirectory.map { [$0] } ?? []))
         // 셰이더가 `#include "common.h"` 하는 헤더들. pkg와 assets 양쪽에 있다.
         // 안 모으면 `ApplyBlending` 같은 공용 함수를 못 찾아 컴파일이 통째로 실패한다.
         let shaderIncludes = Self.collectShaderHeaders(reader: reader, assets: assets)
@@ -1463,6 +1517,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         // 씬의 스크립트를 한 컨텍스트에 올린다. **숨은 레이어도** 넣는다 — 실물
         // 원근 씬의 카메라·프리즘 로직이 거기 산다. 첫 틱은 여기서 바로 돌려
         // 첫 프레임부터 스크립트가 정한 자리에 그린다.
+        parentOf = [:]
+        for layer in document.layers {
+            if let parent = layer.parentID, parent != layer.id { parentOf[layer.id] = parent }
+        }
         let seeds = document.layers.map { layer -> SceneScriptHost.LayerSeed in
             var seed = SceneScriptHost.LayerSeed(layer)
             seed.materialScripts = materialScripts(of: layer.id)
@@ -1475,10 +1533,15 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 modules: document.scriptModules,
                 userProperties: Self.userPropertyValues(for: item))
             if let fatal = host.fatalFailure {
-                degraded.append("스크립트를 돌리지 못한다: \(fatal)")
+                // 진단 목록은 이미 찍혔다. 여기서 바로 알린다 — 조용히 묻히면
+                // 씬이 왜 안 움직이는지 알 길이 없다.
+                FileHandle.standardError.write(Data(
+                    "씬 \(item.title)의 스크립트를 돌리지 못한다: \(fatal)\n".utf8))
             } else {
                 scriptHost = host
                 lastScriptTick = CACurrentMediaTime()
+                FileHandle.standardError.write(Data(
+                    "씬 \(item.title)의 스크립트 \(host.unitCount)개를 올렸다\n".utf8))
                 apply(host.tick(frametime: 0))
             }
         }

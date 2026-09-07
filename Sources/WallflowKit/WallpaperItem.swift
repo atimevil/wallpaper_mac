@@ -24,8 +24,17 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
     /// 항목(다른 창작마당 항목에 딸린 프리셋)이 그렇게 사라져 있었다.
     public let unsupportedReason: String?
 
+    /// 프리셋 항목이면 그 알맹이인 창작마당 번호. 프리셋은 다른 배경화면의 설정 묶음이다.
+    public let dependencyID: String?
+    /// 프리셋이 정한 사용자 속성 값. 사용자가 설정 창에서 바꾼 값이 이 위에 얹힌다.
+    public let presetValues: [String: UserPropertyValue]
+    /// 프리셋 항목의 폴더. 프리셋이 든 그림·영상(`files/…`)이 여기 있다.
+    public let presetDirectory: URL?
+
     public init(id: String, title: String, type: WallpaperType, directory: URL,
-                contentURL: URL, previewURL: URL?, unsupportedReason: String? = nil) {
+                contentURL: URL, previewURL: URL?, unsupportedReason: String? = nil,
+                dependencyID: String? = nil, presetValues: [String: UserPropertyValue] = [:],
+                presetDirectory: URL? = nil) {
         self.id = id
         self.title = title
         self.type = type
@@ -33,6 +42,37 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
         self.contentURL = contentURL
         self.previewURL = previewURL
         self.unsupportedReason = unsupportedReason
+        self.dependencyID = dependencyID
+        self.presetValues = presetValues
+        self.presetDirectory = presetDirectory
+    }
+
+    /// 프리셋의 날것 값을 알맹이의 속성 종류에 맞춰 읽는다.
+    ///
+    /// 텍스처 속성의 값은 `files/x.gif`처럼 프리셋 폴더 기준 상대 경로다. 절대 경로로
+    /// 바꾸되 **프리셋 폴더 밖을 가리키면 버린다** — 창작마당 파일이 `../`로 남의
+    /// 파일을 읽게 두면 안 된다.
+    public static func presetValues(
+        from raw: [String: Any], properties: [UserProperty], presetDirectory: URL
+    ) -> [String: UserPropertyValue] {
+        let kinds = Dictionary(uniqueKeysWithValues: properties.map { ($0.name, $0.kind) })
+        var out: [String: UserPropertyValue] = [:]
+        let root = presetDirectory.standardizedFileURL.resolvingSymlinksInPath().path
+        for (name, value) in raw {
+            guard let kind = kinds[name], let parsed = UserPropertyValue.parse(preset: value, kind: kind)
+            else { continue }
+            if case .texture = kind, case .text(let relative) = parsed {
+                guard !relative.isEmpty else { continue }
+                let file = presetDirectory.appendingPathComponent(relative)
+                    .standardizedFileURL.resolvingSymlinksInPath()
+                guard file.path.hasPrefix(root + "/"),
+                      FileManager.default.fileExists(atPath: file.path) else { continue }
+                out[name] = .text(file.path)
+                continue
+            }
+            out[name] = parsed
+        }
+        return out
     }
 
     /// preview는 확장자가 제각각이라 알려진 이름을 순서대로 찾는다.
@@ -42,7 +82,8 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
 
     public static func load(from directory: URL) throws -> WallpaperItem {
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDir),
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: directory.path, isDirectory: &isDir),
               isDir.boolValue else {
             throw WallpaperError.notADirectory(directory)
         }
@@ -68,12 +109,33 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
                 contentURL: jsonURL, previewURL: preview, unsupportedReason: reason)
         }
 
-        // `dependency`는 다른 창작마당 항목에 딸린 프리셋이다. 알맹이가 그쪽에
-        // 있어서 이 폴더만으로는 열 수 없다.
+        // `dependency`는 다른 창작마당 항목에 딸린 프리셋이다. 알맹이(씬)는 그쪽에
+        // 있고, 이 폴더에는 속성 값(`preset`)과 프리셋이 든 파일(`files/`)만 있다.
+        // 알맹이가 옆 폴더에 받아져 있으면 그것을 이 프리셋의 값으로 연다.
         if let dependency = dict["dependency"] as? String, !dependency.isEmpty,
            dict["file"] == nil {
-            return unopenable(
-                "다른 창작마당 항목(\(dependency))에 딸린 프리셋이다. 그 항목도 받아야 한다")
+            guard dependency.allSatisfy(\.isNumber) else {
+                return unopenable("의존 항목 번호가 이상하다: \(dependency)")
+            }
+            let base = directory.resolvingSymlinksInPath().deletingLastPathComponent()
+                .appendingPathComponent(dependency)
+            guard fm.fileExists(atPath: base.appendingPathComponent("project.json").path),
+                  let core = try? load(from: base), core.unsupportedReason == nil else {
+                return WallpaperItem(
+                    id: id, title: title, type: .unsupported, directory: directory,
+                    contentURL: jsonURL, previewURL: preview,
+                    unsupportedReason: "다른 창작마당 항목(\(dependency))에 딸린 프리셋이다. 그 항목도 받아야 한다",
+                    dependencyID: dependency)
+            }
+            let properties = (try? Data(contentsOf: base.appendingPathComponent("project.json")))
+                .map(UserProperty.load(projectJSON:)) ?? []
+            let values = presetValues(
+                from: dict["preset"] as? [String: Any] ?? [:],
+                properties: properties, presetDirectory: directory)
+            return WallpaperItem(
+                id: id, title: title, type: core.type, directory: core.directory,
+                contentURL: core.contentURL, previewURL: preview ?? core.previewURL,
+                dependencyID: dependency, presetValues: values, presetDirectory: directory)
         }
         guard let type = try? WallpaperType.from(projectJSON: data) else {
             return unopenable("project.json에 type이 없다")

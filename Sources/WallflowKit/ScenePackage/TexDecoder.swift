@@ -7,6 +7,22 @@ import ImageIO
 /// 밉맵 체인이 있어도 0번(최대 해상도)만 쓴다. 화면을 채우는 것이 목적이라
 /// 축소본은 필요 없고, 메모리만 더 쓴다.
 public enum TexDecoder {
+    /// `.tex`가 아닌 보통 파일(png·jpg·gif·mp4). 프리셋이 든 사용자 그림이 이것이다.
+    ///
+    /// mp4는 `ftyp` 상자로 알아본다. 움직이는 gif는 첫 장만 쓴다 — 프레임 재생은
+    /// 아직 없다. 이름의 확장자는 믿지 않는다. 내용으로 가른다.
+    public static func decodeFile(_ data: Data) throws -> TextureData {
+        if data.count >= 12, data[data.startIndex + 4..<data.startIndex + 8] == Data("ftyp".utf8) {
+            return .video(data)
+        }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0,
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw TexError.imageDecodeFailed
+        }
+        return .image(image)
+    }
+
     public static func decode(_ data: Data) throws -> TextureData {
         let header = try TexHeader.parse(data)
         guard let mip = header.mipmaps.first else { throw TexError.noMipmaps }
