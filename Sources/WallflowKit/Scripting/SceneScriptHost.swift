@@ -68,6 +68,8 @@ public final class SceneScriptHost: @unchecked Sendable {
         public var scripts: [LayerScript]
         /// 이 레이어의 재질 상수 스크립트. 렌더러가 재질을 열어 본 뒤 채운다.
         public var materialScripts: [MaterialScript] = []
+        /// 글자 레이어의 글자 크기(씬 단위). `thisObject.pointsize`로 스크립트가 바꾼다.
+        public var pointSize: Double?
 
         public init(id: Int, name: String, origin: Vec3, angles: Vec3, scale: Vec3,
                     alpha: Double, visible: Bool, color: Vec3 = Vec3(x: 1, y: 1, z: 1),
@@ -93,8 +95,11 @@ public final class SceneScriptHost: @unchecked Sendable {
             var text: String?
             var playing: Bool?
             var volume: Double?
+            var pointSize: Double?
             switch layer.content {
-            case .text(let t): text = t.value
+            case .text(let t):
+                text = t.value
+                pointSize = t.wrapping.pointSize > 0 ? t.wrapping.pointSize : nil
             case .sound(let s):
                 playing = !s.startsSilent
                 volume = s.volume
@@ -104,6 +109,7 @@ public final class SceneScriptHost: @unchecked Sendable {
                       angles: layer.angles, scale: layer.localScale, alpha: layer.alpha,
                       visible: layer.visible, color: layer.tint, size: layer.size,
                       text: text, playing: playing, volume: volume, scripts: layer.scripts)
+            self.pointSize = pointSize
         }
     }
 
@@ -124,6 +130,8 @@ public final class SceneScriptHost: @unchecked Sendable {
         public var asset: String?
         /// 재질 상수 스크립트가 정한 값들. 키는 재질의 `constantshadervalues` 키다.
         public var material: [String: EffectConstant] = [:]
+        /// 글자 크기(씬 단위). 글자 레이어가 아니면 nil.
+        public var pointSize: Double?
     }
 
     public struct Snapshot: Equatable, Sendable {
@@ -279,6 +287,7 @@ public final class SceneScriptHost: @unchecked Sendable {
                 else if let v = Self.vec3(value) { material[key] = .vector([v.x, v.y, v.z]) }
             }
             state.material = material
+            state.pointSize = Self.number(raw["pt"]).map { Swift.max($0, 0) }
             layers[id] = state
             order.append(id)
         }
@@ -358,6 +367,7 @@ public final class SceneScriptHost: @unchecked Sendable {
         if let text = seed.text { fields["t"] = jsString(text) }
         if let playing = seed.playing { fields["p"] = playing ? "true" : "false" }
         if let volume = seed.volume { fields["vol"] = "\(finite(volume))" }
+        if let pointSize = seed.pointSize { fields["pt"] = "\(finite(pointSize))" }
         return "{" + fields.map { "\"\($0.key)\": \($0.value)" }.joined(separator: ", ") + "}"
     }
 
@@ -501,7 +511,7 @@ public final class SceneScriptHost: @unchecked Sendable {
             text: (typeof seed.t === 'string') ? seed.t : undefined,
             parallaxDepth: new Vec2(0, 0),
             isUserHidden: false,
-            pointsize: 1,
+            pointsize: (typeof seed.pt === 'number') ? seed.pt : undefined,
             instance: {},
             __playing: (typeof seed.p === 'boolean') ? seed.p : undefined,
             volume: (typeof seed.vol === 'number') ? seed.vol : undefined,
@@ -717,6 +727,7 @@ public final class SceneScriptHost: @unchecked Sendable {
             if (typeof L.text === 'string') { entry.t = L.text; }
             if (typeof L.__playing === 'boolean') { entry.p = L.__playing; }
             if (typeof L.volume === 'number') { entry.vol = L.volume; }
+            if (typeof L.pointsize === 'number') { entry.pt = L.pointsize; }
             if (typeof L.__asset === 'string') { entry.asset = L.__asset; }
             if (L.__material) {
                 var m = {};

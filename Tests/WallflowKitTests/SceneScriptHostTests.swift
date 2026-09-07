@@ -360,6 +360,23 @@ final class SceneScriptHostTests: XCTestCase {
         XCTAssertFalse(host.wantsAudio)
     }
 
+    /// `thisObject.pointsize`: 실물 시계가 `text_size` 사용자 속성으로 글자 크기를 정한다.
+    func testPointSizeScriptChangesPointSize() {
+        let source = """
+        let size = 1;
+        export function applyUserProperties(p) {
+            if (p.text_size !== undefined) { size = p.text_size; thisObject.pointsize = size * 0.5; }
+        }
+        """
+        var seed = SceneScriptHost.LayerSeed(
+            id: 1, name: "clock", origin: Vec3(x: 0, y: 0, z: 0), angles: Vec3(x: 0, y: 0, z: 0),
+            scale: Vec3(x: 1, y: 1, z: 1), alpha: 1, visible: true, text: "12:00",
+            scripts: [LayerScript(property: "text", source: source)])
+        seed.pointSize = 35
+        let host = SceneScriptHost(layers: [seed], camera: nil, userProperties: ["text_size": .number(50)])
+        XCTAssertEqual(host.tick(frametime: 0).layers[1]?.pointSize, 25)
+    }
+
     /// 모듈 import가 스크립트 범위 안에서 풀린다.
     func testModuleImportInsideUnit() {
         let host = SceneScriptHost(layers: [

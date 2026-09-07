@@ -1066,4 +1066,20 @@ extension SceneDocumentTests {
             return XCTFail("노멀맵이 없으면 그려야 한다: \(layer.content)")
         }
     }
+
+    /// `general.ambientcolor`·`skylightcolor`를 읽는다. 없으면 편집기 예제 값이다.
+    func testAmbientAndSkylightColorsAreRead() throws {
+        let json = """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 50},
+                     "ambientcolor": "0.1 0.2 0.3", "skylightcolor": "0.5 0.5 0.5"},
+         "objects": []}
+        """
+        let doc = try SceneDocument.load(from: try makeScenePkg(scene: json))
+        XCTAssertEqual(doc.ambientColor, Vec3(x: 0.1, y: 0.2, z: 0.3))
+        XCTAssertEqual(doc.skylightColor, Vec3(x: 0.5, y: 0.5, z: 0.5))
+        let plain = try SceneDocument.load(from: try makeScenePkg(
+            scene: #"{"general": {"orthogonalprojection": {"width": 1, "height": 1}}, "objects": []}"#))
+        XCTAssertEqual(plain.ambientColor, Vec3(x: 0.302, y: 0.302, z: 0.302))
+        XCTAssertEqual(plain.skylightColor, Vec3(x: 1, y: 1, z: 1))
+    }
 }

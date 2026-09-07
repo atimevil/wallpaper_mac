@@ -26,6 +26,10 @@ public struct SceneDocument: Sendable {
     public let camera: SceneCamera?
     public var isPerspective: Bool { camera != nil }
     public let clearEnabled: Bool
+    /// `general.ambientcolor`·`skylightcolor`. 메시 셰이더의 `g_LightAmbientColor`·
+    /// `g_LightSkylightColor`가 된다. 없으면 편집기 예제 씬의 값(0.302, 1)을 쓴다.
+    public let ambientColor: Vec3
+    public let skylightColor: Vec3
     public let layers: [SceneLayer]
     /// 마우스를 따라 레이어를 조금씩 미는 정도. 0이면 끈 것이다.
     ///
@@ -133,6 +137,10 @@ public struct SceneDocument: Sendable {
         let clearColor = (general["clearcolor"] as? String).flatMap(Vec3.parse)
             ?? Vec3(x: 0, y: 0, z: 0)
         let clearEnabled = general["clearenabled"] as? Bool ?? true
+        let ambientColor = (general["ambientcolor"] as? String).flatMap(Vec3.parse)
+            ?? Vec3(x: 0.302, y: 0.302, z: 0.302)
+        let skylightColor = (general["skylightcolor"] as? String).flatMap(Vec3.parse)
+            ?? Vec3(x: 1, y: 1, z: 1)
 
         let resolver = ReferenceResolver(pkg: reader, assets: assets)
 
@@ -166,6 +174,7 @@ public struct SceneDocument: Sendable {
         return SceneDocument(
             orthoWidth: width, orthoHeight: height,
             clearColor: clearColor, camera: camera, clearEnabled: clearEnabled,
+            ambientColor: ambientColor, skylightColor: skylightColor,
             layers: layers,
             scriptModules: scriptModules,
             parallaxAmount: parallaxOn && amount.isFinite ? Swift.min(Swift.max(amount, 0), 2) : 0

@@ -102,6 +102,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let canvas: Vec2
         /// 씬의 지운 색. 메시 셰이더의 반사 버퍼 자리에 들어간다.
         let clearColor: SIMD4<Float>
+        let ambient: SIMD3<Float>
+        let skylight: SIMD3<Float>
     }
 
     /// 스크립트 상태를 화면의 어디에 반영할지.
@@ -113,9 +115,49 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var brightness: Float
         /// 메시·파티클은 자기 좌표가 이미 세계 단위라 크기를 곱하지 않는다.
         var unitWorld = false
+        /// 부모 사슬의 변환. 스크립트는 **부모 기준** 값을 쓰므로(`thisLayer.origin`은
+        /// 오브젝트 자체의 origin) 여기에 합쳐야 화면 자리가 된다. 실물 시계 위젯이
+        /// 그룹 안에 있어서, 이걸 빼먹으면 첫 틱에 위젯이 화면 구석으로 튄다.
+        var parentOrigin = Vec3(x: 0, y: 0, z: 0)
+        var parentScale = Vec3(x: 1, y: 1, z: 1)
+        /// 라디안.
+        var parentRotation = 0.0
         var particleIndex: Int?
         var textIndex: Int?
         var soundIndex: Int?
+
+        /// 스크립트가 준 부모 기준 값을 화면(씬) 값으로 합친다.
+        /// `SceneDocument.resolveTransforms`의 compose와 같은 식이다.
+        func composed(origin: Vec3, angles: Vec3, scale: Vec3)
+            -> (origin: Vec3, anglesDegrees: Vec3, scale: Vec3) {
+            let sx = origin.x * parentScale.x, sy = origin.y * parentScale.y
+            let c = cos(parentRotation), s = sin(parentRotation)
+            let o = Vec3(x: parentOrigin.x + sx * c - sy * s,
+                         y: parentOrigin.y + sx * s + sy * c,
+                         z: parentOrigin.z + origin.z * parentScale.z)
+            let sc = Vec3(x: parentScale.x * scale.x, y: parentScale.y * scale.y,
+                          z: parentScale.z * scale.z)
+            let a = Vec3(x: angles.x, y: angles.y, z: angles.z + parentRotation * 180 / .pi)
+            return (o, a, sc)
+        }
+    }
+
+    /// 레이어의 합쳐진 값과 자체 값에서 부모 사슬의 변환을 되짚는다.
+    private static func parentTransform(of layer: SceneLayer)
+        -> (origin: Vec3, scale: Vec3, rotation: Double) {
+        func ratio(_ composed: Double, _ local: Double) -> Double {
+            abs(local) > 1e-9 ? composed / local : 1
+        }
+        let scale = Vec3(x: ratio(layer.scale.x, layer.localScale.x),
+                         y: ratio(layer.scale.y, layer.localScale.y),
+                         z: ratio(layer.scale.z, layer.localScale.z))
+        let rotation = layer.rotation - layer.angles.z * .pi / 180
+        let sx = layer.localOrigin.x * scale.x, sy = layer.localOrigin.y * scale.y
+        let c = cos(rotation), sn = sin(rotation)
+        let origin = Vec3(x: layer.origin.x - (sx * c - sy * sn),
+                          y: layer.origin.y - (sx * sn + sy * c),
+                          z: layer.origin.z - layer.localOrigin.z * scale.z)
+        return (origin, scale, rotation)
     }
     /// 전력 정책이 재생을 멈췄는지.
     ///
@@ -160,7 +202,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let align: TextAlignment
         let verticalAlign: TextVerticalAlignment
         /// 상자의 중심. 정렬에 따라 실제 그리는 중심이 이것과 달라진다.
-        let boxCenter: SIMD2<Float>
+        var boxCenter: SIMD2<Float>
+        /// 스크립트가 `pointsize`를 바꾼 비율. 구운 글자 크기에 곱한다.
+        var pointScale: Float = 1
         var value: String
         var texture: MTLTexture?
         var size: SIMD2<Float> = .zero
@@ -353,6 +397,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 boxWidth: Double(state.box.x), boxHeight: Double(state.box.y))
             state.size = SIMD2(Float(fitted.width), Float(fitted.height))
         }
+        state.size *= state.pointScale
         // 스크립트가 만든 글자는 얼마든지 길어질 수 있다. 화면 몇 배를 넘으면
         // 그리기가 의미 없고 텍스처만 커지므로 거기서 죈다.
         let cap = ortho * 4
@@ -466,21 +511,34 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         guard let target = scriptTargets[id], let context = buildContext else { return false }
         var changed = false
         let alpha = state.visible ? Float(state.alpha) : 0
+        let world = target.composed(origin: state.origin, angles: state.angles, scale: state.scale)
         for index in target.indices where index < layerList.count {
             var quad = layerList[index].0
             quad.color = SIMD4(
                 Float(state.color.x) * target.brightness,
                 Float(state.color.y) * target.brightness,
                 Float(state.color.z) * target.brightness, alpha)
-            if context.isPerspective {
+            if let ti = target.textIndex, ti < texts.count {
+                // 글자는 구운 크기가 곧 판의 크기다. 자리는 정렬을 거친 origin이다.
+                let text = texts[ti]
+                if context.isPerspective {
+                    quad.world = Scene3D.world(
+                        origin: world.origin, anglesDegrees: world.anglesDegrees,
+                        scale: Vec3(x: 1, y: 1, z: 1),
+                        size: Vec2(x: Double(text.size.x), y: Double(text.size.y)))
+                } else {
+                    quad.origin = text.origin
+                    quad.size = text.size
+                }
+            } else if context.isPerspective {
                 quad.world = Scene3D.world(
-                    origin: state.origin, anglesDegrees: state.angles, scale: state.scale,
+                    origin: world.origin, anglesDegrees: world.anglesDegrees, scale: world.scale,
                     size: target.unitWorld ? Vec2(x: 1, y: 1) : target.baseSize)
-            } else if target.textIndex == nil {
-                quad.origin = SIMD2(Float(state.origin.x), Float(state.origin.y))
-                quad.size = SIMD2(Float(target.baseSize.x * state.scale.x),
-                                  Float(target.baseSize.y * state.scale.y))
-                quad.rotation = Float(state.angles.z * .pi / 180)
+            } else {
+                quad.origin = SIMD2(Float(world.origin.x), Float(world.origin.y))
+                quad.size = SIMD2(Float(target.baseSize.x * world.scale.x),
+                                  Float(target.baseSize.y * world.scale.y))
+                quad.rotation = Float(world.anglesDegrees.z * .pi / 180)
             }
             layerList[index].0 = quad
             if !state.material.isEmpty, case .model(let renderer) = layerList[index].1 {
@@ -490,19 +548,45 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         }
         if let ti = target.textIndex, ti < texts.count, let compositor {
             let text = texts[ti]
+            var dirty = false
             if let value = state.text, value != text.value {
                 text.value = value
+                dirty = true
+            }
+            // 스크립트가 origin을 옮기면(실물 `resizeScreen`) 상자 중심도 따라간다.
+            let center = SIMD2(Float(world.origin.x), Float(world.origin.y))
+            if !context.isPerspective, center != text.boxCenter {
+                text.boxCenter = center
+                dirty = true
+            }
+            // `thisObject.pointsize`는 글자 크기다. 저장된 크기와의 비율로 곱한다.
+            let authored = text.text.wrapping.pointSize
+            if let pointSize = state.pointSize, authored > 0 {
+                let scale = Float(pointSize / authored)
+                if abs(scale - text.pointScale) > 1e-4 {
+                    text.pointScale = scale
+                    dirty = true
+                }
+            }
+            if dirty {
                 rasterize(text, compositor: compositor)
                 // 글자 폭이 바뀌면 상자 안 자리도 바뀐다.
                 if let index = target.indices.first, index < layerList.count {
-                    layerList[index].0.origin = text.origin
-                    layerList[index].0.size = text.size
+                    if context.isPerspective {
+                        layerList[index].0.world = Scene3D.world(
+                            origin: world.origin, anglesDegrees: world.anglesDegrees,
+                            scale: Vec3(x: 1, y: 1, z: 1),
+                            size: Vec2(x: Double(text.size.x), y: Double(text.size.y)))
+                    } else {
+                        layerList[index].0.origin = text.origin
+                        layerList[index].0.size = text.size
+                    }
                 }
                 changed = true
             }
         }
         if let pi = target.particleIndex, pi < particles.count {
-            particles[pi].layerOrigin = SIMD2(Float(state.origin.x), Float(state.origin.y))
+            particles[pi].layerOrigin = SIMD2(Float(world.origin.x), Float(world.origin.y))
         }
         if let si = target.soundIndex, si < sounds.count {
             let entry = sounds[si]
@@ -882,6 +966,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                                y: layer.size.y / Swift.max(layer.scale.y, 1e-9)),
                 brightness: Float(layer.brightness))
             target.indices = Array(firstIndex..<layerList.count)
+            let parent = Self.parentTransform(of: layer)
+            target.parentOrigin = parent.origin
+            target.parentScale = parent.scale
+            target.parentRotation = parent.rotation
             switch layer.content {
             case .model, .particle: target.unitWorld = true
             default: break
@@ -1114,14 +1202,21 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             // 레이어 여덟 중 여섯이 글자다**(시계·요일·날짜) — 이미지 쪽만
             // 이어 두면 정작 필요한 곳에 안 걸린다.
             let textBrightness = Float(layer.brightness)
-            layerList.append((QuadInstance(
+            var textQuad = QuadInstance(
                 origin: state.origin, size: state.size,
                 color: SIMD4(textBrightness, textBrightness, textBrightness,
                              layer.visible ? Float(layer.alpha) : 0),
                 rotation: Float(layer.rotation),
                 parallaxDepth: Float(layer.parallaxDepth),
-                blendMode: Int32(layer.colorBlendMode)),
-                .dynamic { [weak state] in state?.texture }))
+                blendMode: Int32(layer.colorBlendMode))
+            if context.isPerspective {
+                // 원근 씬의 글자는 세계에 놓인 판이다. 구운 크기가 이미 씬 단위다.
+                textQuad.world = Scene3D.world(
+                    origin: layer.origin, anglesDegrees: layer.angles,
+                    scale: Vec3(x: 1, y: 1, z: 1),
+                    size: Vec2(x: Double(state.size.x), y: Double(state.size.y)))
+            }
+            layerList.append((textQuad, .dynamic { [weak state] in state?.texture }))
 
         case .shadedImage(let materialPath, _):
             // 재질의 셰이더가 그림을 만든다. 메시 렌더러에 단위 사각형을 준다 —
@@ -1137,7 +1232,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     makeTexture: { try context.compositor.makeTexture(from: $0) },
                     sampler: context.compositor.sharedSampler,
                     eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
-                        clearColor: context.clearColor)
+                        clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight)
                 // 판의 크기는 size × scale 세계 단위다(실물 배경 구름 64 × 10).
                 quad.world = Scene3D.world(
                     origin: layer.origin,
@@ -1172,7 +1267,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     makeTexture: { try context.compositor.makeTexture(from: $0) },
                     sampler: context.compositor.sharedSampler,
                     eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
-                        clearColor: context.clearColor)
+                        clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight)
                 quad.world = Scene3D.world(
                     origin: layer.origin,
                     anglesDegrees: Vec3(x: layer.angles.x, y: layer.angles.y, z: layer.rotation * 180 / .pi),
@@ -1234,7 +1329,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             clearColor: document.clearEnabled
                 ? SIMD4(Float(document.clearColor.x), Float(document.clearColor.y),
                         Float(document.clearColor.z), 1)
-                : SIMD4(0, 0, 0, 1))
+                : SIMD4(0, 0, 0, 1),
+            ambient: SIMD3(Float(document.ambientColor.x), Float(document.ambientColor.y),
+                           Float(document.ambientColor.z)),
+            skylight: SIMD3(Float(document.skylightColor.x), Float(document.skylightColor.y),
+                            Float(document.skylightColor.z)))
         buildContext = context
         layerList = []
         effectChains = []

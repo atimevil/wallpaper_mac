@@ -50,6 +50,9 @@ final class ModelRenderer {
     private let reflectionSlots: [Int]
     private let reflectionUsesFrame = ProcessInfo.processInfo.environment["WALLFLOW_REFLECTION"] == "frame"
     private let eyeProvider: () -> SIMD3<Float>
+    /// 씬의 `ambientcolor`·`skylightcolor`.
+    private let ambient: SIMD3<Float>
+    private let skylight: SIMD3<Float>
 
     var needsBackground: Bool { !backgroundSlots.isEmpty }
     func setBackground(_ texture: MTLTexture?) { background = texture }
@@ -64,8 +67,12 @@ final class ModelRenderer {
         resolver: ReferenceResolver, includes: [String: String],
         makeTexture: (TextureData) throws -> MTLTexture,
         sampler: MTLSamplerState, eye: @escaping () -> SIMD3<Float>,
-        clearColor: SIMD4<Float> = SIMD4(0, 0, 0, 1)
+        clearColor: SIMD4<Float> = SIMD4(0, 0, 0, 1),
+        ambient: SIMD3<Float> = SIMD3(repeating: 0.302),
+        skylight: SIMD3<Float> = SIMD3(repeating: 1)
     ) throws {
+        self.ambient = ambient
+        self.skylight = skylight
         // 재질 셰이더는 텍스처가 **반복**된다고 본다. 실물 `ps2menu`가 `0.3/r`로
         // 0~1 밖을 읽어 터널을 만든다. 이미지 쿼드의 샘플러는 가장자리 고정이라
         // (씬이 `clampuvs`를 켠다) 그걸 그대로 쓰면 화면이 사분면으로 갈라진다.
@@ -292,9 +299,8 @@ final class ModelRenderer {
             "g_EyePosition": [eye.x, eye.y, eye.z],
             // 조명 레이어는 아직 없다. 원점의 빛 넷 — 실물 씬도 빛 레이어가 없다.
             "g_LightsPosition": [Float](repeating: 0, count: 12),
-            // 씬의 ambientcolor. 실물 원근 씬이 0.302다. 아직 문서에서 읽지 않는다.
-            "g_LightAmbientColor": [0.302, 0.302, 0.302],
-            "g_LightSkylightColor": [1, 1, 1],
+            "g_LightAmbientColor": [ambient.x, ambient.y, ambient.z],
+            "g_LightSkylightColor": [skylight.x, skylight.y, skylight.z],
             "g_Time": [time],
             "g_Frametime": [1.0 / 60.0],
             "g_TexelSizeHalf": [0.5 / 1920, 0.5 / 1080],
