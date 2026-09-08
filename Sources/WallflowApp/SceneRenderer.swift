@@ -743,6 +743,33 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 화면이 여럿이어도 시스템 소리는 하나다.
     static var audioSource: AudioSpectrum?
 
+    /// 지금 소리를 필요로 하는 렌더러들. 화면이 여럿이면 하나라도 필요하면 듣는다.
+    private static var audioNeeders: Set<ObjectIdentifier> = []
+    /// 필요 여부가 바뀔 때 불린다. `AppCoordinator`가 캡처를 켜고 끈다.
+    ///
+    /// **소리를 쓰는 씬일 때만 켠다.** 예전에는 앱이 뜰 때 무조건 켰는데, 그러면
+    /// 오디오를 전혀 안 쓰는 배경화면에서도 macOS가 화면 녹화 권한을 묻는다
+    /// (시스템 오디오 캡처가 그 권한 아래 있다).
+    static var audioNeedChanged: ((Bool) -> Void)?
+
+    /// 이 씬이 오디오를 쓰는지. 이펙트 셰이더의 스펙트럼 유니폼이나
+    /// 스크립트의 `engine.registerAudioBuffers`가 근거다.
+    private func updateAudioNeed() {
+        let needed = effectChains.contains { $0.chain.usesAudio }
+            || compositionChains.values.contains { $0.usesAudio }
+            || (postEffects?.usesAudio ?? false)
+            || (scriptHost?.wantsAudio ?? false)
+        setAudioNeed(needed)
+    }
+
+    private func setAudioNeed(_ needed: Bool) {
+        let key = ObjectIdentifier(self)
+        let before = Self.audioNeeders.contains(key)
+        guard before != needed else { return }
+        if needed { Self.audioNeeders.insert(key) } else { Self.audioNeeders.remove(key) }
+        Self.audioNeedChanged?(!Self.audioNeeders.isEmpty)
+    }
+
     /// 진단용: 스크립트가 바꾼 레이어 상태를 틱마다 stderr에 쓴다.
     static let scriptDebug = ProcessInfo.processInfo.environment["WALLFLOW_SCRIPT_DEBUG"] != nil
 
@@ -807,6 +834,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 return nil
             }
             compositionChains[id] = chain
+            // 합성 체인은 첫 프레임에야 만들어진다. 오디오 비주얼라이저가 대개
+            // 이 꼴이라, 여기서 다시 판정해야 소리를 듣기 시작한다.
+            updateAudioNeed()
         }
         guard let chain = compositionChains[id] else { return nil }
         let now = CACurrentMediaTime()
@@ -840,6 +870,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     return try compositor.makeTexture(from: $0)
                 },
                 diagnostics: &ignored)
+            if postEffects != nil { updateAudioNeed() }
             if postEffects == nil {
                 // 한 번 실패하면 매 프레임 다시 시도하지 않는다.
                 postEffectSource = nil
@@ -1586,6 +1617,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         // 뷰의 재생 상태가 정해진 뒤에 소리를 맞춘다. 먼저 부르면 아직 정지
         // 상태로 보여 아무것도 재생되지 않는다.
         applySoundSetting()
+        updateAudioNeed()
     }
 
     func apply(_ directive: PlaybackDirective) {
@@ -1638,6 +1670,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         postEffectSource = nil
         compositionLayers = [:]
         compositionChains = [:]
+        // 이 씬이 더는 소리를 필요로 하지 않는다. 아무도 안 쓰면 캡처가 꺼진다.
+        setAudioNeed(false)
         view?.delegate = nil
     }
 }

@@ -31,6 +31,8 @@ final class EffectChain {
         let base: String
         /// 시간처럼 매 프레임 바뀌는 값이 있는지. 없으면 한 번만 그리면 된다.
         let isAnimated: Bool
+        /// 오디오 스펙트럼을 읽는지(`g_AudioSpectrum32Left` 같은 유니폼).
+        let usesAudio: Bool
     }
 
     /// 렌더 타깃 이름에 붙는 크기 접두사. `_rt_Quarter*`는 1/4 해상도다.
@@ -78,6 +80,11 @@ final class EffectChain {
     /// 매 프레임 다시 그려야 하는지. 시간이 안 들어가면 한 번으로 끝난다.
     let isAnimated: Bool
 
+    /// 이 체인의 어느 패스든 오디오 스펙트럼을 읽는지. **이것이 참일 때만** 앱이
+    /// 시스템 소리를 듣는다 — 안 그러면 소리를 안 쓰는 씬에서도 macOS가 화면 녹화
+    /// 권한을 묻는다.
+    let usesAudio: Bool
+
     /// 이 체인의 패스 수. 진단용이다.
     var passCount: Int { passes.count }
 
@@ -124,6 +131,7 @@ final class EffectChain {
         guard !compiled.isEmpty else { return nil }
         self.passes = compiled
         self.isAnimated = compiled.contains { $0.isAnimated }
+        self.usesAudio = compiled.contains { $0.usesAudio }
 
         guard let output = Self.makeTarget(device: device, width: width, height: height),
               let bufferA = Self.makeTarget(device: device, width: width, height: height),
@@ -410,7 +418,9 @@ final class EffectChain {
             sceneTextures: pass.textures,
             base: base,
             isAnimated: (vertex.uniforms + fragment.uniforms)
-                .contains { $0.name == "g_Time" || $0.name == "g_Frametime" })
+                .contains { $0.name == "g_Time" || $0.name == "g_Frametime" },
+            usesAudio: (vertex.uniforms + fragment.uniforms)
+                .contains { $0.name.hasPrefix("g_AudioSpectrum") })
     }
 
     private static func firstText(

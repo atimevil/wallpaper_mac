@@ -47,11 +47,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         power.start()
         self.power = power
 
-        // 지난번에 켜 뒀으면 이어서 듣는다. 껐으면 아무것도 하지 않는다.
-        if AudioSpectrum.isEnabled {
-            let source = AudioSpectrum()
-            SceneRenderer.audioSource = source
-            source.start()
+        // 소리는 **쓰는 씬을 걸었을 때만** 듣는다. 앱이 뜰 때 무조건 켜면 오디오를
+        // 안 쓰는 배경화면에서도 macOS가 화면 녹화 권한을 물어 "시스템 설정 열기"
+        // 창이 실행마다 뜬다. 렌더러가 씬을 읽고 필요 여부를 알려 준다.
+        SceneRenderer.audioNeedChanged = { [weak self] needed in
+            self?.audioNeeded = needed
+            self?.applyAudioCapture()
         }
 
         menuBar = MenuBarController(
@@ -101,15 +102,23 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     /// 소리 듣기는 앱 전체가 하나만 돈다. 화면이 여럿이어도 시스템 소리는 하나다.
     /// 메뉴와 설정 창이 같은 길을 쓴다.
     private func setAudioCapture(_ enabled: Bool) {
-        if enabled {
+        applyAudioCapture()
+        menuBar?.refreshStates()
+    }
+
+    /// 사용자가 켜 뒀고 **지금 걸린 씬이 소리를 쓸 때만** 듣는다.
+    private func applyAudioCapture() {
+        if AudioSpectrum.isEnabled, audioNeeded {
             let source = SceneRenderer.audioSource ?? AudioSpectrum()
             SceneRenderer.audioSource = source
             source.start()
         } else {
             SceneRenderer.audioSource?.stop()
         }
-        menuBar?.refreshStates()
     }
+
+    /// 지금 걸린 씬들이 소리를 필요로 하는지. 렌더러가 알려 준다.
+    private var audioNeeded = false
 
     private func showSettings() {
         if settings == nil {

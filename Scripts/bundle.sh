@@ -51,11 +51,16 @@ PLIST
 #   3. 만든 뒤 `WALLFLOW_SIGN_IDENTITY="Wallflow Dev" ./Scripts/bundle.sh`
 # 이름이 다르면 그 이름을 환경변수로 주면 된다. 없으면 예전처럼 ad-hoc이다.
 IDENTITY="${WALLFLOW_SIGN_IDENTITY:-Wallflow Dev}"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+# `-v`(유효한 것만)를 쓰지 않는다. 자체 서명 인증서는 신뢰 목록에 없어서 "유효"로
+# 세어지지 않지만, **서명에는 그대로 쓸 수 있다.** `-v`로 찾으면 인증서를 만들어
+# 두고도 계속 ad-hoc으로 서명해 권한이 매번 초기화된다.
+# 인증서가 없으면 `./Scripts/make-dev-cert.sh`로 한 번 만들면 된다.
+if security find-identity -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
     codesign --force --deep --sign "$IDENTITY" "$APP"
     echo "signed as: $IDENTITY (권한이 빌드마다 초기화되지 않는다)"
+    codesign -d -r- "$APP" 2>&1 | grep "^designated" || true
 else
     codesign --force --deep --sign - "$APP"
-    echo "signed ad-hoc (빌드마다 폴더 접근 권한을 다시 묻는다. 위 주석 참고)"
+    echo "signed ad-hoc (빌드마다 권한을 다시 묻는다. ./Scripts/make-dev-cert.sh 참고)"
 fi
 echo "built: $APP"
