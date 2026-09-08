@@ -4,3 +4,4 @@
 build/
 *.dmg
 .worktrees/
+__pycache__/
