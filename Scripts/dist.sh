@@ -40,7 +40,9 @@ echo "== 1. 릴리스 빌드 + 서명 (bundle.sh) =="
 # bundle.sh가 이미 서명 여부/신원을 알려 줬다. 여기서는 어떤 경로였는지만 다시 잰다
 # (공증 전에 자체 서명이면 건너뛰기 위해).
 IDENTITY="${WALLFLOW_SIGN_IDENTITY:-Wallflow Dev}"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+# `-v`를 쓰지 않는다. 자체 서명 인증서는 신뢰 목록에 없어 "유효"로 세어지지 않지만
+# 서명에는 쓰인다(bundle.sh의 같은 주석 참고).
+if security find-identity -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
     SIGNED_WITH="$IDENTITY"
 else
     SIGNED_WITH="-"
