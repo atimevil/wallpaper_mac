@@ -130,20 +130,29 @@ final class EffectChain {
 
         var compiled: [CompiledPass] = []
         for (effect, base) in zip(effects, effectBases) {
+            // 이 이펙트만의 패스를 따로 모은다 — `compiled`에 바로 이어붙이면
+            // 나중에 이 이펙트가 실패했을 때 앞서 이미 성공한 다른 이펙트의
+            // 패스까지 같이 지워야 해서 그 이펙트도 통째로 사라진다(실물
+            // shine+godrays+waterwaves 체인에서 waterwaves 하나가 안 되면
+            // shine·godrays까지 다 날아갔던 결함).
+            var effectPasses: [CompiledPass] = []
+            var effectFailed = false
             for pass in effect.passes {
                 do {
-                    compiled.append(try Self.compile(
+                    effectPasses.append(try Self.compile(
                         pass, base: base, device: device,
                         resolver: resolver, includes: includes))
                 } catch {
-                    // 한 패스가 안 되면 그 이펙트는 반쪽이 된다. 통째로 버린다 —
-                    // 절반만 적용한 그림은 원본보다 나쁘다.
+                    // 한 패스가 안 되면 그 이펙트는 반쪽이 된다. 이 이펙트만
+                    // 버린다 — 절반만 적용한 그림은 원본보다 나쁘지만, 다른
+                    // 이펙트까지 같이 버릴 이유는 없다.
                     diagnostics.append("\(effect.name): \(pass.shaderName) 컴파일 실패")
-                    compiled.removeAll()
+                    effectFailed = true
                     break
                 }
             }
-            if compiled.isEmpty { continue }
+            guard !effectFailed else { continue }
+            compiled.append(contentsOf: effectPasses)
         }
         guard !compiled.isEmpty else { return nil }
         self.passes = compiled
