@@ -375,6 +375,12 @@ public struct ParticleOverride: Equatable, Sendable {
 /// (T8에서 로프 지오메트리를 그릴 때 창작마당 전체를 다시 훑었다 —
 /// `magic_vortex_0.json`(유일하게 실제로 쓰는 ropetrail)도 `length`만 적고
 /// `segments`는 여전히 안 적는다. 기본값 1은 그대로 남긴다.)
+///
+/// `spriteTrail`의 `length`(0)·`maxLength`(무한대) 기본값은 확장된 코퍼스에서
+/// 나왔다(ParticleRenderKind.parse의 spritetrail 분기 주석 참고) — 창작마당
+/// 6개(Ember류 3곳, Sparks_cursor2_copy1, rain_on_the_glass_copy1)와 WE 번들
+/// `fireworks1hit`/`fireworks2hit`/`magic_vortex_1`이 둘 중 하나 또는 둘 다를
+/// 안 적는다.
 public enum ParticleRenderKind: Equatable, Sendable {
     case sprite
     /// `g_RenderVar0`(length, maxlength, minlength) 그대로.
@@ -414,11 +420,42 @@ public enum ParticleRenderKind: Equatable, Sendable {
             return .sprite
 
         case "spritetrail":
-            // length/maxlength는 실물이 항상 짝으로 적는다 — 없으면 그릴 수
-            // 없으니 아는 이름 + malformed로 남기고 sprite로 떨어진다.
-            guard let length = double("length"), let maxLength = double("maxlength")
+            // 확장된 실물 코퍼스(ember/ember_small/Sparks_cursor2_copy1, 그리고
+            // WE 번들 fireworks1hit/2hit.json·magic_vortex_1.json)를 보면
+            // length·maxlength 둘 다 안 적힌 것도, length만 있고 maxlength가
+            // 없는 것도 있다 — "항상 짝"이 아니었다.
+            //
+            // `ComputeParticleTrailTangents`(common_particles.h)의 식은
+            // `up = velocity정규화 * max(minlength, min(speed*length, maxlength))`다.
+            // length 없으면 속도로 안 늘어난다는 뜻(0), maxlength 없으면 위쪽을
+            // 안 막는다는 뜻(무한)으로 읽었다 — 여기까지는 기존 그대로.
+            //
+            // **minlength는 0이 기본이면 안 된다.** length·minlength가 둘 다
+            // 0이면 up이 완전히 0벡터가 되어 트레일 사각형이 그 축으로 찌그러져
+            // 아예 안 보인다 — fireworks1hit/2hit.json(속도 최대 1500)처럼
+            // 빠르게 움직이는 실물 프리셋이 그 조합이라, 0을 쓰면 폭죽이
+            // 터지는 순간 파티클이 투명해지는 꼴이 된다. 실물에서 명시적으로
+            // 적힌 minlength 값은 전부 1(rain_screen* 계열)이고, 1은 회전
+            // 기반 스프라이트의 기본 up 벡터 크기(단위 벡터, `ComputeParticleTangents`)와
+            // 같다 — "아무것도 안 적으면 보통 스프라이트만큼은 보인다"는
+            // 뜻으로 1을 기본값으로 삼았다.
+            //
+            // length·maxlength가 실제로 적힌 프리셋(rainperspective 등)은
+            // minlength 기본값이 1이어도 속도가 크면 clamp 위쪽(length*speed)이
+            // 1을 훌쩍 넘어 큰 영향이 없다 — 아주 느릴 때만 최소 1로 바닥이
+            // 깔린다.
+            //
+            // 있는데 숫자로 못 읽으면(문자열 쓰레기 등) malformed로 남긴다.
+            // 없거나 `null`이면(실물 dripping_water_droplets.json의
+            // `"minlength": null`) 기본값을 쓴다 — 없는 것과 같게 본다.
+            func trailField(_ key: String, default def: Double) -> Double? {
+                guard let raw = dict[key], !(raw is NSNull) else { return def }
+                return double(key)
+            }
+            guard let length = trailField("length", default: 0),
+                  let maxLength = trailField("maxlength", default: .infinity),
+                  let minLength = trailField("minlength", default: 1)
             else { malformedNames.insert(name); return .sprite }
-            let minLength = double("minlength") ?? 0
             return .spriteTrail(length: length, maxLength: maxLength, minLength: minLength)
 
         case "rope":
