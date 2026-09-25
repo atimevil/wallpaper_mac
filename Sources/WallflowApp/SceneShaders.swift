@@ -361,21 +361,39 @@ enum SceneShaders {
         float trailLength;
         float trailMaxLength;
         float trailMinLength;
+        // `orientation`/`axis`가 낸 빌보드 축(회전 전). sprite가 아니면 안
+        // 쓴다. Swift의 orientRightX/Y/Z·orientUpX/Y/Z와 같은 순서 — packed
+        // float3 대신 float 6개로 편 것도 그쪽과 맞춘 것이다.
+        float orientRightX;
+        float orientRightY;
+        float orientRightZ;
+        float orientUpX;
+        float orientUpY;
+        float orientUpZ;
         // 레이어의 세계 변환 × 카메라 뷰·투영. 파티클 좌표는 레이어 기준이다.
         float4x4 transform;
     };
 
     // common_particles.h의 ComputeParticleTangents를 옮긴 것.
-    // 회전 행렬 세 축을 곱해 빌보드의 right/up을 만든다.
-    static void particleTangents(float3 rotation, thread float3 &right, thread float3 &up) {
+    // 회전 행렬 세 축을 곱해 빌보드의 right/up을 만든다. 원문은 그 뒤
+    // `mRotation = mul(mRotation, mat3(g_OrientationRight, g_OrientationUp,
+    // g_OrientationForward))`를 한 번 더 곱하는데, forward 없이도 끝난다 —
+    // (A*B)의 0번째/1번째 열은 `A * B의 0번째/1번째 열`이라 orientRight·
+    // orientUp만 있으면 된다(WallflowKit의 `ParticleOrientationBasis` 문서
+    // 참고). orientRight/orientUp이 기본값 (1,0,0)/(0,1,0)이면 곱해도 자기
+    // 자신이라 이전 동작(orientation 무시) 그대로다.
+    static void particleTangents(
+        float3 rotation, float3 orientRight, float3 orientUp,
+        thread float3 &right, thread float3 &up
+    ) {
         float3 c = cos(rotation);
         float3 s = sin(rotation);
         float3x3 rz = float3x3(float3(c.z, -s.z, 0), float3(s.z, c.z, 0), float3(0, 0, 1));
         float3x3 rx = float3x3(float3(1, 0, 0), float3(0, c.x, -s.x), float3(0, s.x, c.x));
         float3x3 ry = float3x3(float3(c.y, 0, s.y), float3(0, 1, 0), float3(-s.y, 0, c.y));
         float3x3 m = rz * rx * ry;
-        right = m[0];
-        up = m[1];
+        right = m * orientRight;
+        up = m * orientUp;
     }
 
     // common_particles.h의 ComputeParticleTrailTangents를 옮긴 것.
@@ -431,7 +449,11 @@ enum SceneShaders {
                 u.trailMinLength, right, up);
         }
         if (!drewTrail) {
-            particleTangents(float3(p.rotation), right, up);
+            particleTangents(
+                float3(p.rotation),
+                float3(u.orientRightX, u.orientRightY, u.orientRightZ),
+                float3(u.orientUpX, u.orientUpY, u.orientUpZ),
+                right, up);
         }
 
         // ComputeParticlePosition 그대로.

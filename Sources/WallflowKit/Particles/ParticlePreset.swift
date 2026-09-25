@@ -128,6 +128,15 @@ public enum ParticleOperator: Equatable, Sendable {
     /// `rain_splashes_droplets`는 수명이 0.3~0.5초인데 `fadeouttime: 0.9`다 —
     /// 초로 읽으면 태어나기도 전에 사라져야 한다. 비율이 유일하게 말이 된다.
     case alphaFade(fadeInTime: Double, fadeOutTime: Double)
+    /// 수명에 따라 알파에 곱하는 값. `sizeChange`의 알파 판이다 — 실물 창작마당
+    /// 4곳(`matrix_trail_copy1.json`·`fireworks2stars.json`·`Rain_Splash_Drops_copy1.json`
+    /// 2곳)이 정확히 `sizeChange`와 같은 필드 이름(`starttime`/`endtime`/
+    /// `startvalue`/`endvalue`)을 쓴다. 기본값도 `sizeChange`와 같게 뒀다 —
+    /// 값은 처음 알파에 **곱한다**(1→0, 수명 내내 옅어지다 0). `alphaFade`와
+    /// 다르다: `alphaFade`는 나타남/사라짐의 **비율 구간**(fadeintime/
+    /// fadeouttime)을 적지만, 이건 `sizeChange`처럼 구간 안에서 시작값→끝값을
+    /// 그대로 잇는다.
+    case alphaChange(startTime: Double, endTime: Double, startValue: Double, endValue: Double)
     /// 수명에 따라 크기에 곱하는 값. 실물에서 세 번째로 많이 쓰는 연산자다(112곳).
     ///
     /// 값은 처음 크기에 **곱한다** — `startvalue: 2`로 적은 프리셋이 있어 절대
@@ -382,7 +391,13 @@ public struct ParticleOverride: Equatable, Sendable {
 /// `fireworks1hit`/`fireworks2hit`/`magic_vortex_1`이 둘 중 하나 또는 둘 다를
 /// 안 적는다.
 public enum ParticleRenderKind: Equatable, Sendable {
-    case sprite
+    /// `orientation`(기본 screen)·`axis` — `ParticleOrientationBasis` 참고.
+    case sprite(orientation: ParticleSpriteOrientation, axis: Vec3)
+    /// 안 적힌(또는 malformed로 떨어지는) 보통의 경우. `orientation: .screen,
+    /// axis: 0벡터`와 같다 — Swift enum case는 기본 인자를 못 받아 이 별칭으로
+    /// 대신한다.
+    public static let defaultSprite = ParticleRenderKind.sprite(
+        orientation: .screen, axis: Vec3(x: 0, y: 0, z: 0))
     /// `g_RenderVar0`(length, maxlength, minlength) 그대로.
     case spriteTrail(length: Double, maxLength: Double, minLength: Double)
     case rope(subdivision: Int, uvScale: Double, uvScrolling: Bool)
@@ -399,7 +414,7 @@ public enum ParticleRenderKind: Equatable, Sendable {
     ) -> ParticleRenderKind {
         guard let array = raw as? [Any], let dict = array.first as? [String: Any],
               let name = dict["name"] as? String
-        else { return .sprite }
+        else { return .defaultSprite }
 
         func double(_ key: String) -> Double? {
             if let d = dict[key] as? Double { return d.isFinite ? d : nil }
@@ -417,7 +432,14 @@ public enum ParticleRenderKind: Equatable, Sendable {
 
         switch name {
         case "sprite":
-            return .sprite
+            // 실물 `Rain_Splash_copy2.json`/`Rain_Splash_Drops_copy1.json`이
+            // orientation·axis를 같이 쓴다(`upright`/`fixed` + `axis:"0 0 1"`).
+            // axis가 없으면(대부분) 0벡터 — orientation이 screen이면 안 쓰고,
+            // fixed인데 0벡터면 ParticleOrientationBasis가 카메라 방향으로
+            // 대신한다.
+            let orientation = ParticleSpriteOrientation.parse(dict["orientation"])
+            let axis = (dict["axis"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 0, y: 0, z: 0)
+            return .sprite(orientation: orientation, axis: axis)
 
         case "spritetrail":
             // 확장된 실물 코퍼스(ember/ember_small/Sparks_cursor2_copy1, 그리고
@@ -455,7 +477,7 @@ public enum ParticleRenderKind: Equatable, Sendable {
             guard let length = trailField("length", default: 0),
                   let maxLength = trailField("maxlength", default: .infinity),
                   let minLength = trailField("minlength", default: 1)
-            else { malformedNames.insert(name); return .sprite }
+            else { malformedNames.insert(name); return .defaultSprite }
             return .spriteTrail(length: length, maxLength: maxLength, minLength: minLength)
 
         case "rope":
@@ -466,7 +488,7 @@ public enum ParticleRenderKind: Equatable, Sendable {
 
         case "ropetrail":
             guard let length = double("length") else {
-                malformedNames.insert(name); return .sprite
+                malformedNames.insert(name); return .defaultSprite
             }
             return .ropeTrail(
                 subdivision: int("subdivision", default: 0),
@@ -478,7 +500,7 @@ public enum ParticleRenderKind: Equatable, Sendable {
 
         default:
             unsupportedNames.insert(name)
-            return .sprite
+            return .defaultSprite
         }
     }
 }
@@ -679,7 +701,7 @@ public struct ParticlePreset: Equatable, Sendable {
         children: [ParticleChild] = [],
         controlPoints: [ParticleControlPoint] = [],
         instance: ParticleOverride = ParticleOverride(),
-        renderKind: ParticleRenderKind = .sprite
+        renderKind: ParticleRenderKind = .defaultSprite
     ) {
         self.renderKind = renderKind
         self.instance = instance
@@ -767,9 +789,9 @@ public struct ParticlePreset: Equatable, Sendable {
             "mapsequencearoundcontrolpoint"
         ])
         let knownOperatorNames = Set<String>([
-            "movement", "angularmovement", "alphafade", "sizechange", "colorchange",
-            "oscillateposition", "oscillatealpha", "oscillatesize", "turbulence",
-            "vortex", "vortex_v2", "remapvalue", "controlpointattract"
+            "movement", "angularmovement", "alphafade", "alphachange", "sizechange",
+            "colorchange", "oscillateposition", "oscillatealpha", "oscillatesize",
+            "turbulence", "vortex", "vortex_v2", "remapvalue", "controlpointattract"
         ])
 
         // Parse maxCount with clamping
@@ -1181,6 +1203,18 @@ public struct ParticlePreset: Equatable, Sendable {
             let fadeInTime = getDouble(dict["fadeintime"]) ?? 0
             let fadeOutTime = getDouble(dict["fadeouttime"]) ?? 1
             return .alphaFade(fadeInTime: fadeInTime, fadeOutTime: fadeOutTime)
+
+        case "alphachange":
+            // `sizechange`와 필드·기본값이 같다(실물 `matrix_trail_copy1.json`·
+            // `fireworks2stars.json`이 `starttime`/`endtime`/`startvalue`/
+            // `endvalue`를 그대로 쓴다). 맨 `alphachange`(실물
+            // `Rain_Splash_Drops_copy1.json` 2곳)는 `sizechange`와 같은 기본값
+            // (1→0, 수명 내내 옅어지다 0)을 쓴다.
+            return .alphaChange(
+                startTime: getDouble(dict["starttime"]) ?? 0,
+                endTime: getDouble(dict["endtime"]) ?? 1,
+                startValue: getDouble(dict["startvalue"]) ?? 1,
+                endValue: getDouble(dict["endvalue"]) ?? 0)
 
         case "sizechange":
             return .sizeChange(

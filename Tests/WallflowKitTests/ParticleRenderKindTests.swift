@@ -15,7 +15,7 @@ final class ParticleRenderKindTests: XCTestCase {
         {"material":"m.json","maxcount":10}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        XCTAssertEqual(p.renderKind, .sprite)
+        XCTAssertEqual(p.renderKind, .defaultSprite)
     }
 
     func testParsesExplicitSprite() throws {
@@ -25,7 +25,7 @@ final class ParticleRenderKindTests: XCTestCase {
          "renderer":[{"id":1,"name":"sprite"}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        XCTAssertEqual(p.renderKind, .sprite)
+        XCTAssertEqual(p.renderKind, .defaultSprite)
     }
 
     /// 실물 rain_screen_4k.json 그대로 — length/maxlength/minlength 세 필드가
@@ -111,7 +111,7 @@ final class ParticleRenderKindTests: XCTestCase {
          "renderer":[{"id":1,"length":"not a number","name":"spritetrail"}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        XCTAssertEqual(p.renderKind, .sprite)
+        XCTAssertEqual(p.renderKind, .defaultSprite)
         XCTAssertTrue(p.malformedNames.contains("spritetrail"))
     }
 
@@ -206,7 +206,7 @@ final class ParticleRenderKindTests: XCTestCase {
          "renderer":[{"id":1,"name":"ropetrail"}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        XCTAssertEqual(p.renderKind, .sprite)
+        XCTAssertEqual(p.renderKind, .defaultSprite)
         XCTAssertTrue(p.malformedNames.contains("ropetrail"))
     }
 
@@ -217,7 +217,7 @@ final class ParticleRenderKindTests: XCTestCase {
          "renderer":[{"id":1,"name":"beam"}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        XCTAssertEqual(p.renderKind, .sprite)
+        XCTAssertEqual(p.renderKind, .defaultSprite)
         XCTAssertTrue(p.unsupportedNames.contains("beam"))
     }
 }

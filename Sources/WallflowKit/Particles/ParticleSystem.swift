@@ -178,7 +178,7 @@ public final class ParticleSystem {
         }
         self.hasAlphaCurve = preset.operators.contains {
             switch $0 {
-            case .alphaFade, .oscillateAlpha: return true
+            case .alphaFade, .alphaChange, .oscillateAlpha: return true
             case .remapValue(let output, _, _, _, _): return output == .opacity
             default: return false
             }
@@ -819,6 +819,23 @@ public final class ParticleSystem {
                 factor = min(factor, (1 - progress) / (1 - fadeOutTime))
             }
             particle.alpha = max(0, min(1, particle.baseAlpha * factor))
+
+        case .alphaChange(let startTime, let endTime, let startValue, let endValue):
+            // `sizeChange`와 같은 식이다 — 알파 판이라고 보면 된다.
+            guard particle.lifetime > 0 else { return }
+            let progress = min(max(particle.age / particle.lifetime, 0), 1)
+            let factor: Double
+            if progress <= startTime {
+                factor = startValue
+            } else if progress >= endTime || endTime <= startTime {
+                factor = endValue
+            } else {
+                let t = (progress - startTime) / (endTime - startTime)
+                factor = startValue + (endValue - startValue) * t
+            }
+            // 겹쳐 곱한다 — `alphaFade`와 함께 쓰이면 둘 다 걸린다(`sizeChange`
+            // 둘을 겹쳐 쓰는 실물 fireworks2flare와 같은 관례).
+            particle.alpha = max(0, min(1, particle.alpha * factor))
 
         case .sizeChange(let startTime, let endTime, let startValue, let endValue):
             guard particle.lifetime > 0 else { return }
