@@ -45,10 +45,15 @@ final class ParticleRenderKindTests: XCTestCase {
         XCTAssertEqual(minLength, 1)
     }
 
-    /// 실물 exampleturbolence.json은 minlength가 없다 — 0으로 본다(clamp
-    /// 아래쪽이 없으면 속도 0에 가까울 때 트레일이 그냥 사라지는 쪽이,
-    /// 안 적힌 값을 지어내는 것보다 낫다).
-    func testSpriteTrailMissingMinLengthDefaultsToZero() throws {
+    /// 실물 exampleturbolence.json은 minlength가 없다 — 1로 본다. `up = velocity정규화
+    /// * max(minlength, min(speed*length, maxlength))`(common_particles.h)라
+    /// minlength가 0이면 length도 없는 프리셋(바로 아래 테스트)에서 up이
+    /// 완전히 0벡터가 되어 트레일이 그 축으로 찌그러져 안 보인다 — 1은
+    /// 회전 기반 스프라이트의 기본 up 벡터 크기(단위 벡터)와 같아 "아무것도
+    /// 안 적으면 최소 스프라이트만큼은 보인다"는 뜻이다. length·maxlength가
+    /// 큰 이 프리셋에서는 속도가 조금만 있어도 clamp 위쪽이 1을 넘어서므로
+    /// 영향이 없다.
+    func testSpriteTrailMissingMinLengthDefaultsToOne() throws {
         let json = try XCTUnwrap(preset("""
         {"material":"m.json","maxcount":10,
          "renderer":[{"id":1,"length":0.02,"maxlength":5,"name":"spritetrail"}]}
@@ -57,13 +62,16 @@ final class ParticleRenderKindTests: XCTestCase {
         guard case .spriteTrail(_, _, let minLength) = p.renderKind else {
             return XCTFail("spritetrail이어야 한다")
         }
-        XCTAssertEqual(minLength, 0)
+        XCTAssertEqual(minLength, 1)
     }
 
     /// 실물 WE 번들 fireworks1hit.json/fireworks2hit.json/magic_vortex_1.json
-    /// 그대로 — length/maxlength 둘 다 안 적는다. malformed가 아니다: length가
-    /// 없으면 속도로 안 늘어난다는 뜻(0)이라 sprite와 같은 모양으로 그려진다.
-    func testSpriteTrailMissingBothLengthFieldsDefaultsToNoStretch() throws {
+    /// 그대로 — length/maxlength/minlength 셋 다 안 적는다. malformed가
+    /// 아니다: length가 없으면 속도로 안 늘어난다는 뜻(0)이지만, minlength
+    /// 기본값이 1이라 up이 0벡터로 찌그러지지 않고 스프라이트만큼은 보인다
+    /// — fireworks1hit은 속도가 최대 1500까지 나오는데(emitter speedmax),
+    /// minlength가 0이면 폭죽이 터지는 순간 파티클이 투명해진다.
+    func testSpriteTrailMissingAllLengthFieldsStaysVisible() throws {
         let json = try XCTUnwrap(preset("""
         {"material":"m.json","maxcount":10,
          "renderer":[{"id":1,"name":"spritetrail"}]}
@@ -74,8 +82,37 @@ final class ParticleRenderKindTests: XCTestCase {
         }
         XCTAssertEqual(length, 0)
         XCTAssertEqual(maxLength, .infinity, "안 적으면 위쪽 clamp가 없다는 뜻")
-        XCTAssertEqual(minLength, 0)
+        XCTAssertEqual(minLength, 1, "0이면 빠른 폭죽 파티클이 투명해진다")
         XCTAssertTrue(p.malformedNames.isEmpty)
+    }
+
+    /// 실물 `dripping_water_droplets.json`은 minlength가 `null`이다 — 없는
+    /// 것과 같게 본다(malformed가 아니다).
+    func testSpriteTrailNullMinLengthDefaultsToOne() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "renderer":[{"id":13,"length":0.1,"maxlength":3,"minlength":null,
+                      "name":"spritetrail"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        guard case .spriteTrail(_, _, let minLength) = p.renderKind else {
+            return XCTFail("spritetrail이어야 한다")
+        }
+        XCTAssertEqual(minLength, 1)
+        XCTAssertTrue(p.malformedNames.isEmpty)
+    }
+
+    /// length가 숫자로 못 읽는 쓰레기 값이면(실물에는 없지만 방어적으로) 없는
+    /// 것과 다르게 malformed로 남긴다 — 파일이 있는데 깨진 것과 아예 안 적은
+    /// 것을 같은 취급으로 뭉개면 진짜 오류를 놓친다.
+    func testSpriteTrailGarbageLengthIsMalformed() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "renderer":[{"id":1,"length":"not a number","name":"spritetrail"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertEqual(p.renderKind, .sprite)
+        XCTAssertTrue(p.malformedNames.contains("spritetrail"))
     }
 
     /// 실물 `ember.json`/`ember_small.json` 그대로 — length만 있고 maxlength가
