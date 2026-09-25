@@ -59,6 +59,12 @@ public final class ParticleSystem {
     /// 방출할 때 파티클 위치에 더해진다.
     public var originOffset = Vec3(x: 0, y: 0, z: 0)
 
+    /// 이 시스템을 담은 레이어의 씬 좌표 원점·배율. `cursorPosition`처럼 렌더러가
+    /// 만들 때 한 번 넣어 준다 — 월드(화면) 좌표 제어점(플래그 2)을 이 시스템의
+    /// 로컬 좌표로 바꿀 때만 쓴다(파티클 좌표계 자체가 레이어 기준 상대 좌표라서다).
+    public var layerOrigin = Vec3(x: 0, y: 0, z: 0)
+    public var layerScale = Vec3(x: 1, y: 1, z: 1)
+
     /// 이 프리셋이 거느리는 자식들(정의).
     private let children: [ParticleChild]
     /// 정의마다 지금 살아 있는 자식 시스템들.
@@ -144,6 +150,16 @@ public final class ParticleSystem {
             if case .mapSequenceAroundControlPoint(let point, _, _, _, _, _, _) = initializer,
                Self.unresolvableControlPoint(point, in: preset) {
                 unimplemented.insert("mapsequencearoundcontrolpoint(제어점 \(point))")
+            }
+        }
+        for emitter in preset.emitters {
+            // 이미터가 못 푸는 제어점을 쓰면 뿌리는 자리는 원점으로 물러난다
+            // (emitParticle 참고) — 그 사실은 여기서 한 번만 남긴다.
+            guard let point = emitter.controlPoint, Self.unresolvableControlPoint(point, in: preset)
+            else { continue }
+            switch emitter {
+            case .sphereRandom: unimplemented.insert("sphererandom(제어점 \(point))")
+            case .boxRandom: unimplemented.insert("boxrandom(제어점 \(point))")
             }
         }
         self.unimplementedOperators = Array(unimplemented).sorted()
@@ -395,9 +411,9 @@ public final class ParticleSystem {
             // Accumulate emission credit
             let rate: Double
             switch emitter {
-            case .sphereRandom(let r, _, _, _, _, _):
+            case .sphereRandom(let r, _, _, _, _, _, _):
                 rate = r
-            case .boxRandom(let r, _, _, _, _, _):
+            case .boxRandom(let r, _, _, _, _, _, _):
                 rate = r
             }
 
@@ -454,9 +470,14 @@ public final class ParticleSystem {
             frameSeed: random.next()
         )
 
+        // 제어점 이미터는 그 제어점 자리에서 뿌린다(실물 `dripping_water`의 두
+        // 낙수 자리). 없으면(대부분) 지금처럼 이 시스템의 원점이다. 번호를 못
+        // 풀면 원점으로 물러난다 — 생성자가 이미 이름과 번호로 한 번 보고했다.
+        let base = emitter.controlPoint.flatMap { controlPointPosition($0) } ?? originOffset
+
         // Apply emitter position and velocity
         switch emitter {
-        case .sphereRandom(_, let origin, let directions, let distanceMin, let distanceMax, _):
+        case .sphereRandom(_, let origin, let directions, let distanceMin, let distanceMax, _, _):
             particle.position = origin
             // Random direction within cone
             let theta = random.next() * 2 * .pi
@@ -470,22 +491,22 @@ public final class ParticleSystem {
                 z: cos(phi) * directions.z
             )
             particle.position = Vec3(
-                x: originOffset.x + origin.x + unit.x * distance,
-                y: originOffset.y + origin.y + unit.y * distance,
-                z: originOffset.z + origin.z + unit.z * distance
+                x: base.x + origin.x + unit.x * distance,
+                y: base.y + origin.y + unit.y * distance,
+                z: base.z + origin.z + unit.z * distance
             )
             applyEmitterSpeed(emitter.burst, direction: unit, to: &particle)
 
-        case .boxRandom(_, let origin, let directions, let distanceMin, let distanceMax, _):
+        case .boxRandom(_, let origin, let directions, let distanceMin, let distanceMax, _, _):
             let offset = Vec3(
                 x: (distanceMin.x + random.next() * (distanceMax.x - distanceMin.x)) * directions.x,
                 y: (distanceMin.y + random.next() * (distanceMax.y - distanceMin.y)) * directions.y,
                 z: (distanceMin.z + random.next() * (distanceMax.z - distanceMin.z)) * directions.z
             )
             particle.position = Vec3(
-                x: originOffset.x + origin.x + offset.x,
-                y: originOffset.y + origin.y + offset.y,
-                z: originOffset.z + origin.z + offset.z
+                x: base.x + origin.x + offset.x,
+                y: base.y + origin.y + offset.y,
+                z: base.z + origin.z + offset.z
             )
             applyEmitterSpeed(emitter.burst, direction: offset, to: &particle)
         }
@@ -954,9 +975,34 @@ public final class ParticleSystem {
         }
         if point.hasUnknownBinding { return nil }
         let base = point.followsCursor ? (cursorPosition ?? originOffset) : originOffset
-        return Vec3(x: base.x + point.offset.x,
-                    y: base.y + point.offset.y,
-                    z: base.z + point.offset.z)
+        // 씬의 controlpointN 덮어쓰기(스크립트 포함)가 있으면 프리셋 offset을
+        // 통째로 대신한다. 매번 다시 읽는다 — 스크립트가 언제든 바꿀 수 있다.
+        let raw = instance.controlPoints[id] ?? point.offset
+        let offset = point.isWorldSpace ? worldToLocal(raw) : raw
+        return Vec3(x: base.x + offset.x,
+                    y: base.y + offset.y,
+                    z: base.z + offset.z)
+    }
+
+    /// 월드(화면) 좌표(플래그 2)를 이 시스템의 로컬 좌표로 바꾼다. 파티클
+    /// 좌표계 자체가 레이어 원점 기준 상대 좌표라서 그렇다(이미터 스폰 위치가
+    /// `originOffset + origin`으로 쌓이는 것과 같은 이유).
+    ///
+    /// ponytail: 레이어 회전은 무시한다 — 회전한 그룹 밑의 월드 좌표 제어점은
+    /// 실물에서 아직 못 봤다. `layerOrigin`/`layerScale`은 렌더러가 시스템을
+    /// 만들 때 한 번 넣어 준 값이라, 스크립트가 나중에 레이어를 옮겨도 다시
+    /// 갱신되지 않는다 — 그런 조합도 아직 실물에서 못 봤다. 둘 다 필요해지면
+    /// 렌더러가 `cursorPosition`처럼 매 틱 갱신해야 한다.
+    private func worldToLocal(_ v: Vec3) -> Vec3 {
+        func axis(_ value: Double, _ origin: Double, _ scale: Double) -> Double {
+            // 배율 0(또는 비유한)은 나눗셈을 피하려고 1로 본다 — NaN이 여기서
+            // 새면 이 자리를 쓰는 파티클이 전부 화면에서 사라진다.
+            guard scale.isFinite, scale != 0 else { return value - origin }
+            return (value - origin) / scale
+        }
+        return Vec3(x: axis(v.x, layerOrigin.x, layerScale.x),
+                    y: axis(v.y, layerOrigin.y, layerScale.y),
+                    z: axis(v.z, layerOrigin.z, layerScale.z))
     }
 
     /// 그 번호를 못 푸는지. 생성자에서 보고할지 정하는 데 쓴다.

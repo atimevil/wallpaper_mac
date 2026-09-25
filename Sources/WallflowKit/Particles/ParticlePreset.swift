@@ -29,16 +29,24 @@ public struct ParticleEmitterBurst: Equatable, Sendable {
 public enum ParticleEmitter: Equatable, Sendable {
     case sphereRandom(rate: Double, origin: Vec3, directions: Vec3,
                       distanceMin: Double, distanceMax: Double,
-                      burst: ParticleEmitterBurst = .none)
+                      burst: ParticleEmitterBurst = .none, controlPoint: Int? = nil)
     case boxRandom(rate: Double, origin: Vec3, directions: Vec3,
                    distanceMin: Vec3, distanceMax: Vec3,
-                   burst: ParticleEmitterBurst = .none)
+                   burst: ParticleEmitterBurst = .none, controlPoint: Int? = nil)
 
     /// 시작할 때 한꺼번에 만들 개수와 초기 속력.
     public var burst: ParticleEmitterBurst {
         switch self {
-        case .sphereRandom(_, _, _, _, _, let burst): return burst
-        case .boxRandom(_, _, _, _, _, let burst): return burst
+        case .sphereRandom(_, _, _, _, _, let burst, _): return burst
+        case .boxRandom(_, _, _, _, _, let burst, _): return burst
+        }
+    }
+
+    /// 이 이미터가 뿌릴 자리로 쓰는 제어점. 없으면(대부분) 이 시스템의 원점이다.
+    public var controlPoint: Int? {
+        switch self {
+        case .sphereRandom(_, _, _, _, _, _, let controlPoint): return controlPoint
+        case .boxRandom(_, _, _, _, _, _, let controlPoint): return controlPoint
         }
     }
 
@@ -54,12 +62,14 @@ public enum ParticleEmitter: Equatable, Sendable {
     /// 원본 반경 1024가 0.65배로 줄어 가로의 3분의 2에만 비가 왔다.
     func scaled(rate factor: Double) -> ParticleEmitter {
         switch self {
-        case .sphereRandom(let r, let o, let d, let lo, let hi, let burst):
+        case .sphereRandom(let r, let o, let d, let lo, let hi, let burst, let controlPoint):
             return .sphereRandom(rate: r * factor, origin: o, directions: d,
-                                 distanceMin: lo, distanceMax: hi, burst: burst)
-        case .boxRandom(let r, let o, let d, let lo, let hi, let burst):
+                                 distanceMin: lo, distanceMax: hi, burst: burst,
+                                 controlPoint: controlPoint)
+        case .boxRandom(let r, let o, let d, let lo, let hi, let burst, let controlPoint):
             return .boxRandom(rate: r * factor, origin: o, directions: d,
-                              distanceMin: lo, distanceMax: hi, burst: burst)
+                              distanceMin: lo, distanceMax: hi, burst: burst,
+                              controlPoint: controlPoint)
         }
     }
 }
@@ -231,6 +241,11 @@ public struct ParticleOverride: Equatable, Sendable {
     public var brightness: Double = 1
     /// 색도 곱한다(틴트). 0~1이다. 프리셋의 색 변화는 남는다.
     public var color: Vec3?
+    /// 제어점 자리 덮어쓰기(`controlpoint0`~`controlpoint7`). 있으면 그 번호의
+    /// 프리셋 `offset`을 통째로 대신한다 — 배율이 아니라 자리 자체다.
+    /// `ParticleSystem.controlPointPosition`이 매번 여기서 다시 읽는다(굽지 않는다) —
+    /// 스크립트가 언제든 바꿀 수 있어야 하기 때문이다.
+    public var controlPoints: [Int: Vec3] = [:]
 
     public init() {}
 
@@ -238,13 +253,14 @@ public struct ParticleOverride: Equatable, Sendable {
     public var isIdentity: Bool {
         count == 1 && rate == 1 && size == 1 && speed == 1
             && lifetime == 1 && alpha == 1 && brightness == 1 && color == nil
+            && controlPoints.isEmpty
     }
 
     /// 스크립트(`layer.instance`, `instanceoverride.<키>`)가 읽고 쓰는 이름.
-    /// `colorn`만 벡터다.
+    /// `colorn`과 `controlpointN`이 벡터다.
     public static let scriptKeys = [
         "alpha", "size", "count", "speed", "lifetime", "rate", "brightness", "colorn",
-    ]
+    ] + (0...7).map { "controlpoint\($0)" }
 
     /// 스크립트 쪽 `layer.instance`의 시작값.
     public var scriptValues: [String: EffectConstant] {
@@ -254,15 +270,26 @@ public struct ParticleOverride: Equatable, Sendable {
             "brightness": .scalar(brightness),
         ]
         if let color { out["colorn"] = .vector([color.x, color.y, color.z]) }
+        for (id, point) in controlPoints {
+            out["controlpoint\(id)"] = .vector([point.x, point.y, point.z])
+        }
         return out
     }
 
-    /// 스크립트가 쓴 값을 얹는다. 파일과 같은 규칙 — 유한하고 0~100인 배율만 받는다.
+    /// 스크립트가 쓴 값을 얹는다. 배율(수)은 파일과 같은 규칙 — 유한하고 0~100만
+    /// 받는다. 제어점은 배율이 아니라 자리라 그 규칙 밖이다 — 유한하기만 하면 받는다.
     public mutating func apply(_ values: [String: EffectConstant]) {
         for (key, value) in values {
             switch (key, value) {
             case ("colorn", .vector(let v)) where v.count >= 3 && v.prefix(3).allSatisfy(\.isFinite):
                 color = Vec3(x: v[0], y: v[1], z: v[2])
+            case (_, .vector(let v)) where key.hasPrefix("controlpoint")
+                && v.count >= 3 && v.prefix(3).allSatisfy(\.isFinite):
+                // controlpointangleN 같은 안 읽는 키도 이 접두어를 타지만,
+                // 숫자로 못 바뀌거나 0~7 밖이면 그냥 지나간다.
+                if let id = Int(key.dropFirst("controlpoint".count)), (0...7).contains(id) {
+                    controlPoints[id] = Vec3(x: v[0], y: v[1], z: v[2])
+                }
             case (_, .scalar(let d)) where d.isFinite && d >= 0 && d <= 100:
                 switch key {
                 case "alpha": alpha = d
@@ -302,6 +329,16 @@ public struct ParticleOverride: Equatable, Sendable {
            let parsed = Vec3.parse(text) {
             // colorn은 이미 0~1이다. 파티클 프리셋의 색(0~255)과 다르다.
             result.color = parsed
+        }
+        // 실물 `previewdrippingwater`가 "controlpoint1"/"controlpoint2"로 두
+        // 낙수 자리를 잡는다. `controlpointangleN`도 실물에 있지만 여기서 읽는
+        // 키가 아니라 자동으로 지나간다 — 깨지거나 오류로 보고되지 않는다.
+        for id in 0...7 {
+            let key = "controlpoint\(id)"
+            if let text = ((json[key] as? [String: Any])?["value"] ?? json[key]) as? String,
+               let parsed = Vec3.parse(text) {
+                result.controlPoints[id] = parsed
+            }
         }
         return result
     }
@@ -397,10 +434,22 @@ public struct ParticleChild: Equatable, Sendable {
 /// 연산자들이 번호로 이걸 가리킨다. `flags`의 1번 비트가 **마우스를 따라가라**는
 /// 뜻이다 — 실물 `examplecursoravoid`(이름 그대로 커서를 피하는 예제)의 1번
 /// 제어점이 `flags: 1`이고, `fireflies`·`vapor0`처럼 상호작용 프리셋들이 전부
-/// 같은 꼴이다. 나머지 값(2·4·16)은 무엇에 묶이는지 근거가 없어 그대로 둔다.
+/// 같은 꼴이다. 2번 비트는 월드(화면) 좌표, 16번 비트는 편집기 전용 표시다 —
+/// 실물 `dripping_water`의 두 제어점이 `flags: 16`이다. 4번 비트(부모 복사)만
+/// 아직 못 푼다 — 무엇을 부모로 삼는지 근거가 없다.
 public struct ParticleControlPoint: Equatable, Sendable {
     /// 마우스를 따라간다는 비트.
     public static let followsCursorFlag = 1
+    /// 월드(화면) 좌표라는 비트. `offset`(과 이 점을 덮어쓰는 값)이 로컬이 아니라
+    /// 씬 좌표라는 뜻이다 — `ParticleSystem.controlPointPosition`이 시스템의
+    /// `layerOrigin`/`layerScale`로 로컬로 바꾼다.
+    public static let worldSpaceFlag = 2
+    /// 다른 제어점 값을 그대로 복사하라는 비트. 무엇을 부모로 삼는지 실물에서
+    /// 근거를 못 찾아 아직 못 푼다 — 쓰는 연산자를 보고한다.
+    public static let copyFromParentFlag = 4
+    /// 편집기 UI 전용 표시 비트(실물 `dripping_water`의 두 제어점). 런타임 동작이
+    /// 없다 — 그대로 쓰고 보고하지 않는다.
+    public static let editorOnlyFlag = 16
 
     public let id: Int
     public let offset: Vec3
@@ -413,8 +462,15 @@ public struct ParticleControlPoint: Equatable, Sendable {
     }
 
     public var followsCursor: Bool { flags & Self.followsCursorFlag != 0 }
-    /// 우리가 모르는 묶임이 있는지. 있으면 그 제어점을 쓰는 연산자를 보고한다.
-    public var hasUnknownBinding: Bool { flags & ~Self.followsCursorFlag != 0 }
+    public var isWorldSpace: Bool { flags & Self.worldSpaceFlag != 0 }
+    /// 우리가 못 푸는 묶임이 있는지(모르는 비트 + 부모 복사). 있으면 그 제어점을
+    /// 쓰는 연산자를 보고한다. 2(월드 좌표)와 16(편집기 전용)은 이제 안다 —
+    /// 16은 아무 효과가 없고, 2는 `ParticleSystem`이 로컬로 바꿔 준다.
+    public var hasUnknownBinding: Bool {
+        let known = Self.followsCursorFlag | Self.worldSpaceFlag
+            | Self.copyFromParentFlag | Self.editorOnlyFlag
+        return flags & Self.copyFromParentFlag != 0 || flags & ~known != 0
+    }
 }
 
 public struct ParticlePreset: Equatable, Sendable {
@@ -775,12 +831,27 @@ public struct ParticlePreset: Equatable, Sendable {
             speedMax: (num(dict, "speedmax", 0) ?? 0).isFinite
                 ? Swift.max(0, num(dict, "speedmax", 0) ?? 0) : 0)
 
+        // 있으면 그 제어점 자리에서 뿌린다(실물 `dripping_water`). 없으면(대부분)
+        // nil로 두어 지금처럼 이 시스템의 원점에서 뿌린다 — `controlpointattract`
+        // 등과 달리 생략을 0번으로 보지 않는다. 실물 이미터 대부분이 이 키가 아예
+        // 없는데, 0번으로 보면 0번 제어점을 따로 정의한 모든 씬의 뿌리는 자리가
+        // 조용히 바뀐다.
+        let controlPoint: Int?
+        if dict["controlpoint"] == nil {
+            controlPoint = nil
+        } else if let parsed = getInt(dict["controlpoint"]) {
+            controlPoint = parsed
+        } else {
+            return nil
+        }
+
         switch name {
         case "sphererandom":
             guard let lo = num(dict, "distancemin", 0), let hi = num(dict, "distancemax", 0)
             else { return nil }
             return .sphereRandom(rate: rate, origin: origin, directions: directions,
-                                 distanceMin: lo, distanceMax: hi, burst: burst)
+                                 distanceMin: lo, distanceMax: hi, burst: burst,
+                                 controlPoint: controlPoint)
 
         case "boxrandom":
             // 상자는 distancemin~distancemax 사이를 채운다. distancemin이 없으면 0이다 —
@@ -789,7 +860,8 @@ public struct ParticlePreset: Equatable, Sendable {
                   let hi = vec(dict, "distancemax", zero)
             else { return nil }
             return .boxRandom(rate: rate, origin: origin, directions: directions,
-                              distanceMin: lo, distanceMax: hi, burst: burst)
+                              distanceMin: lo, distanceMax: hi, burst: burst,
+                              controlPoint: controlPoint)
 
         default:
             return nil

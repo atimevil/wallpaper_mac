@@ -1159,4 +1159,19 @@ extension SceneDocumentTests {
         XCTAssertEqual(SceneDocument.scriptHolders(of: object).map(\.property),
                        ["instanceoverride.rate"])
     }
+
+    /// controlpointN 덮어쓰기도 스크립트를 가질 수 있다(`layer.instance.controlpointN`).
+    /// `scriptHolders`는 이미 `ParticleOverride.scriptKeys`를 훑으므로, 그 목록에
+    /// controlpoint0~7을 더하는 것만으로 여기까지 이어진다 — 이 파일은 안 고쳤다.
+    func testControlPointOverrideScriptsAreLayerScripts() {
+        let object: [String: Any] = [
+            "particle": "particles/p.json",
+            "instanceoverride": [
+                "controlpoint1": ["script": "export function update(v) { return v; }",
+                                  "value": "0 0 0"],
+            ],
+        ]
+        XCTAssertEqual(SceneDocument.scriptHolders(of: object).map(\.property),
+                       ["instanceoverride.controlpoint1"])
+    }
 }

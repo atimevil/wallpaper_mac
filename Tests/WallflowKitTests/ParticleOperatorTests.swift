@@ -361,7 +361,8 @@ extension ParticleOperatorTests {
         XCTAssertTrue(system.unimplementedOperators.isEmpty, "이제 이 조합은 다 한다")
     }
 
-    /// 우리가 모르는 묶임(2·4·16)은 손대지 않고 번호와 함께 남긴다.
+    /// 우리가 모르는 묶임(4, 부모 복사)은 손대지 않고 번호와 함께 남긴다.
+    /// 2(월드 좌표)와 16(편집기 전용)은 이제 안다 — 아래 테스트들 참고.
     func testUnknownControlPointBindingIsReported() throws {
         let preset = try preset(
             controlPoints: #"[{"id": 1, "offset": "0 0 0", "flags": 4}]"#,
@@ -371,6 +372,118 @@ extension ParticleOperatorTests {
         let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
         XCTAssertEqual(system.unimplementedOperators, ["controlpointattract(제어점 1)"])
         XCTAssertNil(system.controlPointPosition(1))
+    }
+
+    /// 16(편집기 전용 표시)은 런타임에 아무 효과가 없다 — 실물 `dripping_water`의
+    /// 두 제어점이 이 모양이다. 손대지 않고 그대로 쓰고, 보고하지도 않는다.
+    func testEditorOnlyFlagIsIgnoredNotReported() throws {
+        let preset = try preset(
+            controlPoints: #"[{"id": 1, "offset": "5 0 0", "flags": 16}]"#,
+            operators: """
+            [{"name": "controlpointattract", "controlpoint": 1, "scale": 1, "threshold": 1}]
+            """)
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        XCTAssertTrue(system.unimplementedOperators.isEmpty, "16은 편집기 전용 — 보고하면 안 된다")
+        XCTAssertEqual(system.controlPointPosition(1), Vec3(x: 5, y: 0, z: 0))
+    }
+
+    /// 씬의 `controlpointN` 덮어쓰기는 프리셋의 offset을 통째로 대신한다.
+    func testControlPointOverrideReplacesPresetOffset() throws {
+        let preset = try preset(
+            controlPoints: #"[{"id": 1, "offset": "5 0 0", "flags": 0}]"#, operators: "[]")
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        XCTAssertEqual(system.controlPointPosition(1), Vec3(x: 5, y: 0, z: 0), "덮어쓰기 전에는 프리셋 offset")
+        system.instance.controlPoints[1] = Vec3(x: 99, y: 1, z: 2)
+        XCTAssertEqual(system.controlPointPosition(1), Vec3(x: 99, y: 1, z: 2), "덮어쓰기가 대신해야 한다")
+    }
+
+    /// 월드(화면) 좌표(플래그 2)는 `(값 − 레이어 원점)/배율`로 이 시스템의 로컬
+    /// 좌표로 바뀐다. 프리셋 offset과 씬의 덮어쓰기 둘 다 같은 규칙을 받는다 —
+    /// 어느 쪽에서 왔든 플래그가 월드 좌표라고 하면 화면 좌표라는 뜻이기 때문이다.
+    func testWorldSpaceControlPointConvertsUsingLayerOriginAndScale() throws {
+        let preset = try preset(
+            controlPoints: #"[{"id": 1, "offset": "1000 500 0", "flags": 2}]"#, operators: "[]")
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        system.layerOrigin = Vec3(x: 100, y: 100, z: 0)
+        system.layerScale = Vec3(x: 2, y: 2, z: 1)
+        // (1000-100)/2 = 450, (500-100)/2 = 200
+        XCTAssertEqual(system.controlPointPosition(1), Vec3(x: 450, y: 200, z: 0))
+
+        // 덮어쓰기(스크립트 포함)도 같은 규칙을 받는다: (1100-100)/2=500, (300-100)/2=100
+        system.instance.controlPoints[1] = Vec3(x: 1100, y: 300, z: 0)
+        XCTAssertEqual(system.controlPointPosition(1), Vec3(x: 500, y: 100, z: 0))
+    }
+
+    /// 배율 0(또는 비유한)은 나눗셈을 피하려고 1로 본다. NaN이 여기서 새면
+    /// 이 자리를 쓰는 파티클이 전부 화면에서 사라진다.
+    func testWorldSpaceControlPointGuardsDegenerateScale() throws {
+        let preset = try preset(
+            controlPoints: #"[{"id": 1, "offset": "50 0 0", "flags": 2}]"#, operators: "[]")
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        system.layerOrigin = Vec3(x: 0, y: 0, z: 0)
+        system.layerScale = Vec3(x: 0, y: 1, z: 1)
+        XCTAssertEqual(system.controlPointPosition(1)?.x, 50)
+    }
+}
+
+/// 이미터 `controlpoint` — 이미터가 뿌리는 자리를 시스템 원점 대신 제어점으로 바꾼다.
+/// 실물 `dripping_water`가 두 낙수 자리(제어점 1·2)에서 각각 뿌린다.
+extension ParticleOperatorTests {
+    /// 제어점 자리에서 뿌려야 한다. 이미터 자신의 `origin`은 그 위에 더한다.
+    /// distancemin=distancemax=0이라 흩어짐 없이 정확히 그 자리여야 한다.
+    func testEmitterSpawnsFromControlPoint() throws {
+        let json = """
+        {"maxcount": 8, "material": "m.json",
+         "controlpoint": [{"id": 1, "offset": "22 0 0", "flags": 0}],
+         "emitter": [{"name": "sphererandom", "rate": 0, "instantaneous": 8,
+                      "controlpoint": 1, "distancemin": 0, "distancemax": 0}],
+         "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100}]}
+        """
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(json.utf8)) as? [String: Any])
+        let preset = try XCTUnwrap(ParticlePreset.parse(object))
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        system.update(deltaTime: 1.0 / 60)
+        let particle = try XCTUnwrap(system.particles.first)
+        XCTAssertEqual(particle.position, Vec3(x: 22, y: 0, z: 0))
+    }
+
+    /// 없으면(대부분의 실물 이미터) 지금처럼 이 시스템의 원점에서 뿌린다 —
+    /// 생략을 0번으로 보면 0번을 따로 정의한 프리셋의 뿌리는 자리가 조용히 바뀐다.
+    func testEmitterWithoutControlPointKeepsOriginBehavior() throws {
+        let json = """
+        {"maxcount": 8, "material": "m.json",
+         "controlpoint": [{"id": 0, "offset": "500 500 0", "flags": 0}],
+         "emitter": [{"name": "sphererandom", "rate": 0, "instantaneous": 8,
+                      "distancemin": 0, "distancemax": 0}],
+         "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100}]}
+        """
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(json.utf8)) as? [String: Any])
+        let preset = try XCTUnwrap(ParticlePreset.parse(object))
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        system.update(deltaTime: 1.0 / 60)
+        let particle = try XCTUnwrap(system.particles.first)
+        XCTAssertEqual(particle.position, Vec3(x: 0, y: 0, z: 0),
+                       "controlpoint 키가 없으면 0번 제어점의 offset을 끌어오면 안 된다")
+    }
+
+    /// 이미터가 못 푸는 제어점을 쓰면 원점으로 물러나고, 생성자에서 한 번만 보고한다.
+    func testEmitterControlPointFallsBackAndReportsOnce() throws {
+        let json = """
+        {"maxcount": 8, "material": "m.json",
+         "emitter": [{"name": "sphererandom", "rate": 0, "instantaneous": 8,
+                      "controlpoint": 3, "distancemin": 0, "distancemax": 0}],
+         "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100}]}
+        """
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(json.utf8)) as? [String: Any])
+        let preset = try XCTUnwrap(ParticlePreset.parse(object))
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        XCTAssertEqual(system.unimplementedOperators, ["sphererandom(제어점 3)"])
+        system.update(deltaTime: 1.0 / 60)
+        let particle = try XCTUnwrap(system.particles.first)
+        XCTAssertEqual(particle.position, Vec3(x: 0, y: 0, z: 0), "못 풀면 원점으로 물러나야 한다")
     }
 }
 

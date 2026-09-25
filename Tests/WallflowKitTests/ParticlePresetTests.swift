@@ -27,7 +27,7 @@ final class ParticlePresetTests: XCTestCase {
         XCTAssertEqual(p.initializers.count, 4)
         XCTAssertEqual(p.operators.count, 2)
 
-        guard case .sphereRandom(let rate, let origin, _, let dmin, let dmax, _) = p.emitters[0] else {
+        guard case .sphereRandom(let rate, let origin, _, let dmin, let dmax, _, _) = p.emitters[0] else {
             return XCTFail("sphererandom이어야 한다")
         }
         XCTAssertEqual(rate, 15)
@@ -139,7 +139,7 @@ final class ParticlePresetTests: XCTestCase {
                      "directions":"0 -1 0","distancemin":"-100 -10 0","distancemax":"100 10 50"}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        guard case .boxRandom(let rate, let origin, let directions, let distanceMin, let distanceMax, _) = p.emitters[0] else {
+        guard case .boxRandom(let rate, let origin, let directions, let distanceMin, let distanceMax, _, _) = p.emitters[0] else {
             return XCTFail("boxrandom이어야 한다")
         }
         XCTAssertEqual(rate, 5)
@@ -147,6 +147,33 @@ final class ParticlePresetTests: XCTestCase {
         XCTAssertEqual(directions, Vec3(x: 0, y: -1, z: 0))
         XCTAssertEqual(distanceMin, Vec3(x: -100, y: -10, z: 0))
         XCTAssertEqual(distanceMax, Vec3(x: 100, y: 10, z: 50))
+    }
+
+    /// 실물 `dripping_water`가 이 모양이다 — 이미터가 `controlpoint`로 뿌릴 자리를
+    /// 고른다. 없으면(대부분) nil이라 지금처럼 이 시스템의 원점에서 뿌린다.
+    func testEmitterControlPointIsParsed() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "emitter":[{"name":"sphererandom","rate":6,"controlpoint":1,
+                     "distancemin":0,"distancemax":2},
+                    {"name":"boxrandom","rate":8}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertEqual(p.emitters.count, 2)
+        XCTAssertEqual(p.emitters[0].controlPoint, 1)
+        XCTAssertNil(p.emitters[1].controlPoint, "controlpoint 키가 없으면 nil이어야 한다")
+    }
+
+    /// 값이 있는데 수로 못 읽으면(예: 문자열 쓰레기) 그 엔트리를 버린다 —
+    /// 다른 필드가 멀쩡한 malformedNames 규칙과 같다.
+    func testEmitterWithUnparsableControlPointIsMalformed() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "emitter":[{"name":"sphererandom","rate":6,"controlpoint":"쓰레기"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertTrue(p.emitters.isEmpty)
+        XCTAssertTrue(p.malformedNames.contains("sphererandom"))
     }
 
     /// 모르는 이름은 씬 전체를 버리지 않고 그것만 빠진다.
@@ -377,7 +404,7 @@ final class ParticlePresetTests: XCTestCase {
         let json = try XCTUnwrap(preset(#"{"material":"m.json","maxcount":10,"emitter":[{"name":"boxrandom","rate":200}]}"#))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
         XCTAssertEqual(p.emitters.count, 1, "필드가 최소일 때도 파싱되어야 한다")
-        guard case .boxRandom(let rate, _, _, _, _, _) = p.emitters[0] else {
+        guard case .boxRandom(let rate, _, _, _, _, _, _) = p.emitters[0] else {
             return XCTFail("boxrandom이어야 한다")
         }
         XCTAssertEqual(rate, 200)
@@ -391,7 +418,7 @@ final class ParticlePresetTests: XCTestCase {
          "emitter":[{"name":"boxrandom","distancemax":"1024 512 0"}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        guard case .boxRandom(let rate, _, _, _, let distanceMax, _) = p.emitters[0] else {
+        guard case .boxRandom(let rate, _, _, _, let distanceMax, _, _) = p.emitters[0] else {
             return XCTFail("boxrandom이어야 한다")
         }
         XCTAssertEqual(rate, ParticlePreset.defaultEmitRate, "rate가 없으면 defaultEmitRate를 쓴다")
