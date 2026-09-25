@@ -20,12 +20,24 @@ public enum MDLError: Error, Equatable {
 /// float32 × 6                        경계 상자 min·max
 /// int32 vertexFormat(15) · vertexBytes
 /// vertexBytes                        정점 48B: pos3 · normal3 · tangent4 · uv2
-/// int32 indexBytes                   uint16 색인. 사각형을 삼각형 둘로 쪼갠 꼴
+/// int32 indexBytes                   색인. 사각형을 삼각형 둘로 쪼갠 꼴
 /// 7B                                 0으로 채워진 꼬리
 /// ```
 ///
 /// 첫 정점을 읽으면 법선이 단위 길이이고 접선의 w가 ±1이라 이 해석이 맞다.
 /// 창작마당 파일이라 믿을 수 없다 — 크기와 색인 범위를 전부 검사한다.
+///
+/// **색인 폭은 정점 수를 본다.** 실물 대부분(프리즘 60정점 등)은 색인이
+/// `uint16`이지만, `球体01.mdl`(토성 몸체, 정점 849,202개)은 `uint32`다 —
+/// `uint16`으로는 65,536개를 넘는 정점을 가리킬 수 없어서다. 형식에 이를 밝히는
+/// 별도 필드는 못 찾았다(플래그·정점 형식이 둘 다 두 파일에서 같은 값 15다) —
+/// 직접 바이트를 맞춰 확인했다: 정점 수를 `uint16` 상한(65,535) 아래로 가정하고
+/// 읽으면 색인이 `(0,0),(1,0),(2,0)`처럼 짝수 자리만 값을 갖고 홀수 자리는 늘
+/// 0인 꼴로 나온다 — 사실은 각 색인이 4바이트(`uint32`)인데 그걸 2바이트씩 둘로
+/// 쪼개 읽은 것이다. `uint32`로 다시 읽으면 색인 최댓값이 정점 수 - 1과 정확히
+/// 맞아떨어진다. 그래서 정점이 65,536개 이상이면 색인도 4바이트로 읽는다 —
+/// 색인 버퍼를 통째로 4바이트 폭으로 통일해 두면(`indices: [UInt32]`) 렌더러가
+/// 폭을 따로 안 가려도 된다.
 public struct MDLModel: Equatable, Sendable {
     public static let magic = "MDLV0023"
     /// 정점 하나의 바이트. pos3 + normal3 + tangent4 + uv2 = 12 float.
@@ -41,12 +53,12 @@ public struct MDLModel: Equatable, Sendable {
     public let boundsMax: Vec3
     /// 48바이트 정점이 이어진 원본 바이트. 그대로 GPU 버퍼에 올린다.
     public let vertexData: Data
-    public let indices: [UInt16]
+    public let indices: [UInt32]
 
     public var vertexCount: Int { vertexData.count / Self.vertexStride }
 
     public init(materials: [String], boneCount: Int, boundsMin: Vec3, boundsMax: Vec3,
-                vertexData: Data, indices: [UInt16]) {
+                vertexData: Data, indices: [UInt32]) {
         self.materials = materials
         self.boneCount = boneCount
         self.boundsMin = boundsMin
@@ -95,16 +107,26 @@ public struct MDLModel: Equatable, Sendable {
             throw MDLError.tooLarge("정점 \(vertexBytes)바이트 (형식 \(vertexFormat))")
         }
         let vertexData = try cursor.bytes(vertexBytes)
+        let vertexCount = vertexBytes / Self.vertexStride
+        // 정점이 65,536개를 넘으면 `uint16` 색인으로는 전부를 못 가리킨다 —
+        // 그 이상이면 파일도 색인을 4바이트로 낸다(위 문서 주석 참고).
+        let indexElementSize = vertexCount > 0xFFFF ? 4 : 2
         let indexBytes = try cursor.int32()
-        guard indexBytes >= 0, indexBytes <= Self.maxIndexBytes, indexBytes % 2 == 0 else {
+        guard indexBytes >= 0, indexBytes <= Self.maxIndexBytes,
+              indexBytes % indexElementSize == 0 else {
             throw MDLError.tooLarge("색인 \(indexBytes)바이트")
         }
         let indexData = try cursor.bytes(indexBytes)
-        let vertexCount = vertexBytes / Self.vertexStride
-        var indices = [UInt16](repeating: 0, count: indexBytes / 2)
+        var indices = [UInt32](repeating: 0, count: indexBytes / indexElementSize)
         indexData.withUnsafeBytes { raw in
             for i in indices.indices {
-                indices[i] = UInt16(littleEndian: raw.loadUnaligned(fromByteOffset: i * 2, as: UInt16.self))
+                if indexElementSize == 2 {
+                    indices[i] = UInt32(
+                        UInt16(littleEndian: raw.loadUnaligned(fromByteOffset: i * 2, as: UInt16.self)))
+                } else {
+                    indices[i] = UInt32(
+                        littleEndian: raw.loadUnaligned(fromByteOffset: i * 4, as: UInt32.self))
+                }
             }
         }
         // 정점 밖을 가리키는 색인은 GPU에서 정의되지 않은 읽기다. 여기서 막는다.

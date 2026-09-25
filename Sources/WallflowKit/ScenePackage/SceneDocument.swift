@@ -123,7 +123,7 @@ public struct SceneDocument: Sendable {
         // 원근 씬에는 직교 크기가 없다. 좌표가 픽셀이 아니라 세계 단위이고
         // 화면 비율은 그릴 때 정해진다. 글자·파티클처럼 직교 크기를 쓰는
         // 경로를 위해 이름뿐인 1920x1080을 둔다.
-        let camera: SceneCamera?
+        var camera: SceneCamera?
         let width: Int
         let height: Int
         if general.keys.contains("orthogonalprojection"),
@@ -163,6 +163,21 @@ public struct SceneDocument: Sendable {
         // 부모-자식 변환을 먼저 푼다. 자식의 origin과 scale은 부모 기준 상대값이라,
         // 무시하면 시계가 화면 밖에 그려지고 글자 크기가 어긋난다(실물에서 확인).
         let transforms = resolveTransforms(objects)
+        // 원근 씬의 카메라 자리는 `general.camera`가 아니라 `"camera"` 키를 가진
+        // 오브젝트로 올 수도 있다(실물 3509243656 Three-Body: general엔 camera
+        // 블록이 없고, 대신 `{"camera":"default","origin":"0 0 6",...}` 오브젝트가
+        // 있다). 그걸 놓치면 기본 눈 자리(0,0,100)를 그대로 쓰는데, 이 씬의
+        // 하늘상자(반지름 8~12)보다 훨씬 멀어 안이 아니라 밖에서 작은 공 하나만
+        // 보게 된다. 부모 사슬까지 합친 자리를 눈으로 쓴다 — 카메라 경로 스크립트
+        // (`path`)는 아직 못 돌리니 정지 좌표가 최선이다.
+        if var cam = camera, let cameraObject = objects.first(where: { $0["camera"] is String }) {
+            let id = cameraObject["id"] as? Int ?? -1
+            let origin = transforms[id]?.origin ?? Vec3(x: 0, y: 0, z: 0)
+            if origin.x.isFinite, origin.y.isFinite, origin.z.isFinite {
+                cam.eye = origin
+                camera = cam
+            }
+        }
         let rawLayers = objects.enumerated().map { index, object -> SceneLayer in
             let id = object["id"] as? Int ?? index
             let layer = makeLayer(isPerspective: camera != nil, object, fallbackID: index, resolver: resolver,

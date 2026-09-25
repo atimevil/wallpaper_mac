@@ -576,6 +576,41 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertGreaterThan(doc.orthoWidth, 0)
     }
 
+    /// 실물 Three-Body 씬(3509243656)처럼 `general.camera` 블록 없이, 대신
+    /// `"camera": "default"` 키를 가진 오브젝트로 카메라 자리가 오는 씬이 있다.
+    /// 그걸 놓치면 기본 눈 자리(0,0,100)를 그대로 써서, 반지름 8~12짜리
+    /// 하늘상자 훨씬 밖에서 작은 공 하나만 보게 된다.
+    func testCameraObjectOverridesDefaultEyePosition() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null},
+         "objects": [{"id": 443, "camera": "default", "origin": "0.00000 0.00000 6.00000"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.camera?.eye, Vec3(x: 0, y: 0, z: 6))
+    }
+
+    /// 부모 사슬이 있으면 합친 자리를 쓴다 — 다른 오브젝트와 같은 규칙이다.
+    func testCameraObjectEyeComposesParentChain() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null},
+         "objects": [{"id": 1, "origin": "10.00000 0.00000 0.00000"},
+                     {"id": 443, "camera": "default", "parent": 1,
+                      "origin": "0.00000 0.00000 6.00000"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.camera?.eye, Vec3(x: 10, y: 0, z: 6))
+    }
+
+    /// `general.camera`가 있으면 그쪽이 이긴다 — 오브젝트 쪽 좌표를 못 읽을 때만
+    /// (여기서는 카메라 오브젝트 자체가 없을 때) 기본값이 남는다.
+    func testMissingCameraObjectKeepsGeneralDefault() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null}, "objects": [{"id": 1, "name": "no camera key"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.camera?.eye, Vec3(x: 0, y: 0, z: 100), "카메라 오브젝트가 없으면 기본값")
+    }
+
     /// 키가 아예 없는 것은 여전히 missingField다. 원근 씬과 구분되어야 한다.
     func testMissingProjectionIsStillMissingField() throws {
         let reader = try makeScenePkg(scene: #"{"general": {}, "objects": []}"#)
