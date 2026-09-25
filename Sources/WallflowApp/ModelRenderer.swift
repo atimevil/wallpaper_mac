@@ -202,7 +202,7 @@ final class ModelRenderer {
         guard let vb = model.vertexData.withUnsafeBytes({ raw in
                   device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: []) }),
               let ib = model.indices.withUnsafeBytes({ raw in
-                  device.makeBuffer(bytes: raw.baseAddress!, length: max(raw.count, 2), options: []) }),
+                  device.makeBuffer(bytes: raw.baseAddress!, length: max(raw.count, 4), options: []) }),
               let zero = device.makeBuffer(length: 16, options: []) else {
             throw CompositorError.bufferAllocationFailed
         }
@@ -387,7 +387,10 @@ final class ModelRenderer {
             encoder.setFragmentTexture(texture, index: slot.index)
             encoder.setFragmentSamplerState(sampler, index: slot.index)
         }
-        encoder.drawIndexedPrimitives(type: .triangle, indexCount: indexCount, indexType: .uint16,
+        // `MDLModel.indices`가 이제 늘 4바이트다(정점 65,536개 넘는 실물이 있어서 —
+        // `MDLModel.swift` 문서 참고). 작은 메시도 그냥 4바이트로 통일해 쓴다 —
+        // 몇 KB 아끼자고 폭을 또 가르면 여기서 다시 어긋날 자리가 생긴다.
+        encoder.drawIndexedPrimitives(type: .triangle, indexCount: indexCount, indexType: .uint32,
                                       indexBuffer: indexBuffer, indexBufferOffset: 0)
     }
 }
