@@ -15,14 +15,77 @@ public enum TexError: Error, Equatable {
     case dimensionsOutOfRange
 }
 
+/// 시트 프레임 한 장. rect는 원본 텍스처의 픽셀 좌표(좌상단 기준)다.
+///
+/// 실물 8개 — TEXS0003(격자 있음) 5개: 워크숍 3795096226 "Loading..."의
+/// background.tex, Assets의 smoke2light·lightning3·sparks_sheet·splash_9;
+/// TEXS0002(격자 없음) 3개: smoke3·lightning1·lightning2 — 로 필드 배치를
+/// 확인했다: float32 리틀엔디언 8개 —
+/// `[예약, 길이(초), x, y, 폭, ?, ?, 높이]`. 예약과 물음표 둘은 전부 0이었다 —
+/// 의미를 모른다. TEXS0002 시트(파티클)는 duration이 전부 0이다 — 그쪽은
+/// 재생 시간을 프레임 표가 아니라 파티클 나이로 정하기 때문으로 보인다.
+public struct TexSpriteFrame: Equatable, Sendable {
+    public let x: Double
+    public let y: Double
+    public let width: Double
+    public let height: Double
+    /// 이 프레임을 보여주는 시간(초). 0 이하일 수 있다 — 고르는 쪽(`frame(atElapsed:)`)이
+    /// 방어한다.
+    public let duration: Double
+}
+
 /// flags & 4인 텍스처의 밉맵 뒤에 붙는 프레임 표.
-/// M4는 프레임 내용을 쓰지 않는다 — 존재를 알아야 잔여 바이트가 남지 않고,
-/// 파티클이 스프라이트 시트를 요구할 때 건너뛸 근거가 된다.
+/// M4는 프레임 내용을 쓰지 않았다 — 존재를 알아야 잔여 바이트가 남지 않고,
+/// 파티클이 스프라이트 시트를 요구할 때 건너뛸 근거가 된다. Task 5부터는
+/// 이미지 레이어도 이 표로 애니메이션 프레임을 고른다.
 public struct TexSpriteSheet: Equatable, Sendable {
     public let frameCount: Int
     /// TEXS0003에만 있다.
     public let gridWidth: Int?
     public let gridHeight: Int?
+    /// 프레임 표. `frameCount`와 길이가 같다.
+    public let frames: [TexSpriteFrame]
+
+    /// 누적 재생 시간으로 프레임 하나를 고른다. 전체 길이(모든 duration의 합)를
+    /// 채우면 되감는다(반복). 0 길이 프레임은 창이 없어 절대 고를 수 없다 —
+    /// 음수 duration도 같은 값으로 죈다.
+    ///
+    /// duration 합이 0 이하면(전부 0이거나 프레임이 없으면) 반복할 길이가 없다.
+    /// 나누기 0이나 무한 루프 대신 첫 프레임에서 멈춘다 — TEXS0002 파티클
+    /// 시트가 실제로 이 모양이다(duration을 안 쓰고 파티클 나이로 고른다).
+    public func frame(atElapsed elapsed: Double) -> TexSpriteFrame? {
+        guard !frames.isEmpty else { return nil }
+        let total = frames.reduce(0.0) { $0 + Swift.max(0, $1.duration) }
+        guard total > 0, elapsed.isFinite, elapsed >= 0 else { return frames[0] }
+        var t = elapsed.truncatingRemainder(dividingBy: total)
+        for candidate in frames {
+            let d = Swift.max(0, candidate.duration)
+            if t < d { return candidate }
+            t -= d
+        }
+        // 부동소수 오차로 마지막 칸 문턱을 살짝 넘을 때만 여기 닿는다.
+        return frames.last
+    }
+
+    /// n번째 칸이 시작되는 누적 재생 시간(초).
+    ///
+    /// 스크립트(`thisLayer.getTextureAnimation().setFrame(n)`)가 특정 칸을
+    /// 못박았을 때, 재생 위치(`elapsed`)를 이 값으로 옮기면 `frame(atElapsed:)`가
+    /// 정확히 n번 칸을 돌려주고, 그 뒤 다시 play()해도 n번 칸부터 자연스럽게
+    /// 이어진다 — 통째로 되감기지 않는다.
+    ///
+    /// n은 count로 감싼다(wrap). 실물 스크립트가 음수나 범위 밖 값을 줄 근거는
+    /// 없지만, 사용자 파일에서 온 frameCount와 합쳐지면 방어가 필요하다 —
+    /// Swift의 `%`는 피제수가 음수면 음수를 돌려주므로 두 번 감싸 항상
+    /// `[0, count)`로 만든다. 프레임이 없으면 0.
+    public func startTime(ofFrame n: Int) -> Double {
+        guard !frames.isEmpty else { return 0 }
+        let count = frames.count
+        let index = ((n % count) + count) % count
+        var t = 0.0
+        for i in 0..<index { t += Swift.max(0, frames[i].duration) }
+        return t
+    }
 }
 
 /// .tex 안에 실제로 무엇이 들어 있는지.
@@ -256,30 +319,43 @@ public struct TexHeader: Equatable, Sendable {
         _ cursor: inout Cursor, in data: Data
     ) throws -> TexSpriteSheet {
         let magic = try cursor.readCString()
-        let grid: (Int, Int)?
+        let hasGrid: Bool
         switch magic {
-        case "TEXS0002": grid = nil
-        case "TEXS0003": grid = (0, 0)          // 아래에서 실제 값을 읽는다
+        case "TEXS0002": hasGrid = false
+        case "TEXS0003": hasGrid = true
         default: throw TexError.unsupportedContainer(magic)
         }
         let frameCount = Int(try cursor.readInt32())
-        var width: Int?
-        var height: Int?
-        if grid != nil {
-            width = Int(try cursor.readInt32())
-            height = Int(try cursor.readInt32())
+        var gridWidth: Int?
+        var gridHeight: Int?
+        if hasGrid {
+            gridWidth = Int(try cursor.readInt32())
+            gridHeight = Int(try cursor.readInt32())
         }
         // frameCount는 파일에서 온 값이다. 남은 바이트로 상한이 정해진다.
+        // (오버플로우 걱정 없이 나눗셈으로 상한을 잡는다 — 곱셈보다 먼저 해야 안전하다.)
         let remaining = data.count - cursor.offset
         guard frameCount >= 0, frameCount <= remaining / bytesPerFrame else {
             throw TexError.truncated
         }
-        // 프레임 데이터 테이블을 건너뛴다. 오버플로우가 발생하면 truncated를 던진다.
-        let (frameDataSize, multipliedOverflow) = frameCount.multipliedReportingOverflow(by: bytesPerFrame)
-        guard !multipliedOverflow else { throw TexError.truncated }
-        try cursor.skip(frameDataSize)
+        // 프레임 하나(32바이트)는 float32 리틀엔디언 8개다:
+        // [예약, 길이(초), x, y, 폭, 미상, 미상, 높이]. TexSpriteFrame 문서 참고.
+        var frames: [TexSpriteFrame] = []
+        frames.reserveCapacity(frameCount)
+        for _ in 0..<frameCount {
+            _ = try cursor.readFloat32()                  // 예약. 실물 8종 전부 0.
+            let duration = Double(try cursor.readFloat32())
+            let x = Double(try cursor.readFloat32())
+            let y = Double(try cursor.readFloat32())
+            let width = Double(try cursor.readFloat32())
+            _ = try cursor.readFloat32()                  // 미상. 실물 8종 전부 0.
+            _ = try cursor.readFloat32()                  // 미상. 실물 8종 전부 0.
+            let height = Double(try cursor.readFloat32())
+            frames.append(TexSpriteFrame(x: x, y: y, width: width, height: height, duration: duration))
+        }
 
-        return TexSpriteSheet(frameCount: frameCount, gridWidth: width, gridHeight: height)
+        return TexSpriteSheet(
+            frameCount: frameCount, gridWidth: gridWidth, gridHeight: gridHeight, frames: frames)
     }
 }
 
@@ -294,5 +370,11 @@ extension Cursor {
             guard bytes.count < 64 else { throw TexError.badMagic(String(decoding: bytes, as: UTF8.self)) }
         }
         return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// 프레임 표의 각 필드는 IEEE754 float32 리틀엔디언이다. readInt32의 비트
+    /// 패턴을 그대로 Float로 옮긴다 — 새 엔디언 처리를 만들지 않는다.
+    mutating func readFloat32() throws -> Float {
+        Float(bitPattern: UInt32(bitPattern: try readInt32()))
     }
 }

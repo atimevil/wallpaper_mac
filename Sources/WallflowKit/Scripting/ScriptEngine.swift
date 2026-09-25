@@ -194,8 +194,11 @@ public final class ScriptEngine: @unchecked Sendable {
         return LayerScriptState(alpha: min(max(alpha, 0), 1), visible: visible)
     }
 
-    /// 줄 맨 앞의 `export`만 지운다. ES 모듈 문법을 `evaluateScript`가 모르기 때문이다.
-    /// 문자열 리터럴 안의 "export"는 줄 맨 앞에 오지 않으므로 건드리지 않는다.
+    /// 줄 맨 앞의 `export`, 그리고 `;`나 `}` 뒤 같은 줄에 이어지는 `export`를 지운다.
+    /// ES 모듈 문법을 `evaluateScript`가 모르기 때문이다.
+    /// 문자열 리터럴을 추적하는 규칙은 없다. 줄 맨 앞 규칙은 문자열이 줄 맨 앞에
+    /// 오지 않으니 안전하지만, `;`/`}` 뒤 규칙은 `"...; export function..."`처럼
+    /// 문자열 리터럴 안에서도 매치될 수 있다 — 드문 오탐으로 받아들인다.
     static func stripModuleSyntax(_ source: String) -> String {
         // `"\r\n"`은 Swift에서 **한 Character**라 `split(separator: "\n")`으로는 나뉘지 않는다.
         // 그러면 파일 전체가 한 줄이 되어 `export` 제거가 통째로 무력화된다 —
@@ -208,10 +211,40 @@ public final class ScriptEngine: @unchecked Sendable {
             // **스크립트 전체**를 버려서, 모듈을 실제로 쓰지 않는 부분까지 죽는다.
             // 실물에서 이 한 줄 때문에 스크립트 4개가 통째로 떨어졌다.
             if trimmed.hasPrefix("import ") { return "" }
-            guard trimmed.hasPrefix("export ") else { return String(line) }
+            guard trimmed.hasPrefix("export ") else { return stripMidLineExport(String(line)) }
             let indent = String(line.prefix(line.count - trimmed.count))
-            return indent + String(trimmed.dropFirst("export ".count))
+            return indent + stripMidLineExport(String(trimmed.dropFirst("export ".count)))
         }.joined(separator: "\n")
+    }
+
+    /// `let done = false; export function update(v) { ... }`처럼 앞 문장과 `export`가
+    /// 세미콜론으로 한 줄에 묶이면 줄 맨 앞 규칙이 못 잡는다. JavaScriptCore가
+    /// SyntaxError를 던지고 유닛이 조용히 등록 실패한다 — 겉보기엔 스크립트가
+    /// 아무 일도 안 한 것처럼 보인다.
+    /// `;`나 `}` 바로 뒤(공백 허용)에서 함수/클래스/변수 선언을 여는 `export`만
+    /// 지운다. 뒤따르는 단어의 경계까지 봐서 `export functionCall()`처럼 선언이
+    /// 아닌 자리는 건드리지 않는다.
+    static func stripMidLineExport(_ line: String) -> String {
+        let declarationKeywords = ["function", "class", "let", "var", "const", "default"]
+        var result = ""
+        var rest = Substring(line)
+        while let exportRange = rest.range(of: "export ") {
+            let before = rest[rest.startIndex..<exportRange.lowerBound]
+            let after = rest[exportRange.upperBound...]
+            let precededByStatementEnd = before.reversed()
+                .first(where: { $0 != " " && $0 != "\t" })
+                .map { $0 == ";" || $0 == "}" } ?? false
+            let opensDeclaration = declarationKeywords.contains { keyword in
+                guard after.hasPrefix(keyword) else { return false }
+                let next = after[after.index(after.startIndex, offsetBy: keyword.count)...].first
+                return !(next.map { $0.isLetter || $0.isNumber || $0 == "_" } ?? false)
+            }
+            result += before
+            result += (precededByStatementEnd && opensDeclaration) ? "" : "export "
+            rest = after
+        }
+        result += rest
+        return result
     }
 
     /// `import * as X from 'Y'` 한 줄마다, 모듈 본문을 즉시실행 함수로 감싸

@@ -24,6 +24,17 @@ enum SceneShaders {
         float2 size;
         // 직교 공간의 전체 크기
         float2 projection;
+        // 화면 맞춤(T6)이 캔버스에서 실제로 보이는 사각형. NDC는 world를 이걸로
+        // 맞춰 잰다 — projection 그대로 나누면 늘이기(예전 동작)가 된다.
+        // 화면을 꽉 채우기만 할 자리(합성 떠내기 목적지, 최종 표시)는 origin
+        // (0,0)·size를 목적지 크기 그대로 줘 항등으로 만든다. 그러지 않으면
+        // 맞춤이 두 번 걸린다.
+        float2 visibleOrigin;
+        float2 visibleSize;
+        // 스프라이트 시트 프레임의 UV 사각형(0~1). 시트가 아니면 (0,0)/(1,1)이라
+        // quad_vertex가 텍스처 전체를 그대로 읽는다.
+        float2 uvOrigin;
+        float2 uvScale;
         // 레이어 색과 투명도. 씬이 정한 alpha와 color다.
         float4 color;
         // 화면 평면 회전(라디안).
@@ -66,14 +77,18 @@ enum SceneShaders {
         // **원점만** 뒤집는다 — NDC 자체를 뒤집으면 쿼드의 로컬 좌표까지 뒤집혀
         // 그림과 글자가 상하로 뒤집힌다.
         float2 world = float2(u.origin.x, u.projection.y - u.origin.y) + rotated;
-        // 직교 공간 원점은 좌상단, Y는 아래로 증가한다.
+        // 직교 공간 원점은 좌상단, Y는 아래로 증가한다. 화면 맞춤이 자른/남긴
+        // 사각형(visibleOrigin·visibleSize) 기준으로 재므로, 채우기는 캔버스
+        // 가장자리가 클립 공간 밖으로 나가 잘리고 전체 보기는 안쪽에 남는다.
         float2 ndc = float2(
-            (world.x / u.projection.x) * 2.0 - 1.0,
-            1.0 - (world.y / u.projection.y) * 2.0
+            ((world.x - u.visibleOrigin.x) / u.visibleSize.x) * 2.0 - 1.0,
+            1.0 - ((world.y - u.visibleOrigin.y) / u.visibleSize.y) * 2.0
         );
         VertexOut out;
         out.position = float4(ndc, 0.0, 1.0);
-        out.uv = in.position + 0.5;
+        // 스프라이트 시트 한 칸만 읽는다. uvOrigin/uvScale이 기본값(0,0)/(1,1)이면
+        // 예전과 똑같이 텍스처 전체를 읽는다.
+        out.uv = u.uvOrigin + (in.position + 0.5) * u.uvScale;
         out.color = u.color;
         out.screenTangents = float4(0.0);
         return out;
@@ -95,8 +110,8 @@ enum SceneShaders {
         float2 rotated = float2(scaled.x * c - scaled.y * s, scaled.x * s + scaled.y * c);
         float2 world = float2(u.origin.x, u.projection.y - u.origin.y) + rotated;
         float2 ndc = float2(
-            (world.x / u.projection.x) * 2.0 - 1.0,
-            1.0 - (world.y / u.projection.y) * 2.0
+            ((world.x - u.visibleOrigin.x) / u.visibleSize.x) * 2.0 - 1.0,
+            1.0 - ((world.y - u.visibleOrigin.y) / u.visibleSize.y) * 2.0
         );
         VertexOut out;
         out.position = float4(ndc, 0.0, 1.0);
@@ -297,7 +312,9 @@ enum SceneShaders {
         float c = cos(u.rotation), s = sin(u.rotation);
         float2 rotated = float2(local.x * c - local.y * s, local.x * s + local.y * c);
         float2 world = float2(u.origin.x, u.projection.y - u.origin.y) + rotated;
-        return tex.sample(samp, world / u.projection);
+        // tex는 드로어블 크기 오프스크린이다 — 화면 맞춤으로 자른/남긴 사각형
+        // 기준으로 읽어야 그 안에 실제로 그려진 그림을 짚는다.
+        return tex.sample(samp, (world - u.visibleOrigin) / u.visibleSize);
     }
 
     fragment float4 solid_fragment(
@@ -316,17 +333,34 @@ enum SceneShaders {
         // 스프라이트 시트의 프레임 번호. 시트가 아니면 0이다.
         float frame;
         float4 color;
+        // spritetrail이 속도 방향(레이어 배율 걸림, 거울상 반영)으로 늘여
+        // 그리는 데 쓴다. 다른 렌더러는 무시한다.
+        packed_float3 velocity;
+        // 배율 걸기 **전** 속력 — clamp 크기는 이 값으로 잰다(size에 이미
+        // 배율이 있어 velocity 크기까지 쓰면 두 번 걸린다). ParticleInstance.swift
+        // 필드 주석 참고.
+        float localSpeed;
     };
 
     struct ParticleUniforms {
-        float2 projection;
+        // 화면 맞춤(T6)이 캔버스에서 실제로 보이는 사각형. quad_vertex의
+        // visibleOrigin/visibleSize와 같은 뜻이다.
+        float2 visibleOrigin;
+        float2 visibleSize;
         // 프레임 한 장이 시트에서 차지하는 비율. 시트가 아니면 (1,1)이다.
         float2 frameScale;
         float textureRatio;
         float framesPerRow;
-        // 원근 씬이면 1. 그때는 projection 대신 transform으로 클립 공간에 놓는다.
+        // 원근 씬이면 1. 그때는 visibleOrigin/visibleSize 대신 transform으로
+        // 클립 공간에 놓는다.
         float useTransform;
-        float _pad;
+        // spritetrail이면 1 — 속도 기반 트레일 축을 쓴다. 아니면(sprite·rope·
+        // ropetrail, 후자 둘은 T8 전까지 스프라이트로 그린다) 회전 기반 축이다.
+        float isTrail;
+        // `g_RenderVar0`(length, maxlength, minlength). isTrail이 0이면 안 쓴다.
+        float trailLength;
+        float trailMaxLength;
+        float trailMinLength;
         // 레이어의 세계 변환 × 카메라 뷰·투영. 파티클 좌표는 레이어 기준이다.
         float4x4 transform;
     };
@@ -344,6 +378,39 @@ enum SceneShaders {
         up = m[1];
     }
 
+    // common_particles.h의 ComputeParticleTrailTangents를 옮긴 것.
+    // velocity는 방향(레이어 배율 걸림)용, localSpeed는 clamp 크기(배율 걸기
+    // 전, WE가 로컬 공간에서 계산하는 것과 같다)용으로 나뉜다 — 하나로 합치면
+    // 레이어 배율이 clamp에 두 번 걸린다. 속도 0·NaN이거나 velocity가
+    // eyeDirection과 평행(3D spritetrail에서 순수 z 속도)이면 false를 돌려
+    // 호출자가 스프라이트 경로(회전 기반 축)로 떨어지게 한다 — Kit의
+    // ParticleTrailTangent.compute와 같은 분기다.
+    static bool particleTrailTangents(
+        float3 velocity, float localSpeed, float trailLength, float trailMaxLength,
+        float trailMinLength, thread float3 &right, thread float3 &up
+    ) {
+        // `speed <= 0`이 아니라 `!(speed > 0)`을 쓴다 — NaN과의 비교는 항상
+        // false라 `<=`는 NaN을 통과시키지만 `!(>)`은 막는다.
+        if (!(localSpeed > 0)) return false;
+        float dirLength = length(velocity);
+        if (!(dirLength > 0)) return false;
+        // 직교 2D 시선. 카메라가 +z에 있고 -z를 보는 쪽으로 뒀다 — 세로 속도
+        // (0,1,0)일 때 cross((0,0,-1),(0,1,0)) = (1,0,0)이 스프라이트 기본
+        // right(회전 0일 때 (1,0,0))와 같은 부호라 텍스처가 안 뒤집힌다.
+        // (right,up) 기저의 행렬식이 vx²+vy² > 0이라 z 평면 위 속도에서는
+        // 항상 오른손 방향 — 거울상이 될 일이 없다.
+        float3 eyeDirection = float3(0, 0, -1);
+        float3 rawRight = cross(eyeDirection, velocity);
+        float rightLength = length(rawRight);
+        // velocity가 eyeDirection과 평행하면(3D spritetrail의 순수 z 속도)
+        // cross가 0이라 나눗셈이 NaN을 낳는다 — 그 전에 막는다.
+        if (!(rightLength > 0)) return false;
+        right = rawRight / rightLength;
+        up = (velocity / dirLength)
+            * max(trailMinLength, min(localSpeed * trailLength, trailMaxLength));
+        return true;
+    }
+
     // 인스턴스마다 정점 4개를 펼친다. 지오메트리 셰이더가 필요 없다 —
     // genericparticle의 GS_ENABLED = 0 경로와 같은 방식이다.
     vertex VertexOut particle_vertex(
@@ -357,7 +424,15 @@ enum SceneShaders {
         ParticleInstance p = instances[iid];
 
         float3 right, up;
-        particleTangents(float3(p.rotation), right, up);
+        bool drewTrail = false;
+        if (u.isTrail > 0.5) {
+            drewTrail = particleTrailTangents(
+                float3(p.velocity), p.localSpeed, u.trailLength, u.trailMaxLength,
+                u.trailMinLength, right, up);
+        }
+        if (!drewTrail) {
+            particleTangents(float3(p.rotation), right, up);
+        }
 
         // ComputeParticlePosition 그대로.
         float3 world = float3(p.position)
@@ -365,10 +440,10 @@ enum SceneShaders {
             - p.size * up * (corner.y - 0.5) * u.textureRatio;
 
         // 파티클 위치 계산은 씬 좌표계(Y가 위로 증가)에서 이뤄진다. 중력이 -Y인
-        // 것도 그래서다. 그래서 여기서는 화면 좌표로 한 번만 뒤집으면 된다 —
-        // 빌보드의 up 벡터도 함께 뒤집혀 스프라이트가 바로 선다.
-        float2 ndc = float2((world.x / u.projection.x) * 2.0 - 1.0,
-                            (world.y / u.projection.y) * 2.0 - 1.0);
+        // 것도 그래서다. quad_vertex와 달리 Y를 뒤집지 않는다 — 파티클 world는
+        // 이미 y-up이라 NDC의 y-up과 방향이 같다(화면 맞춤 사각형만 끼운다).
+        float2 ndc = float2(((world.x - u.visibleOrigin.x) / u.visibleSize.x) * 2.0 - 1.0,
+                            ((world.y - u.visibleOrigin.y) / u.visibleSize.y) * 2.0 - 1.0);
         // 스프라이트 시트면 코너를 그 프레임의 칸으로 옮긴다. 안 그러면 파티클
         // 하나가 시트 전체(꽃잎 5장)를 한 칸에 뭉개 그린다.
         float col = fmod(p.frame, u.framesPerRow);
@@ -395,6 +470,38 @@ enum SceneShaders {
         float3 nRight = normalize(right);
         float3 nUp = normalize(up);
         out.screenTangents = float4(nRight.x, nUp.x, nRight.y, nUp.y);
+        return out;
+    }
+
+    // 로프·로프 트레일 정점. CPU(`RopeGeometry` + `ParticleRenderer.updateRope`)가
+    // 씬 좌표(레이어 원점·배율까지 적용)로 이미 옮긴 점을 그대로 받아, particle_vertex와
+    // 같은 T6 화면 맞춤((world - visibleOrigin)/visibleSize)만 한 번 더 건다.
+    // Swift의 `RopeVertex`와 배치가 같아야 한다 — 48바이트.
+    struct RopeVertex {
+        packed_float3 position;
+        float u;
+        float v;
+        float4 color;
+    };
+
+    vertex VertexOut rope_vertex(
+        uint vid [[vertex_id]],
+        constant RopeVertex *verts [[buffer(2)]],
+        constant ParticleUniforms &u [[buffer(3)]]
+    ) {
+        RopeVertex in = verts[vid];
+        float3 world = float3(in.position);
+
+        float2 ndc = float2(((world.x - u.visibleOrigin.x) / u.visibleSize.x) * 2.0 - 1.0,
+                            ((world.y - u.visibleOrigin.y) / u.visibleSize.y) * 2.0 - 1.0);
+
+        VertexOut out;
+        out.position = u.useTransform > 0.5
+            ? u.transform * float4(world, 1.0)
+            : float4(ndc, 0.0, 1.0);
+        out.uv = float2(in.u, in.v);
+        out.color = in.color;
+        out.screenTangents = float4(0, 0, 0, 0);
         return out;
     }
 

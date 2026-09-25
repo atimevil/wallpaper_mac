@@ -29,16 +29,36 @@ public struct ParticleEmitterBurst: Equatable, Sendable {
 public enum ParticleEmitter: Equatable, Sendable {
     case sphereRandom(rate: Double, origin: Vec3, directions: Vec3,
                       distanceMin: Double, distanceMax: Double,
-                      burst: ParticleEmitterBurst = .none)
+                      burst: ParticleEmitterBurst = .none, controlPoint: Int? = nil,
+                      flags: Int = 0)
     case boxRandom(rate: Double, origin: Vec3, directions: Vec3,
                    distanceMin: Vec3, distanceMax: Vec3,
-                   burst: ParticleEmitterBurst = .none)
+                   burst: ParticleEmitterBurst = .none, controlPoint: Int? = nil,
+                   flags: Int = 0)
 
     /// 시작할 때 한꺼번에 만들 개수와 초기 속력.
     public var burst: ParticleEmitterBurst {
         switch self {
-        case .sphereRandom(_, _, _, _, _, let burst): return burst
-        case .boxRandom(_, _, _, _, _, let burst): return burst
+        case .sphereRandom(_, _, _, _, _, let burst, _, _): return burst
+        case .boxRandom(_, _, _, _, _, let burst, _, _): return burst
+        }
+    }
+
+    /// 이 이미터가 뿌릴 자리로 쓰는 제어점. 없으면(대부분) 이 시스템의 원점이다.
+    public var controlPoint: Int? {
+        switch self {
+        case .sphereRandom(_, _, _, _, _, _, let controlPoint, _): return controlPoint
+        case .boxRandom(_, _, _, _, _, _, let controlPoint, _): return controlPoint
+        }
+    }
+
+    /// 이미터 `flags`. 2번 비트(값 2)가 "한 프레임에 하나만 뿌려라"다 —
+    /// 실물 PS2 오브 꼬리(`orbTrail.json`)의 이미터가 `flags: 2`이고, `rate: 60`인데도
+    /// 로프가 프레임마다 정확히 한 마디씩만 자란다. 다른 비트는 실물에서 못 봤다.
+    public var onePerFrame: Bool {
+        switch self {
+        case .sphereRandom(_, _, _, _, _, _, _, let flags): return flags & 2 != 0
+        case .boxRandom(_, _, _, _, _, _, _, let flags): return flags & 2 != 0
         }
     }
 
@@ -54,12 +74,16 @@ public enum ParticleEmitter: Equatable, Sendable {
     /// 원본 반경 1024가 0.65배로 줄어 가로의 3분의 2에만 비가 왔다.
     func scaled(rate factor: Double) -> ParticleEmitter {
         switch self {
-        case .sphereRandom(let r, let o, let d, let lo, let hi, let burst):
+        case .sphereRandom(let r, let o, let d, let lo, let hi, let burst, let controlPoint,
+                           let flags):
             return .sphereRandom(rate: r * factor, origin: o, directions: d,
-                                 distanceMin: lo, distanceMax: hi, burst: burst)
-        case .boxRandom(let r, let o, let d, let lo, let hi, let burst):
+                                 distanceMin: lo, distanceMax: hi, burst: burst,
+                                 controlPoint: controlPoint, flags: flags)
+        case .boxRandom(let r, let o, let d, let lo, let hi, let burst, let controlPoint,
+                        let flags):
             return .boxRandom(rate: r * factor, origin: o, directions: d,
-                              distanceMin: lo, distanceMax: hi, burst: burst)
+                              distanceMin: lo, distanceMax: hi, burst: burst,
+                              controlPoint: controlPoint, flags: flags)
         }
     }
 }
@@ -231,6 +255,11 @@ public struct ParticleOverride: Equatable, Sendable {
     public var brightness: Double = 1
     /// 색도 곱한다(틴트). 0~1이다. 프리셋의 색 변화는 남는다.
     public var color: Vec3?
+    /// 제어점 자리 덮어쓰기(`controlpoint0`~`controlpoint7`). 있으면 그 번호의
+    /// 프리셋 `offset`을 통째로 대신한다 — 배율이 아니라 자리 자체다.
+    /// `ParticleSystem.controlPointPosition`이 매번 여기서 다시 읽는다(굽지 않는다) —
+    /// 스크립트가 언제든 바꿀 수 있어야 하기 때문이다.
+    public var controlPoints: [Int: Vec3] = [:]
 
     public init() {}
 
@@ -238,13 +267,14 @@ public struct ParticleOverride: Equatable, Sendable {
     public var isIdentity: Bool {
         count == 1 && rate == 1 && size == 1 && speed == 1
             && lifetime == 1 && alpha == 1 && brightness == 1 && color == nil
+            && controlPoints.isEmpty
     }
 
     /// 스크립트(`layer.instance`, `instanceoverride.<키>`)가 읽고 쓰는 이름.
-    /// `colorn`만 벡터다.
+    /// `colorn`과 `controlpointN`이 벡터다.
     public static let scriptKeys = [
         "alpha", "size", "count", "speed", "lifetime", "rate", "brightness", "colorn",
-    ]
+    ] + (0...7).map { "controlpoint\($0)" }
 
     /// 스크립트 쪽 `layer.instance`의 시작값.
     public var scriptValues: [String: EffectConstant] {
@@ -254,15 +284,26 @@ public struct ParticleOverride: Equatable, Sendable {
             "brightness": .scalar(brightness),
         ]
         if let color { out["colorn"] = .vector([color.x, color.y, color.z]) }
+        for (id, point) in controlPoints {
+            out["controlpoint\(id)"] = .vector([point.x, point.y, point.z])
+        }
         return out
     }
 
-    /// 스크립트가 쓴 값을 얹는다. 파일과 같은 규칙 — 유한하고 0~100인 배율만 받는다.
+    /// 스크립트가 쓴 값을 얹는다. 배율(수)은 파일과 같은 규칙 — 유한하고 0~100만
+    /// 받는다. 제어점은 배율이 아니라 자리라 그 규칙 밖이다 — 유한하기만 하면 받는다.
     public mutating func apply(_ values: [String: EffectConstant]) {
         for (key, value) in values {
             switch (key, value) {
             case ("colorn", .vector(let v)) where v.count >= 3 && v.prefix(3).allSatisfy(\.isFinite):
                 color = Vec3(x: v[0], y: v[1], z: v[2])
+            case (_, .vector(let v)) where key.hasPrefix("controlpoint")
+                && v.count >= 3 && v.prefix(3).allSatisfy(\.isFinite):
+                // controlpointangleN 같은 안 읽는 키도 이 접두어를 타지만,
+                // 숫자로 못 바뀌거나 0~7 밖이면 그냥 지나간다.
+                if let id = Int(key.dropFirst("controlpoint".count)), (0...7).contains(id) {
+                    controlPoints[id] = Vec3(x: v[0], y: v[1], z: v[2])
+                }
             case (_, .scalar(let d)) where d.isFinite && d >= 0 && d <= 100:
                 switch key {
                 case "alpha": alpha = d
@@ -303,7 +344,105 @@ public struct ParticleOverride: Equatable, Sendable {
             // colorn은 이미 0~1이다. 파티클 프리셋의 색(0~255)과 다르다.
             result.color = parsed
         }
+        // 실물 `previewdrippingwater`가 "controlpoint1"/"controlpoint2"로 두
+        // 낙수 자리를 잡는다. `controlpointangleN`도 실물에 있지만 여기서 읽는
+        // 키가 아니라 자동으로 지나간다 — 깨지거나 오류로 보고되지 않는다.
+        for id in 0...7 {
+            let key = "controlpoint\(id)"
+            if let text = ((json[key] as? [String: Any])?["value"] ?? json[key]) as? String,
+               let parsed = Vec3.parse(text) {
+                result.controlPoints[id] = parsed
+            }
+        }
         return result
+    }
+}
+
+/// `renderer` 항목. 파티클을 사각형 하나로 찍을지, 속도 방향으로 늘여
+/// 그릴지(트레일), 파티클을 잇는 선으로 그릴지(로프)를 정한다.
+///
+/// 무시하면 오브 꼬리·소용돌이 궤적·빗줄기가 전부 점으로만 나온다(실물에서
+/// 확인 — "빛이 안 이어짐" 결함).
+///
+/// 필드 기본값은 WE 에디터 문서(docs.wallpaperengine.io/en/scene/particles/
+/// component/renderer.html)가 숫자를 안 주는 자리라 전부 실물 프리셋에서 근거를
+/// 찾았다: `subdivision` 0(`dischargearc.json`·`thunderbolt.json`이 명시적으로
+/// 0), `uvScale` 1(안 적힌 배율의 관례, 코드베이스 전체가 이 규칙), `uvScrolling`
+/// false(WE의 다른 켜짐/꺼짐 필드들과 같은 관례). `ropeTrail`의 `segments`·
+/// `fadeAlpha`는 실물 프리셋(창작마당 17개 + 번들 Assets) 어디에도 값이 없어
+/// 근거가 없다 — `segments`는 "더 매끄럽게"라는 문서 설명상 최솟값 1(추가
+/// 매끄러움 없음)을, `fadeAlpha`는 다른 uv 토글들과 같은 꺼짐(false)을 썼다.
+/// (T8에서 로프 지오메트리를 그릴 때 창작마당 전체를 다시 훑었다 —
+/// `magic_vortex_0.json`(유일하게 실제로 쓰는 ropetrail)도 `length`만 적고
+/// `segments`는 여전히 안 적는다. 기본값 1은 그대로 남긴다.)
+public enum ParticleRenderKind: Equatable, Sendable {
+    case sprite
+    /// `g_RenderVar0`(length, maxlength, minlength) 그대로.
+    case spriteTrail(length: Double, maxLength: Double, minLength: Double)
+    case rope(subdivision: Int, uvScale: Double, uvScrolling: Bool)
+    case ropeTrail(subdivision: Int, length: Double, segments: Int, fadeAlpha: Bool,
+                   uvScale: Double, uvScrolling: Bool)
+
+    /// `renderer` 배열 첫 항목을 읽는다. WE는 여러 renderer를 적을 수 있게
+    /// 배열로 두지만 실물은 전부 한 개다 — 첫 항목만 쓴다.
+    /// - Parameters:
+    ///   - unsupportedNames: 모르는 이름을 여기 채운다.
+    ///   - malformedNames: 아는 이름인데 필수 필드가 깨졌으면 여기 채운다.
+    static func parse(
+        _ raw: Any?, unsupportedNames: inout Set<String>, malformedNames: inout Set<String>
+    ) -> ParticleRenderKind {
+        guard let array = raw as? [Any], let dict = array.first as? [String: Any],
+              let name = dict["name"] as? String
+        else { return .sprite }
+
+        func double(_ key: String) -> Double? {
+            if let d = dict[key] as? Double { return d.isFinite ? d : nil }
+            if let i = dict[key] as? Int { return Double(i) }
+            return nil
+        }
+        func int(_ key: String, default def: Int) -> Int {
+            if let i = dict[key] as? Int { return i }
+            if let d = dict[key] as? Double, d.isFinite { return Int(d) }
+            return def
+        }
+        func bool(_ key: String, default def: Bool) -> Bool {
+            (dict[key] as? Bool) ?? def
+        }
+
+        switch name {
+        case "sprite":
+            return .sprite
+
+        case "spritetrail":
+            // length/maxlength는 실물이 항상 짝으로 적는다 — 없으면 그릴 수
+            // 없으니 아는 이름 + malformed로 남기고 sprite로 떨어진다.
+            guard let length = double("length"), let maxLength = double("maxlength")
+            else { malformedNames.insert(name); return .sprite }
+            let minLength = double("minlength") ?? 0
+            return .spriteTrail(length: length, maxLength: maxLength, minLength: minLength)
+
+        case "rope":
+            return .rope(
+                subdivision: int("subdivision", default: 0),
+                uvScale: double("uvscale") ?? 1,
+                uvScrolling: bool("uvscrolling", default: false))
+
+        case "ropetrail":
+            guard let length = double("length") else {
+                malformedNames.insert(name); return .sprite
+            }
+            return .ropeTrail(
+                subdivision: int("subdivision", default: 0),
+                length: length,
+                segments: int("segments", default: 1),
+                fadeAlpha: bool("fadealpha", default: false),
+                uvScale: double("uvscale") ?? 1,
+                uvScrolling: bool("uvscrolling", default: false))
+
+        default:
+            unsupportedNames.insert(name)
+            return .sprite
+        }
     }
 }
 
@@ -397,10 +536,22 @@ public struct ParticleChild: Equatable, Sendable {
 /// 연산자들이 번호로 이걸 가리킨다. `flags`의 1번 비트가 **마우스를 따라가라**는
 /// 뜻이다 — 실물 `examplecursoravoid`(이름 그대로 커서를 피하는 예제)의 1번
 /// 제어점이 `flags: 1`이고, `fireflies`·`vapor0`처럼 상호작용 프리셋들이 전부
-/// 같은 꼴이다. 나머지 값(2·4·16)은 무엇에 묶이는지 근거가 없어 그대로 둔다.
+/// 같은 꼴이다. 2번 비트는 월드(화면) 좌표, 16번 비트는 편집기 전용 표시다 —
+/// 실물 `dripping_water`의 두 제어점이 `flags: 16`이다. 4번 비트(부모 복사)만
+/// 아직 못 푼다 — 무엇을 부모로 삼는지 근거가 없다.
 public struct ParticleControlPoint: Equatable, Sendable {
     /// 마우스를 따라간다는 비트.
     public static let followsCursorFlag = 1
+    /// 월드(화면) 좌표라는 비트. `offset`(과 이 점을 덮어쓰는 값)이 로컬이 아니라
+    /// 씬 좌표라는 뜻이다 — `ParticleSystem.controlPointPosition`이 시스템의
+    /// `layerOrigin`/`layerScale`로 로컬로 바꾼다.
+    public static let worldSpaceFlag = 2
+    /// 다른 제어점 값을 그대로 복사하라는 비트. 무엇을 부모로 삼는지 실물에서
+    /// 근거를 못 찾아 아직 못 푼다 — 쓰는 연산자를 보고한다.
+    public static let copyFromParentFlag = 4
+    /// 편집기 UI 전용 표시 비트(실물 `dripping_water`의 두 제어점). 런타임 동작이
+    /// 없다 — 그대로 쓰고 보고하지 않는다.
+    public static let editorOnlyFlag = 16
 
     public let id: Int
     public let offset: Vec3
@@ -413,8 +564,15 @@ public struct ParticleControlPoint: Equatable, Sendable {
     }
 
     public var followsCursor: Bool { flags & Self.followsCursorFlag != 0 }
-    /// 우리가 모르는 묶임이 있는지. 있으면 그 제어점을 쓰는 연산자를 보고한다.
-    public var hasUnknownBinding: Bool { flags & ~Self.followsCursorFlag != 0 }
+    public var isWorldSpace: Bool { flags & Self.worldSpaceFlag != 0 }
+    /// 우리가 못 푸는 묶임이 있는지(모르는 비트 + 부모 복사). 있으면 그 제어점을
+    /// 쓰는 연산자를 보고한다. 2(월드 좌표)와 16(편집기 전용)은 이제 안다 —
+    /// 16은 아무 효과가 없고, 2는 `ParticleSystem`이 로컬로 바꿔 준다.
+    public var hasUnknownBinding: Bool {
+        let known = Self.followsCursorFlag | Self.worldSpaceFlag
+            | Self.copyFromParentFlag | Self.editorOnlyFlag
+        return flags & Self.copyFromParentFlag != 0 || flags & ~known != 0
+    }
 }
 
 public struct ParticlePreset: Equatable, Sendable {
@@ -469,6 +627,8 @@ public struct ParticlePreset: Equatable, Sendable {
     /// 씬의 `instanceoverride`. 초기화자에 굽지 않는다 — `ParticleSystem`이 스폰
     /// 결과와 힘에 곱한다. 초기화자가 없는 프리셋에도 먹어야 하기 때문이다.
     public let instance: ParticleOverride
+    /// `renderer`가 정하는 그리기 방식. 없으면 `.sprite`.
+    public let renderKind: ParticleRenderKind
 
     /// public struct의 memberwise 이니셜라이저는 internal이라 테스트 타깃에서
     /// 쓸 수 없다. Task 3의 시뮬레이션 테스트가 프리셋을 직접 만들어야 하므로
@@ -481,8 +641,10 @@ public struct ParticlePreset: Equatable, Sendable {
         childReferences: [ParticleChildReference] = [],
         children: [ParticleChild] = [],
         controlPoints: [ParticleControlPoint] = [],
-        instance: ParticleOverride = ParticleOverride()
+        instance: ParticleOverride = ParticleOverride(),
+        renderKind: ParticleRenderKind = .sprite
     ) {
+        self.renderKind = renderKind
         self.instance = instance
         self.controlPoints = controlPoints
         self.maxCount = maxCount
@@ -518,7 +680,7 @@ public struct ParticlePreset: Equatable, Sendable {
             malformedNames: malformedNames,
             animationMode: animationMode,
             childReferences: childReferences,
-            children: children, controlPoints: controlPoints, instance: override)
+            children: children, controlPoints: controlPoints, instance: override, renderKind: renderKind)
     }
 
     /// 읽어 온 자식들을 붙인 사본.
@@ -528,7 +690,7 @@ public struct ParticlePreset: Equatable, Sendable {
             emitters: emitters, initializers: initializers, operators: operators,
             unsupportedNames: unsupportedNames, malformedNames: malformedNames,
             animationMode: animationMode, childReferences: childReferences,
-            children: children, controlPoints: controlPoints, instance: instance)
+            children: children, controlPoints: controlPoints, instance: instance, renderKind: renderKind)
     }
 
     /// 총량 예산에 맞추기 위한 축소 배율. 줄일 필요가 없으면 1이다.
@@ -551,7 +713,7 @@ public struct ParticlePreset: Equatable, Sendable {
             initializers: initializers, operators: operators,
             unsupportedNames: unsupportedNames, malformedNames: malformedNames,
             animationMode: animationMode, childReferences: childReferences,
-            children: children, controlPoints: controlPoints, instance: instance)
+            children: children, controlPoints: controlPoints, instance: instance, renderKind: renderKind)
     }
 
     public static func parse(_ json: [String: Any]) -> ParticlePreset? {
@@ -670,6 +832,9 @@ public struct ParticlePreset: Equatable, Sendable {
             }
         }
 
+        let renderKind = ParticleRenderKind.parse(
+            json["renderer"], unsupportedNames: &unsupportedNames, malformedNames: &malformedNames)
+
         return ParticlePreset(
             maxCount: maxCount,
             startTime: startTime,
@@ -681,7 +846,8 @@ public struct ParticlePreset: Equatable, Sendable {
             malformedNames: Array(malformedNames).sorted(),
             animationMode: ParticleAnimationMode.parse(json["animationmode"]),
             childReferences: parseChildren(json["children"]),
-            controlPoints: parseControlPoints(json["controlpoint"])
+            controlPoints: parseControlPoints(json["controlpoint"]),
+            renderKind: renderKind
         )
     }
 
@@ -775,12 +941,32 @@ public struct ParticlePreset: Equatable, Sendable {
             speedMax: (num(dict, "speedmax", 0) ?? 0).isFinite
                 ? Swift.max(0, num(dict, "speedmax", 0) ?? 0) : 0)
 
+        // 있으면 그 제어점 자리에서 뿌린다(실물 `dripping_water`). 없으면(대부분)
+        // nil로 두어 지금처럼 이 시스템의 원점에서 뿌린다 — `controlpointattract`
+        // 등과 달리 생략을 0번으로 보지 않는다. 실물 이미터 대부분이 이 키가 아예
+        // 없는데, 0번으로 보면 0번 제어점을 따로 정의한 모든 씬의 뿌리는 자리가
+        // 조용히 바뀐다.
+        let controlPoint: Int?
+        if dict["controlpoint"] == nil {
+            controlPoint = nil
+        } else if let parsed = getInt(dict["controlpoint"]) {
+            controlPoint = parsed
+        } else {
+            return nil
+        }
+
+        // `flags`(실물 `orbTrail.json`이 2를 쓴다 — "한 프레임에 하나만 뿌려라").
+        // 깨진 값은 0(아무 비트도 없음)으로 본다 — 못 읽었다고 이미터 전체를
+        // 버릴 이유는 아니다.
+        let flags = getInt(dict["flags"]) ?? 0
+
         switch name {
         case "sphererandom":
             guard let lo = num(dict, "distancemin", 0), let hi = num(dict, "distancemax", 0)
             else { return nil }
             return .sphereRandom(rate: rate, origin: origin, directions: directions,
-                                 distanceMin: lo, distanceMax: hi, burst: burst)
+                                 distanceMin: lo, distanceMax: hi, burst: burst,
+                                 controlPoint: controlPoint, flags: flags)
 
         case "boxrandom":
             // 상자는 distancemin~distancemax 사이를 채운다. distancemin이 없으면 0이다 —
@@ -789,7 +975,8 @@ public struct ParticlePreset: Equatable, Sendable {
                   let hi = vec(dict, "distancemax", zero)
             else { return nil }
             return .boxRandom(rate: rate, origin: origin, directions: directions,
-                              distanceMin: lo, distanceMax: hi, burst: burst)
+                              distanceMin: lo, distanceMax: hi, burst: burst,
+                              controlPoint: controlPoint, flags: flags)
 
         default:
             return nil

@@ -22,6 +22,9 @@ public struct Particle: Equatable, Sendable {
     public var baseSize: Double = 1
     public var baseAlpha: Double = 1
     public var baseColor: Vec3 = Vec3(x: 1, y: 1, z: 1)
+    /// 태어난 차례. 슬롯은 재사용돼 버퍼 순서가 스폰 순서가 아니다 — 로프가
+    /// `age` 동률(같은 프레임에 여럿 태어남)을 가를 때만 쓴다.
+    public var spawnSequence: Int = 0
 
     public var isAlive: Bool {
         age < lifetime
@@ -58,6 +61,12 @@ public final class ParticleSystem {
     /// 이 시스템이 놓인 자리. 자식 시스템이 부모 파티클을 따라다닐 때 여기가 바뀐다.
     /// 방출할 때 파티클 위치에 더해진다.
     public var originOffset = Vec3(x: 0, y: 0, z: 0)
+
+    /// 이 시스템을 담은 레이어의 씬 좌표 원점·배율. `cursorPosition`처럼 렌더러가
+    /// 만들 때 한 번 넣어 준다 — 월드(화면) 좌표 제어점(플래그 2)을 이 시스템의
+    /// 로컬 좌표로 바꿀 때만 쓴다(파티클 좌표계 자체가 레이어 기준 상대 좌표라서다).
+    public var layerOrigin = Vec3(x: 0, y: 0, z: 0)
+    public var layerScale = Vec3(x: 1, y: 1, z: 1)
 
     /// 이 프리셋이 거느리는 자식들(정의).
     private let children: [ParticleChild]
@@ -98,6 +107,9 @@ public final class ParticleSystem {
     /// `mapsequencearoundcontrolpoint` 초기화자별로 다음에 쓸 자리 번호.
     /// 초기화자가 배열에 여럿 있어도 서로 안 섞이게 `initializers` 안 위치로 키를 잡는다.
     private var sequenceCounters: [Int: Int] = [:]
+    /// 다음에 태어날 파티클에 매길 순번. 버퍼 슬롯은 재사용되므로 태어난
+    /// 차례를 아는 유일한 길이다 — 로프가 `age` 동률을 가를 때 쓴다.
+    private var nextSpawnSequence: Int = 0
 
     public init(preset: ParticlePreset, random: RandomSource) {
         self.preset = preset
@@ -146,6 +158,16 @@ public final class ParticleSystem {
                 unimplemented.insert("mapsequencearoundcontrolpoint(제어점 \(point))")
             }
         }
+        for emitter in preset.emitters {
+            // 이미터가 못 푸는 제어점을 쓰면 뿌리는 자리는 원점으로 물러난다
+            // (emitParticle 참고) — 그 사실은 여기서 한 번만 남긴다.
+            guard let point = emitter.controlPoint, Self.unresolvableControlPoint(point, in: preset)
+            else { continue }
+            switch emitter {
+            case .sphereRandom: unimplemented.insert("sphererandom(제어점 \(point))")
+            case .boxRandom: unimplemented.insert("boxrandom(제어점 \(point))")
+            }
+        }
         self.unimplementedOperators = Array(unimplemented).sorted()
         self.hasSizeCurve = preset.operators.contains {
             switch $0 {
@@ -175,6 +197,50 @@ public final class ParticleSystem {
             }
         }
         return result
+    }
+
+    /// 로프가 이을 순서로 정렬한 살아 있는 파티클. `age` 내림차순, 같으면
+    /// 생성 순번(`spawnSequence`) 오름차순 — 슬롯이 재사용돼 버퍼 순서가
+    /// 스폰 순서가 아니고, 같은 프레임에 여럿 태어나면 나이가 완전히 같다
+    /// (`ageParticles`가 모두에게 같은 dt를 더한다).
+    public var ropeOrderedParticles: [Particle] {
+        particles.sorted { a, b in
+            if a.age != b.age { return a.age > b.age }
+            return a.spawnSequence < b.spawnSequence
+        }
+    }
+
+    /// `renderableGroups`의 로프 판. 같은 정의에서 나온 자식 벌들을 **합치지
+    /// 않고** 벌마다 따로 순서 있는 배열로 돌려준다 — 로프는 다른 인스턴스의
+    /// 파티클과 이어지면 안 된다(오브 하나의 꼬리가 다른 오브 자리로 튄다).
+    public func ropeGroups(
+        prefix: String = "", depth: Int = 0
+    ) -> [(key: String, preset: ParticlePreset, instances: [[Particle]])] {
+        var out: [(key: String, preset: ParticlePreset, instances: [[Particle]])] = [
+            (prefix.isEmpty ? "0" : prefix, preset, [ropeOrderedParticles])
+        ]
+        guard depth < 2 else { return out }
+        for (index, list) in childInstances.enumerated() {
+            guard !list.isEmpty else { continue }
+            let key = (prefix.isEmpty ? "0" : prefix) + ".\(index)"
+            var instances: [[Particle]] = []
+            var nested: [String: (ParticlePreset, [[Particle]])] = [:]
+            for instance in list {
+                for group in instance.system.ropeGroups(prefix: key, depth: depth + 1) {
+                    if group.key == key {
+                        instances.append(contentsOf: group.instances)
+                    } else {
+                        nested[group.key, default: (group.preset, [])].1
+                            .append(contentsOf: group.instances)
+                    }
+                }
+            }
+            out.append((key, children[index].preset, instances))
+            for (key, value) in nested.sorted(by: { $0.key < $1.key }) {
+                out.append((key, value.0, value.1))
+            }
+        }
+        return out
     }
 
     /// 그릴 것들을 프리셋별로 모아 준다. 자식까지 재귀로 훑는다.
@@ -323,6 +389,10 @@ public final class ParticleSystem {
                 x: position.x + child.reference.origin.x,
                 y: position.y + child.reference.origin.y,
                 z: position.z + child.reference.origin.z)
+            // 월드 좌표(플래그 2) 제어점을 자식도 풀 수 있어야 한다 — 안 물려주면
+            // 기본값(원점 0, 배율 1)이라 변환이 헛돈다(worldToLocal 참고).
+            system.layerOrigin = layerOrigin
+            system.layerScale = layerScale
             childInstances[index].append(
                 ChildInstance(system: system, followSlot: trigger == .follow ? slot : nil))
         }
@@ -382,6 +452,8 @@ public final class ParticleSystem {
                     continue
                 }
                 particle.age = 0
+                particle.spawnSequence = nextSpawnSequence
+                nextSpawnSequence += 1
                 particleBuffer[slot] = particle
                 numAlive += 1
                 spawnChildren(on: .onSpawn, at: particle.position, slot: slot)
@@ -395,9 +467,9 @@ public final class ParticleSystem {
             // Accumulate emission credit
             let rate: Double
             switch emitter {
-            case .sphereRandom(let r, _, _, _, _, _):
+            case .sphereRandom(let r, _, _, _, _, _, _, _):
                 rate = r
-            case .boxRandom(let r, _, _, _, _, _):
+            case .boxRandom(let r, _, _, _, _, _, _, _):
                 rate = r
             }
 
@@ -414,7 +486,11 @@ public final class ParticleSystem {
             // Int(Double)은 범위 밖에서 트랩한다. 파일에서 온 rate가 거대할 수 있으므로
             // Double 단계에서 먼저 슬롯 수 이하로 죈다. 그 뒤엔 변환이 안전하다.
             let available = Double(deadSlots.count)
-            let toEmit = Swift.min(emissionCredits[emitterIndex].rounded(.down), available)
+            var toEmit = Swift.min(emissionCredits[emitterIndex].rounded(.down), available)
+            // 로프 트레일 이미터(실물 `orbTrail`)는 `rate: 60`이라도 한 프레임에
+            // 마디 하나씩만 자라야 한다 — 안 그러면 트레일이 프레임마다 여러 개를
+            // 한꺼번에 토해내 같은 자리에 뭉친다.
+            if emitter.onePerFrame { toEmit = Swift.min(toEmit, 1) }
             let emitCount = toEmit > 0 ? Int(toEmit) : 0
 
             for _ in 0..<emitCount {
@@ -422,6 +498,8 @@ public final class ParticleSystem {
                     var particle = emitParticle(from: emitter)
                     if isValidParticle(particle) {
                         particle.age = 0
+                        particle.spawnSequence = nextSpawnSequence
+                        nextSpawnSequence += 1
                         particleBuffer[slotIndex] = particle
                         numAlive += 1
                         spawnChildren(on: .onSpawn, at: particle.position, slot: slotIndex)
@@ -454,9 +532,14 @@ public final class ParticleSystem {
             frameSeed: random.next()
         )
 
+        // 제어점 이미터는 그 제어점 자리에서 뿌린다(실물 `dripping_water`의 두
+        // 낙수 자리). 없으면(대부분) 지금처럼 이 시스템의 원점이다. 번호를 못
+        // 풀면 원점으로 물러난다 — 생성자가 이미 이름과 번호로 한 번 보고했다.
+        let base = emitter.controlPoint.flatMap { controlPointPosition($0) } ?? originOffset
+
         // Apply emitter position and velocity
         switch emitter {
-        case .sphereRandom(_, let origin, let directions, let distanceMin, let distanceMax, _):
+        case .sphereRandom(_, let origin, let directions, let distanceMin, let distanceMax, _, _, _):
             particle.position = origin
             // Random direction within cone
             let theta = random.next() * 2 * .pi
@@ -470,22 +553,22 @@ public final class ParticleSystem {
                 z: cos(phi) * directions.z
             )
             particle.position = Vec3(
-                x: originOffset.x + origin.x + unit.x * distance,
-                y: originOffset.y + origin.y + unit.y * distance,
-                z: originOffset.z + origin.z + unit.z * distance
+                x: base.x + origin.x + unit.x * distance,
+                y: base.y + origin.y + unit.y * distance,
+                z: base.z + origin.z + unit.z * distance
             )
             applyEmitterSpeed(emitter.burst, direction: unit, to: &particle)
 
-        case .boxRandom(_, let origin, let directions, let distanceMin, let distanceMax, _):
+        case .boxRandom(_, let origin, let directions, let distanceMin, let distanceMax, _, _, _):
             let offset = Vec3(
                 x: (distanceMin.x + random.next() * (distanceMax.x - distanceMin.x)) * directions.x,
                 y: (distanceMin.y + random.next() * (distanceMax.y - distanceMin.y)) * directions.y,
                 z: (distanceMin.z + random.next() * (distanceMax.z - distanceMin.z)) * directions.z
             )
             particle.position = Vec3(
-                x: originOffset.x + origin.x + offset.x,
-                y: originOffset.y + origin.y + offset.y,
-                z: originOffset.z + origin.z + offset.z
+                x: base.x + origin.x + offset.x,
+                y: base.y + origin.y + offset.y,
+                z: base.z + origin.z + offset.z
             )
             applyEmitterSpeed(emitter.burst, direction: offset, to: &particle)
         }
@@ -949,14 +1032,53 @@ public final class ParticleSystem {
     /// 프레임에는 시스템 자리에 둔다(가만히 있는 편이 튀는 것보다 낫다).
     func controlPointPosition(_ id: Int) -> Vec3? {
         guard let point = preset.controlPoints.first(where: { $0.id == id }) else {
-            // 프리셋에 없는 번호라도 0번은 시스템 자신의 자리로 본다.
-            return id == 0 ? originOffset : nil
+            // 프리셋에 없는 번호라도 0번은 시스템 자신의 자리로 본다. 덮어쓰기가
+            // 있으면 그 위에 얹는다 — 정의된 점이 없어 플래그를 모르니 로컬로 본다
+            // (world 플래그는 프리셋의 점에만 달리므로 여기선 판단할 근거가 없다).
+            guard id == 0 else { return nil }
+            guard let raw = instance.controlPoints[0] else { return originOffset }
+            return Vec3(x: originOffset.x + raw.x,
+                        y: originOffset.y + raw.y,
+                        z: originOffset.z + raw.z)
         }
         if point.hasUnknownBinding { return nil }
+        // 씬의 controlpointN 덮어쓰기(스크립트 포함)가 있으면 프리셋 offset을
+        // 통째로 대신한다. 매번 다시 읽는다 — 스크립트가 언제든 바꿀 수 있다.
+        let raw = instance.controlPoints[id] ?? point.offset
+        if point.isWorldSpace {
+            // 월드 좌표는 씬 전체 기준 절대 좌표라 그 자체가 최종 로컬 자리다 —
+            // 이 시스템의 원점/커서(base)를 더하면 안 된다. 특히 자식 시스템은
+            // originOffset이 "부모 파티클이 지금 있는 자리"라서, 더하면 화면
+            // 좌표에 부모 위치가 또 얹혀 이중으로 밀린다.
+            return worldToLocal(raw)
+        }
         let base = point.followsCursor ? (cursorPosition ?? originOffset) : originOffset
-        return Vec3(x: base.x + point.offset.x,
-                    y: base.y + point.offset.y,
-                    z: base.z + point.offset.z)
+        return Vec3(x: base.x + raw.x,
+                    y: base.y + raw.y,
+                    z: base.z + raw.z)
+    }
+
+    /// 월드(화면) 좌표(플래그 2)를 이 시스템의 로컬 좌표로 바꾼다. 파티클
+    /// 좌표계 자체가 레이어 원점 기준 상대 좌표라서 그렇다(이미터 스폰 위치가
+    /// `originOffset + origin`으로 쌓이는 것과 같은 이유).
+    ///
+    /// ponytail: 레이어 회전은 무시한다 — 회전한 그룹 밑의 월드 좌표 제어점은
+    /// 실물에서 아직 못 봤다. `layerOrigin`/`layerScale`은 렌더러가 시스템을
+    /// 만들 때 한 번 넣어 준 값이라, 스크립트가 나중에 레이어를 옮겨도 다시
+    /// 갱신되지 않는다 — 그런 조합도 아직 실물에서 못 봤다. 둘 다 필요해지면
+    /// 렌더러가 `cursorPosition`처럼 매 틱 갱신해야 한다. 자식 시스템도 부모가
+    /// 스폰하는 순간 이 값을 한 번만 물려받는다(`spawnChildren` 참고) — 부모
+    /// 레이어가 나중에 옮겨져도 이미 만들어진 자식에는 다시 전파되지 않는다.
+    private func worldToLocal(_ v: Vec3) -> Vec3 {
+        func axis(_ value: Double, _ origin: Double, _ scale: Double) -> Double {
+            // 배율 0(또는 비유한)은 나눗셈을 피하려고 1로 본다 — NaN이 여기서
+            // 새면 이 자리를 쓰는 파티클이 전부 화면에서 사라진다.
+            guard scale.isFinite, scale != 0 else { return value - origin }
+            return (value - origin) / scale
+        }
+        return Vec3(x: axis(v.x, layerOrigin.x, layerScale.x),
+                    y: axis(v.y, layerOrigin.y, layerScale.y),
+                    z: axis(v.z, layerOrigin.z, layerScale.z))
     }
 
     /// 그 번호를 못 푸는지. 생성자에서 보고할지 정하는 데 쓴다.

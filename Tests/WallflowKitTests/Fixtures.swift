@@ -88,12 +88,26 @@ func buildTexV2(format: Int32 = 0, flags: Int32 = 0,
     return d
 }
 
-/// flags & 4면 밉맵 뒤에 TEXS 섹션이 붙는다.
-func spriteSheetV2(frameCount: Int32) -> Data {
-    nullTerminated("TEXS0002") + le32(frameCount) + Data(count: Int(frameCount) * 32)
+/// flags & 4면 밉맵 뒤에 TEXS 섹션이 붙는다. frames를 주면 그 32바이트짜리
+/// 프레임들을 그대로 쓰고, 안 주면 예전처럼 0으로 채운다(내용을 안 보는 시험용).
+func spriteSheetV2(frameCount: Int32, frames: [Data]? = nil) -> Data {
+    nullTerminated("TEXS0002") + le32(frameCount)
+        + (frames.map { Data($0.joined()) } ?? Data(count: Int(frameCount) * 32))
 }
 
-func spriteSheetV3(frameCount: Int32, grid: (Int32, Int32)) -> Data {
+func spriteSheetV3(frameCount: Int32, grid: (Int32, Int32), frames: [Data]? = nil) -> Data {
     nullTerminated("TEXS0003") + le32(frameCount) + le32(grid.0) + le32(grid.1)
-        + Data(count: Int(frameCount) * 32)
+        + (frames.map { Data($0.joined()) } ?? Data(count: Int(frameCount) * 32))
+}
+
+/// 프레임 표 한 칸(32바이트). 실물 8종(TexSpriteFrame 문서에 적은 background.tex·
+/// smoke2light·smoke3·lightning1~3·sparks_sheet·splash_9)으로 확인한 배치:
+/// float32 리틀엔디언 8개 = [예약, 길이(초), x, y, 폭, 미상, 미상, 높이].
+/// 예약과 미상 둘은 실물 전부 0이었다.
+func spriteFrame(x: Float, y: Float, width: Float, height: Float, duration: Float) -> Data {
+    [Float(0), duration, x, y, width, Float(0), Float(0), height]
+        .reduce(into: Data()) { bytes, value in
+            var v = value
+            bytes += withUnsafeBytes(of: &v) { Data($0) }
+        }
 }

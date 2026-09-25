@@ -48,7 +48,9 @@ final class RealScenesTests: XCTestCase {
         return AssetsStore(root: url)
     }
 
-    private func scenePkg(_ id: String) throws -> PkgReader? {
+    /// `pkg`: 패키지 파일 이름. 대부분 `scene.pkg`지만 실물 창작마당 씬 중엔
+    /// `gifscene.pkg`인 것도 있다(`SceneDocument.sceneEntryName` 주석 참고).
+    private func scenePkg(_ id: String, pkg: String = "scene.pkg") throws -> PkgReader? {
         if let badPath = badPath {
             XCTFail("WALLFLOW_TEST_SCENES가 설정되었지만 디렉토리가 아니거나 존재하지 않음: \(badPath)")
             return nil
@@ -56,7 +58,7 @@ final class RealScenesTests: XCTestCase {
         guard let root else {
             throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
         }
-        let url = root.appendingPathComponent(id).appendingPathComponent("scene.pkg")
+        let url = root.appendingPathComponent(id).appendingPathComponent(pkg)
         guard FileManager.default.fileExists(atPath: url.path) else {
             // ROOT는 설정되고 유효한데 이 씬만 없다. 여기서 nil을 반환하면 호출부의
             // `guard let ... else { throw XCTSkip(...) }`로 빠져 "환경변수 미설정"으로
@@ -98,6 +100,60 @@ final class RealScenesTests: XCTestCase {
         }
         XCTAssertEqual(cg.width, 2048)
         XCTAssertEqual(cg.height, 1164)
+    }
+
+    /// Task 5 목표 씬(워크숍 3795096226 "Loading...", 패키지 gifscene.pkg).
+    /// 이미지 레이어 하나가 320x200 GIF를 10x6 격자로 늘어놓은 3200x1200
+    /// 스프라이트 시트다. 시트인 줄 모르면 격자 전체를 정지 이미지로 그린다 —
+    /// 이 시험은 프레임 표가 60칸·320x200·0.1초로 정확히 풀리는지만 본다
+    /// (그린 결과 자체는 SceneRenderer/앱 쪽이라 여기서 보지 않는다).
+    func testLoadingSceneBackgroundTextureIsA60FrameSpriteSheet() throws {
+        guard let reader = try scenePkg("3795096226", pkg: "gifscene.pkg") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let data = try reader.data(for: "materials/background.tex")
+        let header = try TexHeader.parse(data)
+        XCTAssertEqual(header.flags, 7, "sprite-sheet 비트(4)를 포함해야 한다")
+        let sheet = try XCTUnwrap(header.spriteSheet)
+        XCTAssertEqual(sheet.frameCount, 60)
+        XCTAssertEqual(sheet.frames.count, 60)
+        XCTAssertTrue(sheet.frames.allSatisfy { $0.width == 320 && $0.height == 200 },
+                      "모든 칸이 320x200이어야 한다")
+        let point1 = Double(Float(0.1))
+        XCTAssertTrue(sheet.frames.allSatisfy { $0.duration == point1 },
+                      "모든 칸이 0.1초여야 한다")
+        // 10칸씩 한 줄, 6줄. 인덱스 10이 둘째 줄 첫 칸이다.
+        XCTAssertEqual(sheet.frames[0], TexSpriteFrame(x: 0, y: 0, width: 320, height: 200, duration: point1))
+        XCTAssertEqual(sheet.frames[9], TexSpriteFrame(x: 2880, y: 0, width: 320, height: 200, duration: point1))
+        XCTAssertEqual(sheet.frames[10], TexSpriteFrame(x: 0, y: 200, width: 320, height: 200, duration: point1))
+        XCTAssertEqual(sheet.frames[59], TexSpriteFrame(x: 2880, y: 1000, width: 320, height: 200, duration: point1))
+    }
+
+    /// Task 5 fix round 1 목표 씬(워크숍 3793322447). 재생 버튼이
+    /// `thisLayer.getTextureAnimation()`으로 2칸(각 1.0초)짜리 아이콘 시트를
+    /// pause()+setFrame()으로 못박는다 — 스프라이트 시트 재생을 그냥 시간에
+    /// 맡기면 이 버튼이 초당 자동으로 넘어간다. 스크립트 호스트가 첫 틱을
+    /// 돈 뒤 멈춘 채 정해진 칸에 있어야 한다.
+    func testMediaButtonPinsToAFixedFrameAfterFirstTick() throws {
+        guard let reader = try scenePkg("3793322447") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader)
+        guard let layer = doc.layers.first(where: { $0.name.contains("Play Button") }) else {
+            return XCTFail("재생 버튼 레이어를 찾을 수 없다")
+        }
+        XCTAssertFalse(layer.scripts.isEmpty, "재생 버튼에 스크립트가 붙어 있어야 한다")
+
+        let seeds = doc.layers.map(SceneScriptHost.LayerSeed.init)
+        let host = SceneScriptHost(layers: seeds, camera: doc.camera)
+        XCTAssertNil(host.fatalFailure)
+        let snapshot = host.tick(frametime: 1.0 / 60)
+        let state = try XCTUnwrap(snapshot.layers[layer.id])
+        XCTAssertEqual(state.textureAnimationPlaying, false,
+                       "재생 버튼은 init()에서 바로 pause()한다")
+        // 새 컨텍스트라 localStorage가 비어 있어 shared.ckMediaPlayButton 기본값(true)이
+        // 쓰인다 → 두 콜백 모두 setFrame(1)로 합의한다(스크립트 원문 참고).
+        XCTAssertEqual(state.textureAnimationFrame, 1)
     }
 
     /// 226MB 텍스처 두 개가 MP4였다. 이 판정이 틀리면 두 씬이 통째로 깨진다.
@@ -267,6 +323,24 @@ final class RealScenesTests: XCTestCase {
     }
 
 
+
+    /// Task 2(F): DELTARUNE(3793923399)의 `new_particle_system` 레이어.
+    /// 머티리얼 `materials/particle/halo_1.json`이 `"textures": [null]`이라
+    /// 예전엔 통째로 unsupported였다. 이제 셰이더 기본값(흰색)으로 그린다.
+    /// 패키지 이름이 `gifscene.pkg`다(scene.pkg가 아니다).
+    func testDeltaruneParticleWithNullTextureResolves() throws {
+        guard let reader = try scenePkg("3793923399", pkg: "gifscene.pkg") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard let layer = doc.layers.first(where: { $0.name == "new_particle_system" }) else {
+            return XCTFail("new_particle_system 레이어가 없다")
+        }
+        guard case .particle(_, let texturePath, _, _, _) = layer.content else {
+            return XCTFail("unsupported면 안 된다: \(layer.content)")
+        }
+        XCTAssertEqual(texturePath, "materials/util/white.tex")
+    }
 
     /// 값 단언이 한 번도 닿지 않던 씬. PNG 텍스처가 많다.
     func testSmallestSceneResolvesLayers() throws {

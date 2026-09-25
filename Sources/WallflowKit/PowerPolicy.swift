@@ -68,4 +68,19 @@ public enum PowerPolicy {
         if signals.isThermallyPressured { fps = Swift.min(fps, reducedFPS) }
         return .playing(fps: fps)
     }
+
+    /// 씬 콘텐츠만 보고 매 프레임 다시 그려야 하는지 정한다. 붙일 때와
+    /// 재생을 다시 시작할 때(`apply(.playing)`) 둘 다 이 기준 하나를 써야
+    /// 한다 — 따로 판단하면 이펙트·스크립트·퍼펫만으로 움직이는 씬이 한쪽
+    /// 목록에서 빠져, 가려짐으로 멈췄다가 재개돼도 검은 화면으로 남는다.
+    /// 스프라이트 시트 이미지(`hasAnimatedImage`)도 시간에 따라 장이 넘어간다 —
+    /// 빠지면 "Loading..." 같은 GIF 씬이 첫 장에 멈춘다.
+    public static func needsContinuousDrawing(
+        hasVideo: Bool, hasParticles: Bool, hasText: Bool,
+        hasAnimatedEffect: Bool, hasScriptHost: Bool, hasPuppets: Bool,
+        hasAnimatedImage: Bool = false
+    ) -> Bool {
+        hasVideo || hasParticles || hasText || hasAnimatedEffect || hasScriptHost || hasPuppets
+            || hasAnimatedImage
+    }
 }

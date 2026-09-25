@@ -23,6 +23,30 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(doc.orthoHeight, 1164)
         XCTAssertEqual(doc.clearColor, Vec3(x: 0.7, y: 0.7, z: 0.7))
         XCTAssertTrue(doc.clearEnabled)
+        // zoom이 없으면 확대 없음(1)이다.
+        XCTAssertEqual(doc.zoom, 1)
+    }
+
+    /// 실물 세로형 씬 3794448602이 실제로 갖고 있는 `general.zoom`.
+    func testParsesGeneralZoom() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 810, "height": 1080}, "zoom": 1.08},
+         "objects": []}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.zoom, 1.08, accuracy: 0.0001)
+    }
+
+    /// 0 이하이거나 NaN이면 확대 없음(1)으로 본다 — 깨진 값이 화면을 밀어내면 안 된다.
+    func testInvalidZoomFallsBackToOne() throws {
+        for badZoom in ["0", "-1.5", "\"nan\""] {
+            let reader = try makeScenePkg(scene: """
+            {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}, "zoom": \(badZoom)},
+             "objects": []}
+            """)
+            let doc = try SceneDocument.load(from: reader)
+            XCTAssertEqual(doc.zoom, 1, "zoom \(badZoom)은 1이어야 한다")
+        }
     }
 
     /// 실물 씬 3714517753의 실제 참조 사슬을 그대로 재현한다.
@@ -477,6 +501,31 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(preset.maxCount, 300)
         XCTAssertEqual(preset.emitters.count, 1)
         XCTAssertEqual(texturePath, "materials/particle/chromaticdot.tex")
+    }
+
+    /// 실물 DELTARUNE(3793923399)의 `materials/particle/halo_1.json`이 이 모양이다:
+    /// `"textures": [null]`. Wallpaper Engine에서 null 슬롯은 셰이더 주석의 기본값을
+    /// 쓴다(`genericparticle.frag`의 `g_Texture0` 기본값 `util/white`). 파티클을
+    /// 통째로 unsupported로 버리면 안 된다.
+    func testParticleWithNullTextureUsesShaderDefault() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "halo", "origin": "0 0 0",
+                          "particle": "particles/presets/halo.json"}]}
+            """,
+            extras: [
+                "particles/presets/halo.json":
+                    #"{"material":"materials/presets/halo.json","maxcount":10}"#,
+                "materials/presets/halo.json":
+                    #"{"passes":[{"shader":"genericparticle","textures":[null]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .particle(_, let texturePath, _, _, _) = doc.layers[0].content else {
+            return XCTFail("null 텍스처도 파티클로 해석되어야 한다: \(doc.layers[0].content)")
+        }
+        XCTAssertEqual(texturePath, "materials/util/white.tex")
     }
 
     /// 재질이 자기 셰이더를 가지면 텍스처를 붙이는 이미지가 아니다. 실물 원근
@@ -1133,5 +1182,20 @@ extension SceneDocumentTests {
                        ["instanceoverride.rate"])
         XCTAssertEqual(SceneDocument.scriptHolders(of: object).map(\.property),
                        ["instanceoverride.rate"])
+    }
+
+    /// controlpointN 덮어쓰기도 스크립트를 가질 수 있다(`layer.instance.controlpointN`).
+    /// `scriptHolders`는 이미 `ParticleOverride.scriptKeys`를 훑으므로, 그 목록에
+    /// controlpoint0~7을 더하는 것만으로 여기까지 이어진다 — 이 파일은 안 고쳤다.
+    func testControlPointOverrideScriptsAreLayerScripts() {
+        let object: [String: Any] = [
+            "particle": "particles/p.json",
+            "instanceoverride": [
+                "controlpoint1": ["script": "export function update(v) { return v; }",
+                                  "value": "0 0 0"],
+            ],
+        ]
+        XCTAssertEqual(SceneDocument.scriptHolders(of: object).map(\.property),
+                       ["instanceoverride.controlpoint1"])
     }
 }

@@ -185,6 +185,46 @@ final class ParticleChildTests: XCTestCase {
         XCTAssertEqual(groups[1].particles.count, 40, "두 벌까지만 — 네 벌이 아니다")
     }
 
+    /// 자식이 월드 좌표(플래그 2) 제어점을 풀 때, 부모에게서 물려받은 자리
+    /// (`originOffset`, 여기선 0이 아니다)를 다시 더하면 안 된다 — 월드 좌표는
+    /// 이미 절대 좌표라 로컬로 바꾼 값 자체가 최종 자리다. 레이어 원점/배율도
+    /// 자식에게 물려줘야 변환이 헛돌지 않는다(기본값 원점 0·배율 1이면 no-op).
+    func testChildResolvesWorldSpaceControlPointWithoutDoubleShift() throws {
+        let parentJSON = """
+        {"maxcount": 1, "material": "materials/parent.json",
+         "emitter": [{"name": "sphererandom", "rate": 0, "instantaneous": 1,
+                      "origin": "50 50 0", "distancemin": 0, "distancemax": 0}],
+         "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100}]}
+        """
+        let childJSON = """
+        {"maxcount": 4, "material": "materials/spark.json",
+         "controlpoint": [{"id": 1, "offset": "1000 500 0", "flags": 2}],
+         "emitter": [{"name": "sphererandom", "rate": 0, "instantaneous": 1,
+                      "controlpoint": 1, "distancemin": 0, "distancemax": 0}],
+         "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100}]}
+        """
+        let parentObject = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(parentJSON.utf8)) as? [String: Any])
+        let childObject = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(childJSON.utf8)) as? [String: Any])
+        let child = ParticleChild(
+            reference: ParticleChildReference(
+                name: "particles/spark.json", trigger: .onSpawn,
+                maxCount: 3, origin: Vec3(x: 0, y: 0, z: 0)),
+            preset: try XCTUnwrap(ParticlePreset.parse(childObject)),
+            texturePath: "materials/c.tex", blend: .additive)
+        let preset = try XCTUnwrap(ParticlePreset.parse(parentObject)).withChildren([child])
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 7))
+        system.layerOrigin = Vec3(x: 100, y: 100, z: 0)
+        system.layerScale = Vec3(x: 2, y: 2, z: 1)
+        system.update(deltaTime: 1.0 / 60)
+        let groups = system.renderableGroups()
+        XCTAssertEqual(groups.count, 2, "부모가 뿌리는 순간 자식이 같이 생겨야 한다")
+        let childParticle = try XCTUnwrap(groups[1].particles.first)
+        // (1000-100)/2=450, (500-100)/2=200 — 부모 자리(50,50,0)를 다시 더하면 안 된다.
+        XCTAssertEqual(childParticle.position, Vec3(x: 450, y: 200, z: 0))
+    }
+
     /// `eventfollow`는 부모를 따라간다. 부모가 움직이면 자식의 원점도 옮겨간다.
     func testFollowChildTracksParent() throws {
         let json = """

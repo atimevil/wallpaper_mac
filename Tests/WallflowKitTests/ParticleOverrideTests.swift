@@ -48,7 +48,7 @@ final class ParticleOverrideTests: XCTestCase {
         let p = preset().applying(o)
         XCTAssertEqual(p.instance, o)
         XCTAssertEqual(p.initializers, preset().initializers)
-        guard case .sphereRandom(let rate, _, _, let lo, let hi, _) = p.emitters[0] else {
+        guard case .sphereRandom(let rate, _, _, let lo, let hi, _, _, _) = p.emitters[0] else {
             return XCTFail("sphererandom이어야 한다")
         }
         // rate는 방출률이 아니다(시뮬레이션 속도). 이미터는 그대로다.
@@ -89,5 +89,41 @@ final class ParticleOverrideTests: XCTestCase {
         XCTAssertEqual(o.rate, 1)
         XCTAssertEqual(o.size, 1)
         XCTAssertEqual(o.speed, 1)
+    }
+
+    /// 실물 `previewdrippingwater`가 이 모양이다. `controlpointangleN`도 실물에
+    /// 있지만 읽는 키가 아니니 자동으로 지나간다 — 깨지지 않는지만 확인한다.
+    func testParsesControlPointOverrides() {
+        let o = ParticleOverride.parse([
+            "controlpoint1": "22.00000 0.00000 0.00000",
+            "controlpoint2": "-22.00000 0.00000 0.00000",
+            "controlpointangle1": "0.00000 0.00000 -0.52360",
+        ])
+        XCTAssertEqual(o.controlPoints[1], Vec3(x: 22, y: 0, z: 0))
+        XCTAssertEqual(o.controlPoints[2], Vec3(x: -22, y: 0, z: 0))
+        XCTAssertNil(o.controlPoints[0])
+        XCTAssertFalse(o.isIdentity, "제어점 덮어쓰기가 있으면 identity가 아니다")
+    }
+
+    /// 스크립트가 쓴 벡터도 같은 길로 들어온다(`layer.instance.controlpointN`).
+    /// 제어점은 자리라 배율의 0~100 규칙 밖이다 — 유한하기만 하면 받는다.
+    func testApplyAcceptsControlPointVectors() {
+        var o = ParticleOverride()
+        o.apply(["controlpoint3": .vector([-500, 20, 30])])
+        XCTAssertEqual(o.controlPoints[3], Vec3(x: -500, y: 20, z: 30))
+    }
+
+    /// 범위 밖 번호나 우리가 안 읽는 키(controlpointangleN)는 조용히 버린다.
+    func testApplyIgnoresBadControlPointKeys() {
+        var o = ParticleOverride()
+        o.apply(["controlpoint9": .vector([1, 2, 3]), "controlpointangle1": .vector([1, 2, 3])])
+        XCTAssertTrue(o.controlPoints.isEmpty)
+    }
+
+    /// 스크립트 시작값·발견 둘 다 이 목록을 훑는다(`SceneDocument.scriptHolders`).
+    func testScriptKeysIncludeAllEightControlPoints() {
+        for id in 0...7 {
+            XCTAssertTrue(ParticleOverride.scriptKeys.contains("controlpoint\(id)"))
+        }
     }
 }

@@ -41,6 +41,9 @@ public struct SceneDocument: Sendable {
     /// 씬마다 같은 모듈을 여러 스크립트가 쓰므로 문서에서 한 번만 읽는다.
     public let scriptModules: [String: String]
     public let parallaxAmount: Double
+    /// `general.zoom`. 저자가 편집기에서 정해 둔 확대율 — 화면 맞춤(`CanvasFit`)이
+    /// 배율에 곱한다. 0 이하이거나 유한하지 않거나 없으면 1(확대 없음)이다.
+    public let zoom: Double
 
     /// 도형(`shape: quad`) 레이어의 기준 한 변. 파일에는 크기가 없다.
     /// 근거는 `presets/lightshafts/`의 미리보기 씬(256x256 캔버스)과
@@ -146,6 +149,10 @@ public struct SceneDocument: Sendable {
             ?? Vec3(x: 0.302, y: 0.302, z: 0.302)
         let skylightColor = (general["skylightcolor"] as? String).flatMap(Vec3.parse)
             ?? Vec3(x: 1, y: 1, z: 1)
+        // 편집기에서 캔버스를 더 확대해 둔 정도. 화면 맞춤이 배율에 곱한다(T6).
+        // 0 이하나 NaN, 아예 없으면 확대 없음(1)로 본다 — 깨진 값이 화면을 통째로
+        // 밀어내면 안 된다.
+        let zoom = doubleValue(general["zoom"]).map { $0 > 0 ? $0 : 1 } ?? 1
 
         let resolver = ReferenceResolver(pkg: reader, assets: assets)
 
@@ -185,7 +192,8 @@ public struct SceneDocument: Sendable {
             ambientColor: ambientColor, skylightColor: skylightColor,
             layers: layers,
             scriptModules: scriptModules,
-            parallaxAmount: parallaxOn && amount.isFinite ? Swift.min(Swift.max(amount, 0), 2) : 0
+            parallaxAmount: parallaxOn && amount.isFinite ? Swift.min(Swift.max(amount, 0), 2) : 0,
+            zoom: zoom
         )
     }
 
@@ -831,6 +839,16 @@ public struct SceneDocument: Sendable {
         return Vec2(x: 0, y: 0)
     }
 
+    /// 파티클 머티리얼의 텍스처 슬롯이 없거나 null일 때 쓸 기본 텍스처.
+    ///
+    /// WE 셰이더 `genericparticle.frag`의 선언이 근거다:
+    /// `uniform sampler2D g_Texture0; // {"label":"ui_editor_properties_albedo","default":"util/white"}`
+    /// — 슬롯이 비어 있으면 엔진이 이 기본값을 쓴다는 뜻이다. 실물 DELTARUNE
+    /// (3793923399)의 `materials/particle/halo_1.json`이 `"textures": [null]`로
+    /// 정확히 이 경우다. 파티클은 GLSLTranslator를 거치지 않아 셰이더 주석을 코드로
+    /// 못 읽으니, 여기 상수로 값만 박아 둔다.
+    static let defaultParticleTextureName = "util/white"
+
     /// 파티클 프리셋을 따라가 레이어 내용을 판정한다.
     static func resolveParticleContent(
         presetPath: String, resolver: ReferenceResolver, override: ParticleOverride
@@ -852,11 +870,10 @@ public struct SceneDocument: Sendable {
             return .unsupported(reason: "파티클 머티리얼을 찾을 수 없다: \(preset.materialPath)")
         }
 
-        // 첫 텍스처 이름을 얻는다
-        guard let textures = pass["textures"] as? [Any],
-              let textureName = textures.first as? String else {
-            return .unsupported(reason: "파티클 머티리얼의 첫 텍스처가 없다: \(preset.materialPath)")
-        }
+        // 첫 텍스처 이름을 얻는다. 슬롯이 없거나 null이면 셰이더 기본값(흰색)을 쓴다 —
+        // `defaultParticleTextureName` 주석 참고.
+        let textures = pass["textures"] as? [Any] ?? []
+        let textureName = (textures.first as? String) ?? defaultParticleTextureName
 
         // **굴절 파티클**은 색이 아니라 **배경을 휘게 하는 렌즈**다. 함께 선언된
         // 노멀맵으로 뒤 그림을 밀어 읽어야 유리에 맺힌 물방울로 보인다.
@@ -917,10 +934,12 @@ public struct SceneDocument: Sendable {
                   let child = ParticlePreset.parse(json),
                   let material = resolver.json(for: child.materialPath),
                   let passes = material["passes"] as? [[String: Any]],
-                  let pass = passes.first,
-                  let textures = pass["textures"] as? [Any],
-                  let textureName = textures.first as? String
+                  let pass = passes.first
             else { continue }
+            // 자식도 부모(resolveParticleContent)와 같은 이유로 null 슬롯을
+            // 기본값으로 채운다 — defaultParticleTextureName 주석 참고.
+            let textures = pass["textures"] as? [Any] ?? []
+            let textureName = (textures.first as? String) ?? defaultParticleTextureName
             // 굴절 자식도 부모와 같은 길로 그린다. 불꽃이 터질 때의 충격파가
             // 이것이라, 건너뛰면 폭발에서 일그러짐만 빠진다.
             let refractOn = ((pass["combos"] as? [String: Any])?["REFRACT"] as? NSNumber)?

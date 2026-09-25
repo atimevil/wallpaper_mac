@@ -150,6 +150,11 @@ public final class SceneScriptHost: @unchecked Sendable {
         /// 스크립트가 `stop()`을 부른 횟수. 한 틱 안의 `stop(); play()`는 최종 상태만
         /// 보면 사라지므로 횟수로 재시작을 알린다.
         public var restarts = 0
+        /// `thisLayer.getTextureAnimation()`의 재생 여부·칸. 스크립트가 그걸 한 번이라도
+        /// 불렀을 때만 값이 있다 — 미디어 위젯(재생/셔플/즐겨찾기)이 아이콘 시트를
+        /// pause()+setFrame(n)으로 못박는 데 쓴다. 둘은 항상 같이 있거나 같이 없다.
+        public var textureAnimationPlaying: Bool?
+        public var textureAnimationFrame: Int?
     }
 
     public struct Snapshot: Equatable, Sendable {
@@ -313,6 +318,8 @@ public final class SceneScriptHost: @unchecked Sendable {
             state.instance = instance
             state.restarts = Swift.max(0, (raw["rs"] as? NSNumber)?.intValue ?? 0)
             state.pointSize = Self.number(raw["pt"]).map { Swift.max($0, 0) }
+            state.textureAnimationPlaying = raw["ap"] as? Bool
+            state.textureAnimationFrame = (raw["af"] as? NSNumber)?.intValue
             layers[id] = state
             order.append(id)
         }
@@ -541,6 +548,27 @@ public final class SceneScriptHost: @unchecked Sendable {
                  duration: 0, rate: 1 };
     }
 
+    // `thisLayer.getTextureAnimation()`의 실제 상태. `getAnimation()`(모델/퍼펫
+    // 애니메이션)은 여전히 위의 스텁이다 — 스프라이트 시트가 아니라 범위 밖이다.
+    //
+    // 실물 미디어 위젯(재생/셔플/즐겨찾기 버튼)이 초기화에서 pause()+setFrame(n)으로
+    // 아이콘 한 칸을 못박고, 매 틱 update()에서 같은 값을 다시 부른다. 매번 새
+    // 객체를 돌려주면 렌더러가 "그 객체"의 상태를 못 들고 있어 아무 효과가 없다 —
+    // 그래서 레이어에 캐시해 항상 같은 객체를 돌려준다.
+    function __wfMakeTextureAnimation() {
+        return {
+            __playing: true,
+            __frame: 0,
+            play: function () { this.__playing = true; },
+            pause: function () { this.__playing = false; },
+            // stop()은 정지 + 0번 칸으로 되감기다(레퍼런스의 IAnimation 관례).
+            stop: function () { this.__playing = false; this.__frame = 0; },
+            setFrame: function (n) { this.__frame = (typeof n === 'number' && isFinite(n)) ? Math.floor(n) : 0; },
+            getFrame: function () { return this.__frame; },
+            isPlaying: function () { return this.__playing === true; }
+        };
+    }
+
     function __wfArr3(a, d) {
         return (a && a.length >= 3) ? new Vec3(a[0], a[1], a[2]) : new Vec3(d[0], d[1], d[2]);
     }
@@ -590,7 +618,10 @@ public final class SceneScriptHost: @unchecked Sendable {
             pause: function () { this.__playing = false; },
             isPlaying: function () { return this.__playing === true; },
             getAnimation: __wfAnimationStub,
-            getTextureAnimation: __wfAnimationStub,
+            getTextureAnimation: function () {
+                if (!this.__texAnim) { this.__texAnim = __wfMakeTextureAnimation(); }
+                return this.__texAnim;
+            },
             getWidth: function () { return this.size.x; },
             getHeight: function () { return this.size.y; }
         };
@@ -821,6 +852,9 @@ public final class SceneScriptHost: @unchecked Sendable {
                 if (anyIO) { entry.io = io; }
             }
             if (typeof L.__restarts === 'number') { entry.rs = L.__restarts; }
+            // getTextureAnimation()을 한 번이라도 불렀을 때만 낸다 — 대부분의
+            // 레이어는 안 불러서 매 틱 두 필드를 얹는 낭비를 만들지 않는다.
+            if (L.__texAnim) { entry.ap = L.__texAnim.__playing; entry.af = L.__texAnim.__frame; }
             if (L.__material) {
                 var m = {};
                 for (var k in L.__material) {
