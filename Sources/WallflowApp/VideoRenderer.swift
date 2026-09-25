@@ -7,11 +7,15 @@ import WallflowKit
 @MainActor
 final class VideoRenderer: WallpaperRenderer {
     private let item: WallpaperItem
+    /// 실제로 재생할 파일. 보통 item.contentURL과 같지만, webm/mkv는 ffmpeg로
+    /// 바꾼 캐시 mp4 경로가 대신 온다(DisplayManager.resolveConvertedVideo 참고).
+    private let playbackURL: URL
     private let player = AVQueuePlayer()
     private var looper: AVPlayerLooper?
 
-    init(item: WallpaperItem) {
+    init(item: WallpaperItem, playbackURL: URL? = nil) {
         self.item = item
+        self.playbackURL = playbackURL ?? item.contentURL
     }
 
     func makeView() -> NSView {
@@ -19,10 +23,10 @@ final class VideoRenderer: WallpaperRenderer {
     }
 
     func start() throws {
-        guard FileManager.default.fileExists(atPath: item.contentURL.path) else {
-            throw RendererError.contentMissing(item.contentURL)
+        guard FileManager.default.fileExists(atPath: playbackURL.path) else {
+            throw RendererError.contentMissing(playbackURL)
         }
-        let asset = AVURLAsset(url: item.contentURL)
+        let asset = AVURLAsset(url: playbackURL)
         let template = AVPlayerItem(asset: asset)
         // AVPlayerLooper가 큐를 관리해 이음매 없는 반복을 만든다.
         looper = AVPlayerLooper(player: player, templateItem: template)

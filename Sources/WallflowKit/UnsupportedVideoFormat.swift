@@ -41,6 +41,14 @@ public enum UnsupportedVideoFormat {
         ("V_MPEGH/ISO/HEVC", "HEVC"),
     ]
 
+    /// 확장자만으로 컨테이너 문제인지만 빠르게 본다. 코덱까지 들여다보지
+    /// 않으므로 파일을 열지 않는다 — 라이브러리를 스캔하거나 배경화면을 붙일
+    /// 때마다 불러도 싸다. 자세한 이유 문자열이 필요하면 reason(forFile:)을
+    /// 쓴다(코덱까지 훑어 더 느리다).
+    public static func isKnownUnsupportedContainer(_ url: URL) -> Bool {
+        knownUnsupportedContainers[url.pathExtension.lowercased()] != nil
+    }
+
     /// 이 URL이 확장자만으로 이미 미지원 컨테이너라고 판정되면, 사용자에게
     /// 보여줄 한국어 이유를 만든다. 열 수 있어 보이면(또는 판단할 수 없으면)
     /// nil을 준다 — 실제 재생 가능 여부의 최종 판정은 AVFoundation이 한다.
