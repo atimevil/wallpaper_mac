@@ -60,17 +60,55 @@ final class ParticleRenderKindTests: XCTestCase {
         XCTAssertEqual(minLength, 0)
     }
 
-    /// length/maxlength 둘 다 없으면 그릴 수 없다 — 알려진 이름인데 필드가
-    /// 깨졌으니 malformed로 남기고 sprite로 떨어진다(기존 emitter/initializer/
-    /// operator 파싱과 같은 규칙).
-    func testSpriteTrailMissingRequiredFieldsIsMalformed() throws {
+    /// 실물 WE 번들 fireworks1hit.json/fireworks2hit.json/magic_vortex_1.json
+    /// 그대로 — length/maxlength 둘 다 안 적는다. malformed가 아니다: length가
+    /// 없으면 속도로 안 늘어난다는 뜻(0)이라 sprite와 같은 모양으로 그려진다.
+    func testSpriteTrailMissingBothLengthFieldsDefaultsToNoStretch() throws {
         let json = try XCTUnwrap(preset("""
         {"material":"m.json","maxcount":10,
          "renderer":[{"id":1,"name":"spritetrail"}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        XCTAssertEqual(p.renderKind, .sprite)
-        XCTAssertTrue(p.malformedNames.contains("spritetrail"))
+        guard case .spriteTrail(let length, let maxLength, let minLength) = p.renderKind else {
+            return XCTFail("spritetrail이어야 한다")
+        }
+        XCTAssertEqual(length, 0)
+        XCTAssertEqual(maxLength, .infinity, "안 적으면 위쪽 clamp가 없다는 뜻")
+        XCTAssertEqual(minLength, 0)
+        XCTAssertTrue(p.malformedNames.isEmpty)
+    }
+
+    /// 실물 `ember.json`/`ember_small.json` 그대로 — length만 있고 maxlength가
+    /// 없다. clamp 상한이 없다는 뜻(무한대)으로 본다 — length가 0.007처럼
+    /// 작아 실제로는 안 막혀도 티가 안 난다.
+    func testSpriteTrailMissingMaxLengthDefaultsToUnbounded() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "renderer":[{"id":1,"length":0.007000000074505806,"name":"spritetrail"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        guard case .spriteTrail(let length, let maxLength, _) = p.renderKind else {
+            return XCTFail("spritetrail이어야 한다")
+        }
+        XCTAssertEqual(length, 0.007000000074505806, accuracy: 1e-9)
+        XCTAssertEqual(maxLength, .infinity)
+        XCTAssertTrue(p.malformedNames.isEmpty)
+    }
+
+    /// 실물 `rain_on_the_glass_copy1.json` 그대로 — maxlength만 있고 length가
+    /// 없다. 안 늘어난다는 뜻(0)으로 본다.
+    func testSpriteTrailMissingLengthDefaultsToZero() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "renderer":[{"id":1,"maxlength":6,"name":"spritetrail"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        guard case .spriteTrail(let length, let maxLength, _) = p.renderKind else {
+            return XCTFail("spritetrail이어야 한다")
+        }
+        XCTAssertEqual(length, 0)
+        XCTAssertEqual(maxLength, 6)
+        XCTAssertTrue(p.malformedNames.isEmpty)
     }
 
     /// 실물 orbTrail.json 그대로 — subdivision만 있다.

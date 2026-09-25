@@ -375,6 +375,12 @@ public struct ParticleOverride: Equatable, Sendable {
 /// (T8에서 로프 지오메트리를 그릴 때 창작마당 전체를 다시 훑었다 —
 /// `magic_vortex_0.json`(유일하게 실제로 쓰는 ropetrail)도 `length`만 적고
 /// `segments`는 여전히 안 적는다. 기본값 1은 그대로 남긴다.)
+///
+/// `spriteTrail`의 `length`(0)·`maxLength`(무한대) 기본값은 확장된 코퍼스에서
+/// 나왔다(ParticleRenderKind.parse의 spritetrail 분기 주석 참고) — 창작마당
+/// 6개(Ember류 3곳, Sparks_cursor2_copy1, rain_on_the_glass_copy1)와 WE 번들
+/// `fireworks1hit`/`fireworks2hit`/`magic_vortex_1`이 둘 중 하나 또는 둘 다를
+/// 안 적는다.
 public enum ParticleRenderKind: Equatable, Sendable {
     case sprite
     /// `g_RenderVar0`(length, maxlength, minlength) 그대로.
@@ -414,10 +420,16 @@ public enum ParticleRenderKind: Equatable, Sendable {
             return .sprite
 
         case "spritetrail":
-            // length/maxlength는 실물이 항상 짝으로 적는다 — 없으면 그릴 수
-            // 없으니 아는 이름 + malformed로 남기고 sprite로 떨어진다.
-            guard let length = double("length"), let maxLength = double("maxlength")
-            else { malformedNames.insert(name); return .sprite }
+            // 확장된 실물 코퍼스(ember/ember_small/Sparks_cursor2_copy1, 그리고
+            // WE 번들 fireworks1hit/2hit.json·magic_vortex_1.json)를 보면
+            // length·maxlength 둘 다 안 적힌 것도, length만 있고 maxlength가
+            // 없는 것도 있다 — "항상 짝"이 아니었다. length는 속도에 곱하는
+            // 배율이라 안 적으면 그 축으로 안 늘어난다는 뜻(0)으로, maxlength는
+            // 위쪽 clamp라 안 적으면 막지 않는다는 뜻(무한)으로 읽었다 — 공식
+            // fireworks 프리셋처럼 둘 다 없는 것도 이 값으로 "안 늘어남"이 되어
+            // 이전부터 sprite처럼 보이던 모양 그대로 남는다.
+            let length = double("length") ?? 0
+            let maxLength = double("maxlength") ?? .infinity
             let minLength = double("minlength") ?? 0
             return .spriteTrail(length: length, maxLength: maxLength, minLength: minLength)
 
