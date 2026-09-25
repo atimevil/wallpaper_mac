@@ -105,6 +105,18 @@ final class ParticleInstanceTests: XCTestCase {
         XCTAssertEqual(speed, 10 * exp(-0.25), accuracy: 1e-9)
     }
 
+    /// angularmovement의 drag도 movement와 같은 공식이어야 한다 — dω/dt = −drag·ω.
+    /// `pow(1 − drag, dt)`는 여기서도 drag > 1이면 NaN이 된다.
+    func testAngularDragAboveOneStaysFinite() throws {
+        let preset = bare(burst: ParticleEmitterBurst(count: 1),
+                          initializers: [.angularVelocityRandom(min: Vec3(x: 0, y: 0, z: 10),
+                                                                max: Vec3(x: 0, y: 0, z: 10))],
+                          operators: [.angularMovement(force: zero, drag: 2.5)])
+        let p = try XCTUnwrap(spawn(preset, ParticleOverride(), dt: 0.1).first)
+        XCTAssertTrue(p.angularVelocity.z.isFinite)
+        XCTAssertEqual(p.angularVelocity.z, 10 * exp(-0.25), accuracy: 1e-9)
+    }
+
     /// 예산은 개수만 줄인다. 씬 배율을 지우면 안 된다.
     func testBudgetKeepsSceneInstance() {
         var o = ParticleOverride()

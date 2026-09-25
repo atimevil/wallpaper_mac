@@ -675,8 +675,10 @@ public final class ParticleSystem {
                 z: particle.angularVelocity.z + force.z * dt
             )
 
+            // drag는 초당 각속도 감쇠 계수다 — dω/dt = −drag·ω(위 movement와 같은 뜻).
+            // `pow(1 − drag, dt)`는 drag가 1을 넘으면 밑이 음수라 NaN이 된다.
             if drag > 0 {
-                let dampFactor = pow(1 - drag, dt)
+                let dampFactor = exp(-drag * dt)
                 particle.angularVelocity = Vec3(
                     x: particle.angularVelocity.x * dampFactor,
                     y: particle.angularVelocity.y * dampFactor,
