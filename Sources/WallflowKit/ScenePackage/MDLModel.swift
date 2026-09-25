@@ -1,4 +1,5 @@
 import Foundation
+import simd
 
 public enum MDLError: Error, Equatable {
     case badMagic(String)
@@ -83,10 +84,21 @@ public struct MDLModel: Equatable, Sendable {
             vertexData: data, indices: [0, 1, 2, 0, 2, 3])
     }
 
+    /// 경계 상자 6개 float(24B)가 있는 버전. `MDLV0016`은 이 자리 자체가 없다 —
+    /// 실물 `Hollow Cylinder.mdl`을 바이트로 맞춰 확인했다: `boneCount` 바로
+    /// 뒤에 (경계 없이) `vertexFormat`이 바로 온다. 없으면 정점 위치에서 직접
+    /// 계산한다.
+    static let versionsWithBounds: Set<String> = ["MDLV0023"]
+    /// 지원하는 매직 전부. `MDLV0016`은 경계 상자만 빠지고 나머지 배치는 같다
+    /// (같은 flags=15·정점 48B·꼬리 없음). `MDLV0017`(다중 서브메시)·
+    /// `MDLV0021`(퍼펫 전용 정점 형식, flags가 다르다)은 배치가 통째로 달라
+    /// 아직 지원하지 않는다 — badMagic으로 남는다.
+    static let supportedMagics: Set<String> = versionsWithBounds.union(["MDLV0016"])
+
     public static func parse(_ data: Data) throws -> MDLModel {
         var cursor = Cursor(data: data)
         let magic = try cursor.string(maxLength: 16)
-        guard magic == Self.magic else { throw MDLError.badMagic(magic) }
+        guard Self.supportedMagics.contains(magic) else { throw MDLError.badMagic(magic) }
         _ = try cursor.int32()          // flags(15). 뜻은 모른다 — 정점 형식과 같은 값이다.
         let materialCount = try cursor.int32()
         _ = try cursor.int32()          // 1. 메시 수로 보이지만 실물이 전부 1이다.
@@ -99,7 +111,8 @@ public struct MDLModel: Equatable, Sendable {
         }
         let boneCount = try cursor.int32()
         guard boneCount >= 0, boneCount <= 4096 else { throw MDLError.tooLarge("뼈 \(boneCount)개") }
-        let bounds = try (0..<6).map { _ in try cursor.float32() }
+        let hasBounds = Self.versionsWithBounds.contains(magic)
+        let bounds = hasBounds ? try (0..<6).map { _ in try cursor.float32() } : nil
         let vertexFormat = try cursor.int32()
         let vertexBytes = try cursor.int32()
         guard vertexBytes > 0, vertexBytes <= Self.maxVertexBytes,
@@ -133,11 +146,39 @@ public struct MDLModel: Equatable, Sendable {
         if let bad = indices.first(where: { Int($0) >= vertexCount }) {
             throw MDLError.badIndex(Int(bad), vertexCount: vertexCount)
         }
+        let boundsMin: Vec3
+        let boundsMax: Vec3
+        if let bounds {
+            boundsMin = Vec3(x: Double(bounds[0]), y: Double(bounds[1]), z: Double(bounds[2]))
+            boundsMax = Vec3(x: Double(bounds[3]), y: Double(bounds[4]), z: Double(bounds[5]))
+        } else {
+            (boundsMin, boundsMax) = Self.computedBounds(vertexData)
+        }
         return MDLModel(
             materials: materials, boneCount: boneCount,
-            boundsMin: Vec3(x: Double(bounds[0]), y: Double(bounds[1]), z: Double(bounds[2])),
-            boundsMax: Vec3(x: Double(bounds[3]), y: Double(bounds[4]), z: Double(bounds[5])),
+            boundsMin: boundsMin, boundsMax: boundsMax,
             vertexData: vertexData, indices: indices)
+    }
+
+    /// 경계 상자가 파일에 없는 버전(`MDLV0016`)을 위해 정점 위치에서 직접 잰다.
+    private static func computedBounds(_ vertexData: Data) -> (min: Vec3, max: Vec3) {
+        var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        let count = vertexData.count / Self.vertexStride
+        vertexData.withUnsafeBytes { raw in
+            for i in 0..<count {
+                let base = i * Self.vertexStride
+                let p = SIMD3<Float>(
+                    raw.loadUnaligned(fromByteOffset: base, as: Float.self),
+                    raw.loadUnaligned(fromByteOffset: base + 4, as: Float.self),
+                    raw.loadUnaligned(fromByteOffset: base + 8, as: Float.self))
+                lo = simd_min(lo, p)
+                hi = simd_max(hi, p)
+            }
+        }
+        guard count > 0 else { return (Vec3(x: 0, y: 0, z: 0), Vec3(x: 0, y: 0, z: 0)) }
+        return (Vec3(x: Double(lo.x), y: Double(lo.y), z: Double(lo.z)),
+                Vec3(x: Double(hi.x), y: Double(hi.y), z: Double(hi.z)))
     }
 
     /// 앞에서부터 읽는 커서. 끝을 넘으면 던진다 — 잘린 파일이 trap이 되면 안 된다.

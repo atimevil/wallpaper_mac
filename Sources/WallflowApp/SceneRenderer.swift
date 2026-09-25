@@ -2050,6 +2050,14 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 self?.renderPostProcess(commands, frame: frame)
             }
         }
+        // `general.bloom`. 켠 적 없는 씬은 손대지 않는다(nil로 두면 컴포지터가
+        // 그 단계를 통째로 건너뛴다). HDR은 따로 걸 톤매핑 단계가 없어(오프스크린이
+        // 8비트다) 블룸으로 밝은 자리를 대신 드러낸다 — `MetalCompositor.BloomSettings`
+        // 문서 참고.
+        compositor.bloom = document.bloom
+            ? MetalCompositor.BloomSettings(
+                threshold: Float(document.bloomThreshold), strength: Float(document.bloomStrength))
+            : nil
         compositor.setLayers(layerList)
         self.compositor = compositor
 

@@ -611,6 +611,47 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(doc.camera?.eye, Vec3(x: 0, y: 0, z: 100), "카메라 오브젝트가 없으면 기본값")
     }
 
+    /// `general.bloom`은 맨 Bool이거나 `{"user":…, "value":true}`다. 세기·문턱값도
+    /// 같이 온다. 직교·원근 둘 다 되는지 본다.
+    func testBloomFieldsAreParsedForBothProjections() throws {
+        for ortho in [true, false] {
+            let projection = ortho
+                ? #""orthogonalprojection": {"width": 1920, "height": 1080}"#
+                : #""orthogonalprojection": null"#
+            let reader = try makeScenePkg(scene: """
+            {"general": {\(projection), "bloom": {"user": "b", "value": true},
+                         "bloomstrength": 2.5, "bloomthreshold": 0.7},
+             "objects": []}
+            """)
+            let doc = try SceneDocument.load(from: reader)
+            XCTAssertTrue(doc.bloom, "직교=\(ortho)")
+            XCTAssertEqual(doc.bloomStrength, 2.5, "직교=\(ortho)")
+            XCTAssertEqual(doc.bloomThreshold, 0.7, "직교=\(ortho)")
+        }
+    }
+
+    /// 꺼져 있거나 아예 없는 씬은 그대로 꺼진 채(기본값)여야 한다 — 다른 씬을
+    /// 건드리면 안 된다.
+    func testBloomDefaultsToOffWhenSceneDoesNotRequestIt() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}},
+         "objects": []}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertFalse(doc.bloom)
+        XCTAssertFalse(doc.hdr)
+    }
+
+    /// `general.hdr`도 같은 자리에서 읽는다.
+    func testHDRFlagIsParsed() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}, "hdr": true},
+         "objects": []}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertTrue(doc.hdr)
+    }
+
     /// 키가 아예 없는 것은 여전히 missingField다. 원근 씬과 구분되어야 한다.
     func testMissingProjectionIsStillMissingField() throws {
         let reader = try makeScenePkg(scene: #"{"general": {}, "objects": []}"#)

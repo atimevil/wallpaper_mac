@@ -324,6 +324,47 @@ enum SceneShaders {
         return color;
     }
 
+    // ---- 블룸 ----
+
+    struct BloomUniforms {
+        float2 texelSize;
+        float threshold;
+        float strength;
+    };
+
+    /// 씬의 `general.bloom`. 밝은 자리를 넓게 퍼뜨려 더한다 — WE 실물 재질이
+    /// `#if HDR`에서 `saturate(...)`로 자르고 남는 값을 "overbright"로 흘려보내
+    /// 블룸이 그걸 받아 퍼뜨리는 두 단계 파이프라인이다(`common_pbr_2.h`의
+    /// `CombineLighting` 참고). 우리는 오프스크린이 8비트라 그 값을 못 들고
+    /// 다니므로, 이미 그려진 화면에서 문턱값(threshold) 위인 자리를 다시 찾아
+    /// 번지게 하는 한 단계짜리로 흉내 낸다 — 여러 번 내려찍고 흐리는 실물
+    /// 파이프라인보다 거칠지만, 텍스처를 새로 여럿 두지 않고 프레임 하나로
+    /// 끝난다.
+    fragment float4 bloom_fragment(
+        VertexOut in [[stage_in]],
+        texture2d<float> tex [[texture(0)]],
+        sampler samp [[sampler(0)]],
+        constant BloomUniforms &u [[buffer(0)]]
+    ) {
+        float4 base = tex.sample(samp, in.uv);
+        float3 glow = float3(0.0);
+        float total = 0.0;
+        for (int y = -4; y <= 4; y++) {
+            for (int x = -4; x <= 4; x++) {
+                // 실물 배경화면은 화면이 커서(3000px대) 반경을 넉넉히 잡아야
+                // 번지는 게 보인다 — 2배수로는 몇 픽셀짜리 테두리라 눈에 안 띈다.
+                float2 offset = float2(float(x), float(y)) * u.texelSize * 14.0;
+                float3 c = tex.sample(samp, in.uv + offset).rgb;
+                float lum = max(c.r, max(c.g, c.b));
+                float weight = exp(-float(x * x + y * y) * 0.15);
+                glow += c * smoothstep(u.threshold, u.threshold + 0.2, lum) * weight;
+                total += weight;
+            }
+        }
+        glow /= max(total, 0.0001);
+        return float4(base.rgb + glow * u.strength, base.a);
+    }
+
     // ---- 파티클 ----
 
     struct ParticleInstance {

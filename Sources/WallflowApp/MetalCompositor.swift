@@ -42,6 +42,14 @@ struct QuadUniforms {
     static let expectedStride = 96
 }
 
+/// `bloom_fragment`에 넘기는 값. MSL의 `BloomUniforms`와 배치가 같아야 한다
+/// (float2 + float + float = 16바이트).
+struct BloomUniforms {
+    var texelSize: SIMD2<Float>
+    var threshold: Float
+    var strength: Float
+}
+
 struct QuadInstance {
     /// 직교 공간에서의 중심.
     var origin: SIMD2<Float>
@@ -117,6 +125,8 @@ final class MetalCompositor {
     private let solidBlendPipeline: MTLRenderPipelineState?
     /// 합성 레이어가 읽을 그림을 레이어 좌표계로 떠내는 파이프라인.
     private let compositionPipeline: MTLRenderPipelineState?
+    /// 블룸 한 단계 패스. 목적지를 통째로 덮어 쓴다.
+    private let bloomPipeline: MTLRenderPipelineState?
     /// 그 그림을 담는 텍스처. 레이어마다 크기가 달라 번호로 들고 있는다.
     private var compositionSources: [Int: MTLTexture] = [:]
     private let solidPipeline: MTLRenderPipelineState
@@ -267,6 +277,12 @@ final class MetalCompositor {
         descriptor.fragmentFunction = library.makeFunction(name: "composition_extract_fragment")
         compositionPipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
 
+        // 블룸. 목적지를 통째로 덮어 쓰므로(밝은 자리를 더한 새 화면) 블렌딩이
+        // 필요 없다 — 프래그먼트 안에서 이미 원본과 더한 값을 낸다.
+        descriptor.colorAttachments[0].isBlendingEnabled = false
+        descriptor.fragmentFunction = library.makeFunction(name: "bloom_fragment")
+        bloomPipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
+
         let samplerDescriptor = MTLSamplerDescriptor()
         samplerDescriptor.minFilter = .linear
         samplerDescriptor.magFilter = .linear
@@ -378,10 +394,19 @@ final class MetalCompositor {
     /// nil이면 그 레이어를 건너뛴다.
     var composite: (@MainActor (Int, MTLCommandBuffer, MTLTexture) -> MTLTexture?)?
 
+    /// 씬의 `general.bloom`. nil이면 안 건다 — 켠 적 없는 씬은 그대로 둔다.
+    struct BloomSettings: Equatable {
+        /// 이 밝기(0~1, 합성된 화면 기준) 위인 자리를 퍼뜨린다.
+        var threshold: Float
+        /// 퍼뜨린 값에 곱하는 배율. `general.bloomstrength`.
+        var strength: Float
+    }
+    var bloom: BloomSettings?
+
     /// 합성 레이어가 있으면 화면이 아니라 텍스처에 그려야 한다 — 그 지점까지의
     /// 화면을 셰이더가 읽어야 하는데, 표시용 드로어블은 읽을 수 없다.
     private var needsOffscreen: Bool {
-        if postProcess != nil { return true }
+        if postProcess != nil || bloom != nil { return true }
         return layers.contains {
             switch $0.1 {
             case .composition: return true
@@ -471,6 +496,52 @@ final class MetalCompositor {
         descriptor.storageMode = .private
         backdropTexture = device.makeTexture(descriptor: descriptor)
         return backdropTexture
+    }
+
+    private var bloomTexture: MTLTexture?
+
+    /// 밝은 자리를 퍼뜨려 더한 새 화면을 만든다. 실패하면(파이프라인이 없거나
+    /// 텍스처를 못 만들면) `source`를 그대로 돌려준다 — 블룸 하나 때문에
+    /// 화면 전체가 안 뜨면 안 된다.
+    private func applyBloom(
+        _ settings: BloomSettings, to source: MTLTexture, commands: MTLCommandBuffer
+    ) -> MTLTexture? {
+        guard let bloomPipeline else { return source }
+        var target = bloomTexture
+        if target == nil || target?.width != source.width || target?.height != source.height {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: Self.colorPixelFormat,
+                width: source.width, height: source.height, mipmapped: false)
+            descriptor.usage = [.shaderRead, .renderTarget]
+            descriptor.storageMode = .private
+            target = device.makeTexture(descriptor: descriptor)
+            bloomTexture = target
+        }
+        guard let target else { return source }
+
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return source }
+        encoder.setRenderPipelineState(bloomPipeline)
+        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+        // 목적지를 통째로 채우는 쿼드. `extractComposition`의 `fill`과 같은 수다.
+        let size = SIMD2<Float>(Float(source.width), Float(source.height))
+        var fill = QuadUniforms(
+            origin: size / 2, size: size, projection: size,
+            visibleOrigin: SIMD2(0, 0), visibleSize: size,
+            color: SIMD4(1, 1, 1, 1), rotation: 0)
+        encoder.setVertexBytes(&fill, length: MemoryLayout<QuadUniforms>.stride, index: 1)
+        var uniforms = BloomUniforms(
+            texelSize: SIMD2(1 / size.x, 1 / size.y),
+            threshold: settings.threshold, strength: settings.strength)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BloomUniforms>.stride, index: 0)
+        encoder.setFragmentTexture(source, index: 0)
+        encoder.setFragmentSamplerState(sampler, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+        return target
     }
 
     private func frame(width: Int, height: Int) -> MTLTexture? {
@@ -692,7 +763,12 @@ final class MetalCompositor {
 
         if let offscreen {
             // 후처리 결과를 화면으로 옮긴다. 후처리가 실패하면 원래 화면을 쓴다.
-            let result = postProcess?(commands, offscreen) ?? offscreen
+            // 블룸은 그 뒤에 건다 — 후처리 이펙트가 만든 그림도 같이 번져야
+            // 자연스럽다(실물은 필름그레인·VHS 같은 후처리 레이어가 최종
+            // 합성이라, 블룸이 그 위에 걸린다).
+            let postResult = postProcess?(commands, offscreen) ?? offscreen
+            let result = bloom.flatMap { applyBloom($0, to: postResult, commands: commands) }
+                ?? postResult
             // **복사가 아니라 그린다.** raw 복사는 포맷이 다르면 채널 순서를
             // 뒤바꾸고 감마도 어긋난다. 샘플링해서 그리면 Metal이 변환을 맡는다.
             let present = MTLRenderPassDescriptor()
