@@ -109,6 +109,15 @@ final class PowerPolicyTests: XCTestCase {
             hasAnimatedEffect: true, hasScriptHost: false, hasPuppets: false))
     }
 
+    /// "Loading..."(워크숍 3795096226)처럼 스프라이트 시트 이미지 하나뿐인 씬도
+    /// 장을 넘기려면 계속 그려야 한다.
+    func testNeedsContinuousDrawingWithOnlyAnimatedImageIsTrue() {
+        XCTAssertTrue(PowerPolicy.needsContinuousDrawing(
+            hasVideo: false, hasParticles: false, hasText: false,
+            hasAnimatedEffect: false, hasScriptHost: false, hasPuppets: false,
+            hasAnimatedImage: true))
+    }
+
     func testNeedsContinuousDrawingWithOnlyVideoIsTrue() {
         XCTAssertTrue(PowerPolicy.needsContinuousDrawing(
             hasVideo: true, hasParticles: false, hasText: false,
