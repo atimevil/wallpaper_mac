@@ -482,4 +482,118 @@ final class GLSLTranslatorTests: XCTestCase {
         XCTAssertTrue(result.source.contains(
             "context.g_AudioSpectrum32Left[31] = uniforms.g_AudioSpectrum32Left[31];"))
     }
+
+    // MARK: - 본 스키닝 타입(uvec4·mat4x3)
+
+    /// 실물 `generic3.vert`(Star1/2/3 모델, scene 3509243656·3589454154)이
+    /// `uvec4 a_BlendIndices`·`mat4x3 g_Bones`를 쓴다. MSL엔 `uvec4`·`mat4x3`가
+    /// 없어 "unknown type name"으로 통째로 떨어졌었다.
+    func testSkinningTypesAreMapped() throws {
+        let result = try translate("""
+        uniform mat4x3 g_Bones;
+        attribute uvec4 a_BlendIndices;
+        void main() { gl_Position = vec4(float(a_BlendIndices.x), 0.0, 0.0, 1.0); }
+        """, stage: .vertex)
+        XCTAssertTrue(ShaderPrelude.types.contains("#define uvec4 uint4"), ShaderPrelude.types)
+        XCTAssertTrue(ShaderPrelude.types.contains("#define mat4x3 float4x3"), ShaderPrelude.types)
+        XCTAssertTrue(result.source.contains("mat4x3 g_Bones;"), result.source)
+        XCTAssertTrue(result.source.contains("uvec4 a_BlendIndices"), result.source)
+    }
+
+    /// `mul(vec4, mat4x3)`(본 변환)과 `CAST3X3(mat4x3)`(본 회전만 추출)이
+    /// 실제로 쓰일 때 프렐류드가 오버로드를 갖고 있어야 한다.
+    func testBoneMatrixHelpersExist() {
+        XCTAssertTrue(ShaderPrelude.helpers.contains("mul(float4 v, float4x3 m)"),
+                      ShaderPrelude.helpers)
+        XCTAssertTrue(ShaderPrelude.helpers.contains("wfCast3x3(float4x3 m)"),
+                      ShaderPrelude.helpers)
+    }
+
+    // MARK: - 이펙트 컴파일 실패 3건
+
+    /// `workshop/2800594362/effects/clipping_mask`. `varying vec4 v_TexCoord`를
+    /// `.xy`만 채워 쓰는데 `texSample2D`에 그대로 넘긴다 — `sample()`은 `float2`만
+    /// 받아 "no matching member function for call to 'sample'"로 떨어졌었다.
+    func testTexSample2DTruncatesWiderCoordinate() throws {
+        XCTAssertTrue(ShaderPrelude.sampling.contains("tex.sample(tex##Sampler, wfTo2(uv))"),
+                      ShaderPrelude.sampling)
+        let result = try translate("""
+        uniform sampler2D g_Texture0;
+        varying vec4 v_TexCoord;
+        void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }
+        """)
+        XCTAssertTrue(result.source.contains("texSample2D(g_Texture0, v_TexCoord)"), result.source)
+    }
+
+    /// `workshop/2821337237/effects/crt_screen`. `#define mask 1.0;`처럼 몸통에
+    /// 군더더기 `;`가 붙은 매크로가 있으면, `wfTo1(u_alpha * mask)`로 감싼 뒤
+    /// 펼쳐질 때 그 `;`가 괄호 안에서 문장을 끊어 떨어졌었다.
+    func testStrayDefineSemicolonIsStripped() {
+        let source = "#define mask 1.0;\nfloat x = mask;"
+        let fixed = GLSLTranslator.strippingStrayDefineSemicolons(source)
+        XCTAssertTrue(fixed.contains("#define mask 1.0\n"), fixed)
+        // 함수형 매크로는 손대지 않는다 — 괄호 안의 `;`가 do/while 관용구일 수 있다.
+        let functionLike = "#define F(x) do { x; } while(0);"
+        XCTAssertEqual(GLSLTranslator.strippingStrayDefineSemicolons(functionLike), functionLike)
+    }
+
+    /// `workshop/2078835426/effects/pixelate`. `round(v_PixelCoord) * v_PixelSize`가
+    /// `vec2 * vec4`라 Metal이 "implicit conversions ... are not permitted"로
+    /// 떨어졌었다 — 받는 쪽(선언의 왼쪽)만 보는 감싸기로는 못 잡는 안쪽 불일치다.
+    func testMixedWidthMultiplicationIsNarrowed() throws {
+        let result = try translate("""
+        varying vec2 v_PixelCoord;
+        varying vec4 v_PixelSize;
+        void main() {
+            vec2 texCoord00 = round(v_PixelCoord) * v_PixelSize;
+            gl_FragColor = vec4(texCoord00, 0.0, 1.0);
+        }
+        """)
+        XCTAssertTrue(result.source.contains("round(v_PixelCoord)*wfTo2(v_PixelSize)"), result.source)
+    }
+
+    /// clipping_mask의 진짜 구조: `#define`이 uniform을 감싸고, `varying vec4`가
+    /// 그 매크로와 여러 항 뒤에서 만난다. 인접한 토큰 하나만 보면 못 잡는다 —
+    /// 실제 계산 순서를 따라가며 접어야 `v_TexCoord*2.0-1.0`(넓다)과
+    /// `texScaleCenter`(좁다)가 만나는 자리를 찾는다.
+    func testMixedWidthAcrossDefineIsNarrowed() throws {
+        let result = try translate("""
+        uniform vec2 u_texScaleCenter;
+        varying vec4 v_TexCoord;
+        #define texScaleCenter (u_texScaleCenter * 2.0 - 1.0)
+        void main() {
+            vec2 uv = (v_TexCoord * 2.0 - 1.0 - texScaleCenter) / 2.0;
+            gl_FragColor = vec4(uv, 0.0, 1.0);
+        }
+        """)
+        XCTAssertTrue(result.source.contains("wfTo2(v_TexCoord*2.0-1.0)"), result.source)
+    }
+
+    /// `length(a - b)`처럼 폭이 같은 자리는 건드리면 안 된다 — 건드리면
+    /// `length(wfTo1(a) - wfTo1(b))`가 되어 `length(float)`를 찾다 모호해진다
+    /// (실물 fluidsimulation 이펙트가 이 꼴로 떨어질 뻔했다).
+    func testEqualWidthOperandsAreUntouched() throws {
+        let result = try translate("""
+        varying vec2 g_PointerPosition;
+        varying vec2 g_PointerPositionLast;
+        void main() {
+            float moveAmt = length(g_PointerPosition - g_PointerPositionLast);
+            gl_FragColor = vec4(moveAmt);
+        }
+        """)
+        XCTAssertTrue(
+            result.source.contains("length(g_PointerPosition-g_PointerPositionLast)"),
+            result.source)
+        XCTAssertFalse(result.source.contains("wfTo1(g_PointerPosition"), result.source)
+    }
+
+    /// `#require LightingV1`가 걸린 실물 7개가 부르는 `PerformLighting_V1`은
+    /// 엔진이 씬의 빛 개수에 맞춰 링크해 주는 자리라 셰이더 헤더 어디에도
+    /// 정의가 없다 — "use of undeclared identifier"로 떨어졌었다(generic4.frag,
+    /// Star1/2/3 모델의 재질). 빛 레이어가 아직 없는 지금 상태에 맞춰 0을
+    /// 돌려주는 자리표시자를 프렐류드에 둔다.
+    func testPerformLightingV1StubExists() {
+        XCTAssertTrue(
+            ShaderPrelude.helpers.contains("float3 PerformLighting_V1("), ShaderPrelude.helpers)
+    }
 }
