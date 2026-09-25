@@ -242,11 +242,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var measuredScale = false
         /// 컴포지터 레이어 목록에서의 자리. 글자 폭이 바뀌면 그 자리의 쿼드를 고쳐야 한다.
         var layerIndex = 0
-        /// 이 레이어에 낸 굽기 요청의 일련번호. 백그라운드에서 구운 결과가 메인에
-        /// 돌아왔을 때 이 값과 비교해, 그사이 새 요청이 났으면(같은 레이어의 글자가
-        /// 또 바뀌었으면) 늦게 끝난 이전 결과를 버린다 — 안 그러면 깜빡이며 옛
-        /// 글자로 되돌아갈 수 있다.
-        var rasterToken: UInt64 = 0
+        /// 이 레이어의 백그라운드 굽기 요청 조율기. 늦게 끝난 결과를 버리는 것과
+        /// (예: 굽는 도중 빈 문자열로 바뀐 경우) 굽기 속도보다 빠르게 바뀌는
+        /// 글자가 큐를 무한정 늘리지 않게 막는 것, 둘 다 `TextBakeCoalescer`(Kit,
+        /// 순수 상태 기계 — 단위 테스트가 있다)가 판정한다.
+        var bake = TextBakeCoalescer()
         /// 원근 씬에서 이 글자 판의 세계 자리·각도. 직교 씬이면 쓰지 않는다.
         /// 스크립트가 매 틱 갱신해 둔다 — 굽기가 백그라운드에서 도는 동안에도
         /// 레이어가 움직일 수 있어서, 끝난 시점엔 굽기 시작 시점이 아니라 이
@@ -433,18 +433,31 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 여러 레이어가 바뀌는 씬(Pixels 등)에서 프레임이 56~211ms까지 늘어진다
     /// (`sample`로 확인한 값). 굽기 자체를 큐로 미루고 픽셀만 받아 온다.
     private func rasterizeAsync(_ state: TextState) {
-        let wrapWidth = Self.wrapWidth(for: state)
-        // 빈 글자는 굽지 않고 바로 지운다 — 큐를 거치면 이전 글자가 백그라운드
-        // 작업 하나만큼 더 남아 시계가 멈춘 것처럼 보인다.
-        guard !state.value.isEmpty, !state.value.allSatisfy(\.isWhitespace) else {
+        let isEmpty = state.value.isEmpty || state.value.allSatisfy(\.isWhitespace)
+        // 판정은 전부 `TextBakeCoalescer`가 한다 — 여기서는 그 결정을 따를 뿐이다.
+        // (1) 빈 글자는 굽지 않고 바로 지운다. (2) 이미 굽는 중이면 새로 큐에
+        // 넣지 않는다 — 시계처럼 굽기 속도보다 빠르게 바뀌는 글자가 큐를
+        // 무한정 늘리는 것을 막는다. `dirty`는 엣지 트리거라(`state.value`가
+        // 이미 새 값으로 바뀐 뒤 불린다) 건너뛴 요청은 다시 오지 않으므로,
+        // 그냥 무시하는 대신 굽기가 끝나는 시점에 다시 구우라고 표시해 둔다.
+        switch state.bake.start(isEmpty: isEmpty) {
+        case .clear:
             state.texture = nil
             state.size = .zero
             refreshLayers()
             return
+        case .wait:
+            return
+        case .bake(let token):
+            startBackgroundBake(state, token: token)
         }
-        // 늦게 끝난 이전 요청이 최신 값을 덮지 않도록 요청마다 번호를 매긴다.
-        state.rasterToken &+= 1
-        let token = state.rasterToken
+    }
+
+    /// 실제로 CoreText를 돌려 굽는다. `rasterizeAsync`가 `TextBakeCoalescer`로부터
+    /// "지금 구워라"를 받았을 때만, 그리고 `finish(token:)`가 `.rebake`를 돌려줘
+    /// 다시 구울 때도 이 경로로 온다.
+    private func startBackgroundBake(_ state: TextState, token: UInt64) {
+        let wrapWidth = Self.wrapWidth(for: state)
         // CoreText 작업은 메인 밖(다른 스레드)에서 돈다. `TextState`는
         // `@MainActor`라 그 안의 값을 배경 큐에서 직접 읽으면 안 되므로, 필요한
         // 값을 전부 여기서(메인 액터) 미리 꺼내 Sendable 값 타입으로 넘긴다 —
@@ -471,8 +484,18 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 shadow: shadow, shadowScale: shadowScale, extraPadding: padding,
                 horizontalAlign: align, blockAlign: blockAlign)
             Task { @MainActor in
-                guard let self, let state, state.rasterToken == token else { return }
-                self.applyRasterResult(buffer, to: state, wrapWidth: wrapWidth)
+                guard let self, let state else { return }
+                switch state.bake.finish(token: token) {
+                case .rebake:
+                    // 굽는 동안 값이 또 바뀌었다 — 지금 든 결과는 버리고 최신
+                    // 값을 다시 읽어 한 번 더 굽는다. `rasterizeAsync`가 최신
+                    // `state.value`를 다시 읽으므로 여기서 값을 따로 넘기지 않는다.
+                    self.rasterizeAsync(state)
+                case .stale:
+                    break
+                case .apply:
+                    self.applyRasterResult(buffer, to: state, wrapWidth: wrapWidth)
+                }
             }
         }
     }
