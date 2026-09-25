@@ -382,7 +382,13 @@ public struct ParticleOverride: Equatable, Sendable {
 /// `fireworks1hit`/`fireworks2hit`/`magic_vortex_1`이 둘 중 하나 또는 둘 다를
 /// 안 적는다.
 public enum ParticleRenderKind: Equatable, Sendable {
-    case sprite
+    /// `orientation`(기본 screen)·`axis` — `ParticleOrientationBasis` 참고.
+    case sprite(orientation: ParticleSpriteOrientation, axis: Vec3)
+    /// 안 적힌(또는 malformed로 떨어지는) 보통의 경우. `orientation: .screen,
+    /// axis: 0벡터`와 같다 — Swift enum case는 기본 인자를 못 받아 이 별칭으로
+    /// 대신한다.
+    public static let defaultSprite = ParticleRenderKind.sprite(
+        orientation: .screen, axis: Vec3(x: 0, y: 0, z: 0))
     /// `g_RenderVar0`(length, maxlength, minlength) 그대로.
     case spriteTrail(length: Double, maxLength: Double, minLength: Double)
     case rope(subdivision: Int, uvScale: Double, uvScrolling: Bool)
@@ -399,7 +405,7 @@ public enum ParticleRenderKind: Equatable, Sendable {
     ) -> ParticleRenderKind {
         guard let array = raw as? [Any], let dict = array.first as? [String: Any],
               let name = dict["name"] as? String
-        else { return .sprite }
+        else { return .defaultSprite }
 
         func double(_ key: String) -> Double? {
             if let d = dict[key] as? Double { return d.isFinite ? d : nil }
@@ -417,7 +423,14 @@ public enum ParticleRenderKind: Equatable, Sendable {
 
         switch name {
         case "sprite":
-            return .sprite
+            // 실물 `Rain_Splash_copy2.json`/`Rain_Splash_Drops_copy1.json`이
+            // orientation·axis를 같이 쓴다(`upright`/`fixed` + `axis:"0 0 1"`).
+            // axis가 없으면(대부분) 0벡터 — orientation이 screen이면 안 쓰고,
+            // fixed인데 0벡터면 ParticleOrientationBasis가 카메라 방향으로
+            // 대신한다.
+            let orientation = ParticleSpriteOrientation.parse(dict["orientation"])
+            let axis = (dict["axis"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 0, y: 0, z: 0)
+            return .sprite(orientation: orientation, axis: axis)
 
         case "spritetrail":
             // 확장된 실물 코퍼스(ember/ember_small/Sparks_cursor2_copy1, 그리고
@@ -455,7 +468,7 @@ public enum ParticleRenderKind: Equatable, Sendable {
             guard let length = trailField("length", default: 0),
                   let maxLength = trailField("maxlength", default: .infinity),
                   let minLength = trailField("minlength", default: 1)
-            else { malformedNames.insert(name); return .sprite }
+            else { malformedNames.insert(name); return .defaultSprite }
             return .spriteTrail(length: length, maxLength: maxLength, minLength: minLength)
 
         case "rope":
@@ -466,7 +479,7 @@ public enum ParticleRenderKind: Equatable, Sendable {
 
         case "ropetrail":
             guard let length = double("length") else {
-                malformedNames.insert(name); return .sprite
+                malformedNames.insert(name); return .defaultSprite
             }
             return .ropeTrail(
                 subdivision: int("subdivision", default: 0),
@@ -478,7 +491,7 @@ public enum ParticleRenderKind: Equatable, Sendable {
 
         default:
             unsupportedNames.insert(name)
-            return .sprite
+            return .defaultSprite
         }
     }
 }
@@ -679,7 +692,7 @@ public struct ParticlePreset: Equatable, Sendable {
         children: [ParticleChild] = [],
         controlPoints: [ParticleControlPoint] = [],
         instance: ParticleOverride = ParticleOverride(),
-        renderKind: ParticleRenderKind = .sprite
+        renderKind: ParticleRenderKind = .defaultSprite
     ) {
         self.renderKind = renderKind
         self.instance = instance

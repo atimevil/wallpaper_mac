@@ -59,15 +59,28 @@ struct ParticleUniforms {
     var trailLength: Float = 0
     var trailMaxLength: Float = 0
     var trailMinLength: Float = 0
+    /// `orientation`/`axis`가 낸 빌보드 축(회전 전, `ParticleOrientationBasis`
+    /// 참고). sprite가 아니면(트레일·로프) 안 쓴다. 기본은 화면 기준
+    /// (1,0,0)/(0,1,0) — orientation을 안 읽던 지금까지의 동작 그대로다.
+    /// `packed_float3`와 맞추려고 `ParticleInstance.velocityX/Y/Z`와 같은
+    /// 이유로 성분을 편다 — SIMD3<Float>는 16바이트 정렬이라 그대로 쓰면
+    /// MSL의 packed_float3(12바이트)와 어긋난다.
+    var orientRightX: Float = 1
+    var orientRightY: Float = 0
+    var orientRightZ: Float = 0
+    var orientUpX: Float = 0
+    var orientUpY: Float = 1
+    var orientUpZ: Float = 0
     /// 레이어 세계 변환 × 뷰·투영. 직교 씬에서는 쓰지 않는다.
     var transform: simd_float4x4 = matrix_identity_float4x4
 
-    /// MSL의 ParticleUniforms와 같은 128바이트여야 한다: float2 3개(visibleOrigin·
+    /// MSL의 ParticleUniforms와 같은 144바이트여야 한다: float2 3개(visibleOrigin·
     /// visibleSize·frameScale, 24) + float 7개(textureRatio·framesPerRow·
-    /// useTransform·isTrail·trailLength·trailMaxLength·trailMinLength, 28) = 52 +
-    /// 암묵 패딩(12, float4x4 정렬) + transform(64) = 128. init(device:library:...)이
+    /// useTransform·isTrail·trailLength·trailMaxLength·trailMinLength, 28) +
+    /// float 6개(orientRight·orientUp, 24) = 76 + 암묵 패딩(4, float4x4 16바이트
+    /// 정렬 — 76을 80으로 올림) + transform(64) = 144. init(device:library:...)이
     /// 이 값을 실제로 검증한다 — ParticleInstance.expectedStride와 같은 이유다.
-    static let expectedStride = 128
+    static let expectedStride = 144
 }
 
 /// 텍스처가 스프라이트 시트일 때의 배치. `rosepetals.tex`가 512x128에 102x128
@@ -139,6 +152,11 @@ final class ParticleRenderer {
     private let animationMode: ParticleAnimationMode
     /// spritetrail의 (length, maxlength, minlength). rope/ropetrail은 nil이다.
     private let trailParams: (length: Float, maxLength: Float, minLength: Float)?
+    /// sprite의 `orientation`/`axis`가 낸 빌보드 축(회전 전).
+    /// `WallflowKit.ParticleOrientationBasis`가 계산한다 — trail/rope는 이
+    /// 축을 안 쓰지만 계산 자체는 항상 해 둔다(기본값이 화면 기준이라
+    /// 안전하다).
+    private let orientAxes: (right: SIMD3<Float>, up: SIMD3<Float>)
     /// 이 렌더러가 그리는 방식. rope/ropetrail이면 `encode`가 인스턴싱 대신
     /// `ropePipeline`으로 이어진 띠를 그린다.
     let renderKind: ParticleRenderKind
@@ -168,7 +186,7 @@ final class ParticleRenderer {
         layerScale: SIMD3<Float>,
         sheet: ParticleSpriteSheet?,
         animationMode: ParticleAnimationMode,
-        renderKind: ParticleRenderKind = .sprite,
+        renderKind: ParticleRenderKind = .defaultSprite,
         normalMap: MTLTexture? = nil,
         refractAmount: Float = 0.05
     ) throws {
@@ -181,6 +199,14 @@ final class ParticleRenderer {
             trailParams = (Float(length), Float(maxLength), Float(minLength))
         } else {
             trailParams = nil
+        }
+        if case .sprite(let orientation, let axis) = renderKind {
+            let axes = ParticleOrientationBasis.compute(orientation: orientation, axis: axis)
+            orientAxes = (
+                SIMD3(Float(axes.right.x), Float(axes.right.y), Float(axes.right.z)),
+                SIMD3(Float(axes.up.x), Float(axes.up.y), Float(axes.up.z)))
+        } else {
+            orientAxes = (SIMD3(1, 0, 0), SIMD3(0, 1, 0))
         }
         self.renderKind = renderKind
         switch renderKind {
@@ -457,6 +483,9 @@ final class ParticleRenderer {
             trailLength: trailParams?.length ?? 0,
             trailMaxLength: trailParams?.maxLength ?? 0,
             trailMinLength: trailParams?.minLength ?? 0,
+            orientRightX: orientAxes.right.x, orientRightY: orientAxes.right.y,
+            orientRightZ: orientAxes.right.z,
+            orientUpX: orientAxes.up.x, orientUpY: orientAxes.up.y, orientUpZ: orientAxes.up.z,
             transform: transform ?? matrix_identity_float4x4)
         encoder.setRenderPipelineState(pipeline)
         // index 2·3을 쓴다. index 0은 컴포지터가 루프 밖에서 묶어 둔 쿼드 정점

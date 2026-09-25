@@ -285,7 +285,7 @@ final class MetalCompositor {
         maxCount: Int, blend: ParticleBlendMode, texture: MTLTexture,
         layerOrigin: SIMD3<Float>, layerScale: SIMD3<Float>,
         sheet: ParticleSpriteSheet?, animationMode: ParticleAnimationMode,
-        renderKind: ParticleRenderKind = .sprite,
+        renderKind: ParticleRenderKind = .defaultSprite,
         normalMap: MTLTexture? = nil, refractAmount: Float = 0.05
     ) throws -> ParticleRenderer {
         try ParticleRenderer(
