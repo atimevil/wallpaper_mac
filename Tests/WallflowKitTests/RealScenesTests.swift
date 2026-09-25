@@ -156,6 +156,27 @@ final class RealScenesTests: XCTestCase {
         XCTAssertEqual(state.textureAnimationFrame, 1)
     }
 
+    /// 워크숍 3147346398(Minecraft Lo-Fi Fireplace)의 화면 전체를 덮는 검은
+    /// 페이드 오버레이("Solid Placeholder")가 4초(120프레임/30fps)에 걸쳐
+    /// alpha 1→0으로 빠진다. 예전 지름길("정착값")은 재생하지 않고 늘 끝값(0)만
+    /// 줬다 — 이 시험은 실제로 시간이 지남에 따라 논다는 것을 real JSON으로 본다.
+    func testFireplaceFadeOverlayPlaysAlphaOverFourSeconds() throws {
+        guard let reader = try scenePkg("3147346398") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader)
+        guard let layer = doc.layers.first(where: { $0.name == "Solid Placeholder" }) else {
+            return XCTFail("페이드 오버레이 레이어를 찾을 수 없다")
+        }
+        let anim = try XCTUnwrap(layer.animations["alpha"], "alpha에 재생 가능한 커브가 있어야 한다")
+        XCTAssertEqual(anim.mode, .single)
+        XCTAssertEqual(anim.scalar(atSeconds: 0, base: layer.alpha), 1, accuracy: 1e-6)
+        XCTAssertLessThan(anim.scalar(atSeconds: 2, base: layer.alpha), 1,
+                          "재생 중간에는 시작값보다 옅어야 한다")
+        XCTAssertEqual(anim.scalar(atSeconds: 4, base: layer.alpha), 0, accuracy: 1e-6,
+                       "4초 뒤에는 완전히 투명해야 한다")
+    }
+
     /// 226MB 텍스처 두 개가 MP4였다. 이 판정이 틀리면 두 씬이 통째로 깨진다.
     func testLargeTexturesAreDetectedAsVideo() throws {
         let cases = [

@@ -52,6 +52,13 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var scriptFrame: Int?
     }
     private var spriteSheetImages: [SpriteSheetImage] = []
+    /// 타임라인 키프레임 애니메이션(`layer.animations`)이 걸린 레이어. id로 찾는다 —
+    /// `applyPropertyAnimations`가 매 프레임 여기 있는 레이어만 훑는다.
+    private var animatedLayers: [Int: SceneLayer] = [:]
+    /// `animatedLayers`가 지금까지 흐른 시간(초). 파티클·스프라이트 시트와 같은
+    /// dt를 쓴다 — 멈췄다 재개할 때 `lastFrameTime`이 끊겨(`apply(.paused)`) dt가
+    /// 0으로 시작하므로, 여기도 한 번에 몰아 튀지 않는다.
+    private var animationClock: Double = 0
     /// 텍스트 레이어마다 스크립트와 구운 글자. 값이 바뀔 때만 다시 굽는다.
     private var texts: [TextState] = []
     /// 씬의 스크립트 전부를 돌리는 호스트. 스크립트가 없는 씬이면 nil이다.
@@ -901,6 +908,86 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             if !on, entry.player.isPlaying { entry.player.pause() }
         }
         return changed
+    }
+
+    /// 씬 JSON의 타임라인 키프레임 애니메이션(`layer.animations`)을 매 프레임 반영한다.
+    ///
+    /// 스크립트가 같은 자리에 걸려 있으면 스크립트가 이긴다(WE와 같다) — 변환
+    /// (origin/angles/scale)과 색(alpha/color)을 한 묶음으로 본다. `quad.color`
+    /// 하나가 alpha·color·밝기를 같이 지고, `quad.origin/size/rotation`(또는
+    /// `.world`) 하나가 origin·angles·scale을 같이 지어서 반만 못 쓴다 — 묶음 안에
+    /// 스크립트가 하나라도 있으면 그 묶음 전체를 건드리지 않는다(스크립트 쪽
+    /// 값을 그대로 둔다).
+    ///
+    /// ponytail: 글자·파티클·소리 레이어는 자기 자리 갱신 경로가 따로 있어(구운
+    /// 글자의 `text.origin`, `particle.layerOrigin` 등) 여기서는 건드리지 않는다.
+    /// 필요해지면 그 경로에 맞춰 따로 얹는다.
+    private func applyPropertyAnimations(elapsed: Double) {
+        guard !animatedLayers.isEmpty, buildContext != nil else { return }
+        var changed = false
+        for (id, layer) in animatedLayers {
+            guard let target = scriptTargets[id], target.textIndex == nil,
+                  target.particleIndex == nil, target.soundIndex == nil else { continue }
+            let transformScripted = layer.scripts.contains { ["origin", "angles", "scale"].contains($0.property) }
+            let colorScripted = layer.scripts.contains { ["alpha", "color"].contains($0.property) }
+
+            var origin = layer.localOrigin, angles = layer.angles, scale = layer.localScale
+            var touchesTransform = false
+            if !transformScripted {
+                if let a = layer.animations["origin"] {
+                    origin = a.vector(atSeconds: elapsed, base: origin); touchesTransform = true
+                }
+                if let a = layer.animations["angles"] {
+                    angles = a.vector(atSeconds: elapsed, base: angles); touchesTransform = true
+                }
+                if let a = layer.animations["scale"] {
+                    scale = a.vector(atSeconds: elapsed, base: scale); touchesTransform = true
+                }
+            }
+
+            var alpha = layer.alpha, tint = layer.tint, brightness = layer.brightness
+            var touchesColor = false
+            if !colorScripted {
+                if let a = layer.animations["alpha"] {
+                    alpha = a.scalar(atSeconds: elapsed, base: alpha); touchesColor = true
+                }
+                if let a = layer.animations["color"] {
+                    tint = a.vector(atSeconds: elapsed, base: tint); touchesColor = true
+                }
+            }
+            // 밝기는 스크립트가 걸 수 있는 자리가 아니다(`scriptableProperties`에 없다) —
+            // 스크립트 유무와 무관하게 늘 적용한다.
+            if let a = layer.animations["brightness"] {
+                brightness = a.scalar(atSeconds: elapsed, base: brightness); touchesColor = true
+            }
+
+            guard touchesTransform || touchesColor else { continue }
+            let world = target.composed(origin: origin, angles: angles, scale: scale)
+            for index in target.indices where index < layerList.count {
+                var quad = layerList[index].0
+                if touchesColor {
+                    let b = Float(brightness)
+                    quad.color = SIMD4(
+                        Float(tint.x) * b, Float(tint.y) * b, Float(tint.z) * b,
+                        layer.visible ? Float(alpha) : 0)
+                }
+                if touchesTransform {
+                    if buildContext?.isPerspective == true {
+                        quad.world = Scene3D.world(
+                            origin: world.origin, anglesDegrees: world.anglesDegrees, scale: world.scale,
+                            size: target.unitWorld ? Vec2(x: 1, y: 1) : target.baseSize)
+                    } else {
+                        quad.origin = SIMD2(Float(world.origin.x), Float(world.origin.y))
+                        quad.size = SIMD2(Float(target.baseSize.x * world.scale.x),
+                                          Float(target.baseSize.y * world.scale.y))
+                        quad.rotation = Float(world.anglesDegrees.z * .pi / 180)
+                    }
+                }
+                layerList[index].0 = quad
+                changed = true
+            }
+        }
+        if changed { compositor?.setLayers(layerList) }
     }
 
     /// 스크립트가 `createLayer(asset)`으로 만든 레이어를 세운다.
@@ -1820,6 +1907,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         for layer in document.layers where layer.visible || !layer.scripts.isEmpty {
             addLayer(layer, context: context)
         }
+        animatedLayers = Dictionary(
+            uniqueKeysWithValues: document.layers.filter { !$0.animations.isEmpty }.map { ($0.id, $0) })
+        animationClock = 0
 
         // 건너뛴 이유는 drawable이 비어 폴백하는 경우에 사용자가 가장 필요로 한다.
         // isEmpty 가드보다 먼저 써야 그 경로에서도 진단이 버려지지 않는다.
@@ -1949,7 +2039,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             hasText: !texts.isEmpty,
             hasAnimatedEffect: effectChains.contains { $0.chain.isAnimated },
             hasScriptHost: scriptHost != nil, hasPuppets: !puppets.isEmpty,
-            hasAnimatedImage: !spriteSheetImages.isEmpty)
+            hasAnimatedImage: !spriteSheetImages.isEmpty,
+            hasPropertyAnimations: !animatedLayers.isEmpty)
     }
 
     func apply(_ directive: PlaybackDirective) {
@@ -1988,6 +2079,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         sounds.removeAll()
         particles.removeAll()
         spriteSheetImages.removeAll()
+        animatedLayers.removeAll()
+        animationClock = 0
         texts.removeAll()
         puppets.removeAll()
         puppetStartTime = nil
@@ -2046,17 +2139,21 @@ extension SceneRenderer: MTKViewDelegate {
             puppetStartTime = start
             for puppet in puppets { puppet.update(time: now - start) }
         }
-        // 파티클과 스프라이트 시트 이미지가 dt를 함께 쓴다 — 같은 프레임이면
-        // 같은 dt여야 한다. 첫 프레임(또는 막 재생을 재개한 프레임)은 직전 시각이
-        // 없다. 0을 넘기면 그만큼 멈춰 있던 시간이 한 번에 적분되지 않는다
-        // (`apply(.paused)`가 lastFrameTime을 nil로 끊어 둔다).
+        // 파티클·스프라이트 시트 이미지·타임라인 애니메이션이 dt를 함께 쓴다 —
+        // 같은 프레임이면 같은 dt여야 한다. 첫 프레임(또는 막 재생을 재개한
+        // 프레임)은 직전 시각이 없다. 0을 넘기면 그만큼 멈춰 있던 시간이 한
+        // 번에 적분되지 않는다(`apply(.paused)`가 lastFrameTime을 nil로 끊어 둔다).
         let dt: CFTimeInterval
-        if !particles.isEmpty || !spriteSheetImages.isEmpty {
+        if !particles.isEmpty || !spriteSheetImages.isEmpty || !animatedLayers.isEmpty {
             let now = CACurrentMediaTime()
             dt = lastFrameTime.map { now - $0 } ?? 0
             lastFrameTime = now
         } else {
             dt = 0
+        }
+        if !animatedLayers.isEmpty {
+            animationClock += dt
+            applyPropertyAnimations(elapsed: animationClock)
         }
         if !particles.isEmpty {
             // 커서를 씬 좌표로 옮긴다. 제어점이 마우스를 따라가는 프리셋이

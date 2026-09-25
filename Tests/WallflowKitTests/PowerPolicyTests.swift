@@ -149,4 +149,13 @@ final class PowerPolicyTests: XCTestCase {
             hasVideo: false, hasParticles: false, hasText: false,
             hasAnimatedEffect: false, hasScriptHost: false, hasPuppets: true))
     }
+
+    /// 타임라인 키프레임 애니메이션만 있는 씬(예: 3147346398의 검은 페이드
+    /// 오버레이)도 계속 그려야 한다 — 안 그러면 가려짐→재개 뒤 멈춘 프레임에 남는다.
+    func testNeedsContinuousDrawingWithOnlyPropertyAnimationsIsTrue() {
+        XCTAssertTrue(PowerPolicy.needsContinuousDrawing(
+            hasVideo: false, hasParticles: false, hasText: false,
+            hasAnimatedEffect: false, hasScriptHost: false, hasPuppets: false,
+            hasPropertyAnimations: true))
+    }
 }
