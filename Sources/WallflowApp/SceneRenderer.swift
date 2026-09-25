@@ -1494,9 +1494,23 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let soundsBefore = sounds.count
         defer {
             // 스크립트가 이 레이어를 움직일 수 있게 어디에 뭐가 붙었는지 적어 둔다.
+            //
+            // `layer.scale`은 WE에서 뒤집힘(거울상)을 나타내려고 음수일 수 있다
+            // (실물 "Cat and bee"의 배경 전체를 덮는 단색 레이어가 scale
+            // (-17.9,-11.4,-17.9)다). `Swift.max(scale, 1e-9)`로 0나눔만 막으면
+            // 음수 scale이 전부 아주 작은 양수로 뭉개져 baseSize(=size/scale)가
+            // 수십억 배로 튄다 — 스크립트가 한 번이라도 이 레이어 상태를
+            // 적용하면(`applyScriptState`가 매 틱 `baseSize * world.scale`로
+            // 쿼드 크기를 다시 잰다) 그 거대한 값이 그대로 화면 크기가 되어
+            // 사실상 아무것도 안 그려진다. 캔버스를 덮어야 할 배경이 회색
+            // clearcolor로 남고, 시계·눈꺼풀 같은 검정 조각들만 도드라져 보이는
+            // 원인이 이거였다. 부호는 지키고 0에 가까운 크기만 밀어낸다.
+            func nonZeroScale(_ value: Double) -> Double {
+                value.magnitude < 1e-9 ? (value < 0 ? -1e-9 : 1e-9) : value
+            }
             var target = ScriptTarget(
-                baseSize: Vec2(x: layer.size.x / Swift.max(layer.scale.x, 1e-9),
-                               y: layer.size.y / Swift.max(layer.scale.y, 1e-9)),
+                baseSize: Vec2(x: layer.size.x / nonZeroScale(layer.scale.x),
+                               y: layer.size.y / nonZeroScale(layer.scale.y)),
                 brightness: Float(layer.brightness))
             target.indices = Array(firstIndex..<layerList.count)
             let parent = Self.parentTransform(of: layer)
