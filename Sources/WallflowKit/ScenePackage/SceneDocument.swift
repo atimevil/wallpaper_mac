@@ -740,10 +740,38 @@ public struct SceneDocument: Sendable {
 
     /// 수이거나 `{"value": ...}` 객체면 그 값. 비유한값은 없는 것으로 본다 —
     /// NaN 알파가 셰이더까지 흘러가면 레이어가 통째로 사라진다.
+    ///
+    /// `{"animation": {...}, "value": ...}` 모양이면(단발성 키프레임 커브가
+    /// 걸린 스칼라) `value`가 아니라 커브의 정착값을 우선한다 — 애니메이션을
+    /// 재생하지 않는 우리에게 `value`는 대개 시작 프레임 스냅숏이다. 실물
+    /// 3147346398(Minecraft Lo-Fi Fireplace)의 화면 전체를 덮는 페이드 오버레이가
+    /// alpha를 `{"animation": {"c0":[{frame:0,value:1},{frame:120,value:0}], ...},
+    /// "value":1}`로 내보내는데, `value`(도입부 스냅숏 1, 불투명 검정)를 그대로
+    /// 쓰면 페이드가 끝난 뒤에도 화면이 영원히 검게 막힌다. `animationSettledScalar`
+    /// 참고.
     private static func doubleValue(_ raw: Any?) -> Double? {
-        let value = (raw as? [String: Any])?["value"] ?? raw
-        guard let d = value as? Double, d.isFinite else { return nil }
+        if let dict = raw as? [String: Any] {
+            if let settled = animationSettledScalar(dict) { return settled }
+            guard let d = dict["value"] as? Double, d.isFinite else { return nil }
+            return d
+        }
+        guard let d = raw as? Double, d.isFinite else { return nil }
         return d
+    }
+
+    /// 단발성(`options.mode == "single"`) 키프레임 커브의 마지막 값. `c0` 하나뿐인
+    /// 스칼라(alpha 등)만 다룬다 — 벡터(원점·배율)는 축마다 c0/c1/c2로 나뉘고
+    /// 상댓값(relative)이라 범위 밖이다(`doubleValue`를 거치지 않고 `scalarOrScripted`가
+    /// 다룬다). 반복 재생(`loop`)은 "정착"이 없어 손대지 않는다.
+    private static func animationSettledScalar(_ dict: [String: Any]) -> Double? {
+        guard let animation = dict["animation"] as? [String: Any],
+              let options = animation["options"] as? [String: Any],
+              (options["mode"] as? String) == "single",
+              let curve = animation["c0"] as? [[String: Any]],
+              let last = curve.last,
+              let value = last["value"] as? Double, value.isFinite
+        else { return nil }
+        return value
     }
 
     /// 문자열이거나, `{"script": ..., "value": ...}` 객체면 그 `value`.
