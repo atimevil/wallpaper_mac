@@ -124,6 +124,10 @@ final class WebRenderer: NSObject, WallpaperRenderer {
             forMainFrameOnly: false
         )
         config.userContentController.addUserScript(bridgeScript)
+        // 페이지가 wallpaperRegisterAudioListener를 실제로 부르면(등록해 두고 안
+        // 쓰는 페이지도 있을 수 있어 "정의돼 있다"가 아니라 "불렀다"를 본다)
+        // 이 메시지가 온다 — 그때만 소리가 필요한 렌더러로 등록한다.
+        config.userContentController.add(self, name: WebEngineBridge.audioNeededMessageName)
 
         let view = WKWebView(frame: .zero, configuration: config)
         // drawsBackground는 비공개 프로퍼티라 쓰지 않는다.
@@ -188,6 +192,14 @@ final class WebRenderer: NSObject, WallpaperRenderer {
     func stop() {
         audioTimer?.invalidate()
         audioTimer = nil
+        // 씬 렌더러들과 같은 창구에서 등록을 뗀다 — 이 웹 배경화면이 떨어지면
+        // 더는 소리가 필요 없다. 등록한 적이 없어도(오디오 API를 안 쓰는
+        // 페이지) 조용히 아무 일도 없다.
+        SceneRenderer.setAudioNeeded(false, for: ObjectIdentifier(self))
+        // 메시지 핸들러를 안 떼면 userContentController가 self를 계속 들고
+        // 있어 순환 참조로 이 렌더러가 절대 해제되지 않는다.
+        webView?.configuration.userContentController
+            .removeScriptMessageHandler(forName: WebEngineBridge.audioNeededMessageName)
         webView?.stopLoading()
         // 델리게이트를 먼저 떼어낸다 — 안 떼면 이 빈 페이지의 didFinish가 다시
         // 걸려 applyUserProperties를 빈 문서에 헛되이 부르고 오디오 타이머를
@@ -198,3 +210,19 @@ final class WebRenderer: NSObject, WallpaperRenderer {
 }
 
 extension WebRenderer: WKNavigationDelegate {}
+
+extension WebRenderer: WKScriptMessageHandler {
+    /// 페이지가 `wallpaperRegisterAudioListener`를 부르면 온다. `SceneRenderer`가
+    /// 쓰는 `audioNeeders` 창구에 이 렌더러의 신원으로 등록한다 — 화면이 여럿이거나
+    /// 씬과 웹이 섞여 있어도 하나라도 필요하면(합집합이 비지 않으면) 캡처가 켜지는
+    /// 규칙은 그대로다. `AudioSpectrum.isEnabled`(소리 반응 설정) 게이팅은
+    /// `AppCoordinator.applyAudioCapture()`가 이미 하고 있어 여기서 다시 안 본다.
+    nonisolated func userContentController(
+        _ userContentController: WKUserContentController, didReceive message: WKScriptMessage
+    ) {
+        MainActor.assumeIsolated {
+            guard message.name == WebEngineBridge.audioNeededMessageName else { return }
+            SceneRenderer.setAudioNeeded(true, for: ObjectIdentifier(self))
+        }
+    }
+}

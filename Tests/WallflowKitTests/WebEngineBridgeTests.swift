@@ -40,6 +40,26 @@ final class WebEngineBridgeTests: XCTestCase {
         XCTAssertTrue(WebEngineBridge.bootstrapJS.contains("__wallflowDispatchAudio"))
     }
 
+    /// 웹 배경화면이 소리에 실제로 반응하려면, 페이지가 `wallpaperRegisterAudioListener`를
+    /// **부를 때**(등록만 해 두고 안 쓰는 페이지도 있으니 "정의돼 있다"가 아니라
+    /// "불렀다") 앱에 알려야 `SceneRenderer.audioNeeders`에 등록할 수 있다.
+    func testAudioRegistrationPostsMessageWhenPageCallsIt() {
+        let js = WebEngineBridge.bootstrapJS
+        // 등록 함수 본문 안에서 부르는지(정의만 해 두고 밖에서 조건 없이 부르면
+        // 등록 여부와 상관없이 "필요하다"고 오판한다) — postMessage가
+        // wallpaperRegisterAudioListener 대입문 뒤, 다음 대입문(__wallflowDispatchAudio)
+        // 앞에 있는지로 확인한다.
+        guard let assign = js.range(of: "window.wallpaperRegisterAudioListener = function"),
+              let dispatch = js.range(of: "window.__wallflowDispatchAudio = function"),
+              let postMessage = js.range(of: "postMessage") else {
+            return XCTFail("등록/디스패치 함수를 못 찾았다: \(js)")
+        }
+        XCTAssertTrue(assign.upperBound < postMessage.lowerBound
+            && postMessage.upperBound < dispatch.lowerBound,
+            "postMessage는 등록 함수 안, 디스패치 함수보다 앞에 있어야 한다")
+        XCTAssertTrue(js.contains("webkit.messageHandlers.\(WebEngineBridge.audioNeededMessageName)"))
+    }
+
     /// 실물(893418273/main.js:840-850)이 `audioArray[0..63]`만 읽는다 — 왼쪽이 앞
     /// 64칸이어야 한다는 뜻이다.
     func testDispatchAudioJSPutsLeftChannelFirst() {
