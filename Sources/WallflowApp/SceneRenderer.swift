@@ -971,11 +971,18 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     }
 
     private func setAudioNeed(_ needed: Bool) {
-        let key = ObjectIdentifier(self)
-        let before = Self.audioNeeders.contains(key)
+        Self.setAudioNeeded(needed, for: ObjectIdentifier(self))
+    }
+
+    /// 씬이 아닌 다른 렌더러(웹)도 소리가 필요할 수 있다. 같은 창구를 쓴다 —
+    /// `WebRenderer`가 자기 신원으로 등록/해제한다. 키가 여럿이어도 하나라도
+    /// 필요하면(교집합이 비지 않으면) 캡처가 켜진다 — 씬끼리 공유하던 규칙
+    /// 그대로다.
+    static func setAudioNeeded(_ needed: Bool, for key: ObjectIdentifier) {
+        let before = audioNeeders.contains(key)
         guard before != needed else { return }
-        if needed { Self.audioNeeders.insert(key) } else { Self.audioNeeders.remove(key) }
-        Self.audioNeedChanged?(!Self.audioNeeders.isEmpty)
+        if needed { audioNeeders.insert(key) } else { audioNeeders.remove(key) }
+        audioNeedChanged?(!audioNeeders.isEmpty)
     }
 
     /// 진단용: 스크립트가 바꾼 레이어 상태를 틱마다 stderr에 쓴다.
