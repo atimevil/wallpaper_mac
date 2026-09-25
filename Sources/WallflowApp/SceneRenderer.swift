@@ -151,6 +151,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let clearColor: SIMD4<Float>
         let ambient: SIMD3<Float>
         let skylight: SIMD3<Float>
+        /// 씬의 `light` 오브젝트 전부. 위치는 부모 사슬까지 합친 `layer.origin`,
+        /// 방향은 `layer.angles`로 `ModelRenderer`가 구한다.
+        let lights: [(origin: Vec3, angles: Vec3, info: LightInfo)]
     }
 
     /// 스크립트 상태를 화면의 어디에 반영할지.
@@ -1645,7 +1648,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     makeTexture: { try context.compositor.makeTexture(from: $0) },
                     sampler: context.compositor.sharedSampler,
                     eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
-                        clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight)
+                        clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight,
+                        lights: context.lights)
                 // 판의 크기는 size × scale 세계 단위다(실물 배경 구름 64 × 10).
                 quad.world = Scene3D.world(
                     origin: layer.origin,
@@ -1680,7 +1684,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     makeTexture: { try context.compositor.makeTexture(from: $0) },
                     sampler: context.compositor.sharedSampler,
                     eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
-                        clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight)
+                        clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight,
+                        lights: context.lights)
                 quad.world = Scene3D.world(
                     origin: layer.origin,
                     anglesDegrees: Vec3(x: layer.angles.x, y: layer.angles.y, z: layer.rotation * 180 / .pi),
@@ -1691,8 +1696,13 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             }
 
         case .group:
-            // 그룹·solid·light·카메라 자리표시자. 자식이 부모 변환만 받으면 되고
+            // 그룹·solid·카메라 자리표시자. 자식이 부모 변환만 받으면 되고
             // 자신은 그릴 그림이 없다. 로그에 올릴 것도 없다.
+            break
+
+        case .light:
+            // 광원 자신은 그릴 그림이 없다 — `updateLights`가 씬 전체에서
+            // `.light` 레이어를 따로 모아 `ModelRenderer`에 먹인다.
             break
 
         case .unsupported(let reason):
@@ -1768,7 +1778,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             ambient: SIMD3(Float(document.ambientColor.x), Float(document.ambientColor.y),
                            Float(document.ambientColor.z)),
             skylight: SIMD3(Float(document.skylightColor.x), Float(document.skylightColor.y),
-                            Float(document.skylightColor.z)))
+                            Float(document.skylightColor.z)),
+            lights: document.layers.compactMap { layer in
+                guard case .light(let info) = layer.content else { return nil }
+                return (layer.origin, layer.angles, info)
+            })
         buildContext = context
         layerList = []
         // layerList의 인덱스를 들고 있다 — layerList와 같이 끊어야 다음 씬을

@@ -115,14 +115,17 @@ final class GLSLTranslatorTests: XCTestCase {
             "\tconst vec2 c = wfTo2(v_TexCoord);")
     }
 
-    /// 대입문은 받는 쪽이 varying일 때만 안다. 실물 `cloudmotion`이
-    /// `v_NoiseCoord = v_TexCoord;`(vec2 ← vec4)로 쓴다.
+    /// 대입문은 받는 쪽이 varying이거나 스위즐이면 안다. 실물 `cloudmotion`이
+    /// `v_NoiseCoord = v_TexCoord;`(vec2 ← vec4)로 쓴다. 스위즐(`.x`)은 그 길이가
+    /// 곧 받는 쪽 폭이라 스칼라 복합 대입도 안전하게 감쌀 수 있다 —
+    /// `wfTo1(2.0)`은 항등이라 값이 안 바뀐다(editorpaintbrush 이펙트가 스위즐
+    /// 대입 쪽에서 진짜로 폭이 다른 값을 받아 이 처리가 필요해졌다).
     func testAssignmentToVaryingIsWrapped() {
         let source = "varying vec2 v_NoiseCoord;\nvarying vec4 v_TexCoord;\n"
             + "void main() {\n\tv_NoiseCoord = v_TexCoord;\n\tv_NoiseCoord.x *= 2.0;\n}"
         let out = GLSLTranslator.rewritingTruncation(source)
         XCTAssertTrue(out.contains("\tv_NoiseCoord = wfTo2(v_TexCoord);"), out)
-        XCTAssertTrue(out.contains("\tv_NoiseCoord.x *= 2.0;"), "스위즐 대입은 그대로")
+        XCTAssertTrue(out.contains("\tv_NoiseCoord.x *= wfTo1(2.0);"), out)
     }
 
     /// 두 값을 한 줄에 선언하거나 `==`·`+=`가 낀 줄은 건드리면 깨진다.
@@ -590,10 +593,33 @@ final class GLSLTranslatorTests: XCTestCase {
     /// `#require LightingV1`가 걸린 실물 7개가 부르는 `PerformLighting_V1`은
     /// 엔진이 씬의 빛 개수에 맞춰 링크해 주는 자리라 셰이더 헤더 어디에도
     /// 정의가 없다 — "use of undeclared identifier"로 떨어졌었다(generic4.frag,
-    /// Star1/2/3 모델의 재질). 빛 레이어가 아직 없는 지금 상태에 맞춰 0을
-    /// 돌려주는 자리표시자를 프렐류드에 둔다.
-    func testPerformLightingV1StubExists() {
-        XCTAssertTrue(
-            ShaderPrelude.helpers.contains("float3 PerformLighting_V1("), ShaderPrelude.helpers)
+    /// Star1/2/3 모델의 재질). `#require LightingV1`을 만나면 실제 광원 루프
+    /// (빛 유니폼 선언 + 쿡-토런스 BRDF)를 GLSL 텍스트로 끼워 넣는다 —
+    /// `generic3.frag`가 자기 안에 갖고 있는 같은 일을 하는 함수를 근거로 짰다.
+    func testPerformLightingV1IsInjectedAsRealLightLoop() throws {
+        let result = try translate("""
+        #require LightingV1
+        void main() { vec3 x = PerformLighting_V1(CAST3(0.0), CAST3(1.0), CAST3(0.0), CAST3(0.0), CAST3(1.0), CAST3(0.04), 0.5, 0.0); gl_FragColor = vec4(x, 1.0); }
+        """)
+        XCTAssertTrue(result.source.contains("vec3 PerformLighting_V1("), result.source)
+        XCTAssertTrue(result.source.contains("g_LPoint_Origin[LIGHTS_POINT]"), result.source)
+        XCTAssertTrue(result.source.contains("wfComputePBRLight("), result.source)
+        // 정의가 셰이더 본문 안에 있어야 `ShaderContext` 멤버로 들어가
+        // `Distribution_GGX` 같은 `common_pbr_2.h` 도움 함수를 볼 수 있다 — 프렐류드
+        // 쪽에 MSL 함수로 또 있으면 이름이 겹쳐 재정의 오류가 난다.
+        XCTAssertFalse(
+            ShaderPrelude.all.contains("float3 PerformLighting_V1("), ShaderPrelude.all)
+    }
+
+    /// `#require`는 한 번만 펼친다 — `#include`와 같은 규칙. 두 번 펼치면
+    /// `wfComputePBRLight`가 다시 정의되어 그 셰이더가 통째로 떨어진다.
+    func testRequireLightingV1ExpandsOnce() throws {
+        let result = try translate("""
+        #require LightingV1
+        #require LightingV1
+        void main() { gl_FragColor = vec4(PerformLighting_V1(CAST3(0.0), CAST3(1.0), CAST3(0.0), CAST3(0.0), CAST3(1.0), CAST3(0.04), 0.5, 0.0), 1.0); }
+        """)
+        XCTAssertEqual(
+            result.source.components(separatedBy: "vec3 PerformLighting_V1(").count, 2, result.source)
     }
 }

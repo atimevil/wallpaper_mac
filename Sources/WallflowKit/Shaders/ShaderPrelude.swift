@@ -119,6 +119,13 @@ public enum ShaderPrelude {
     // 안 맞아 못 쓰지만, `m * v`(열이 4개, v도 4성분)는 그대로 표준 행렬곱이라
     // 결과가 같다 — 각 열에 v의 성분을 가중해 더한 값이 두 관례 모두에서 같다.
     inline float3 mul(float4 v, float4x3 m) { return m * v; }
+    // 행렬끼리의 `mul`. 실물 `common_particles.h`가 회전 셋을
+    // `mul(mul(Rz, Rx), Ry)`로 합성한다 — `mul(v,M)=v*M`(행벡터 관례)과 같은
+    // 순서를 지키려면 `mul(A,B)`가 `A*B`여야 한다: `mul(mul(v,A),B) = (v*A)*B =
+    // v*(A*B)`이므로 합친 행렬은 `A*B` 그대로다.
+    inline float2x2 mul(float2x2 a, float2x2 b) { return a * b; }
+    inline float3x3 mul(float3x3 a, float3x3 b) { return a * b; }
+    inline float4x4 mul(float4x4 a, float4x4 b) { return a * b; }
 
     // `shaders/common.h`(37줄). 이 파일은 `#include`로 208곳에서 쓰이지만
     // 여기 이미 있으므로 번역기가 그 include를 건너뛴다 — 둘 다 펼치면
@@ -131,19 +138,11 @@ public enum ShaderPrelude {
     #define SQRT_2 1.41421356237
     #define SQRT_3 1.73205080756
 
-    // `#require LightingV1`가 걸린 실물 7개(`generic4`·`chroma4`·`fur4`·`foliage4`·
-    // `genericparticle`·`genericimage4`·`genericropeparticle`)가 `PerformLighting_V1`을
-    // 부른다. 이건 셰이더 파일 어디에도 정의가 없다 — WE 엔진이 씬의 빛 레이어
-    // 개수에 맞춰 이 함수 몸통을 그때그때 만들어 링크하는 자리다. 이 저장소는
-    // 아직 빛 레이어를 구현하지 않아(`ModelRenderer`가 항상 빛 넷을 0으로 채운다)
-    // 직접광이 없는 게 지금 상태와 맞다 — 0을 돌려주면 환경광(`v_LightAmbientColor`
-    // 등)만으로 그려진다. 빛 레이어를 구현하면 이 자리를 실제 광원 루프로 바꾼다.
-    inline float3 PerformLighting_V1(
-        float3 worldPos, float3 albedo, float3 normal, float3 viewVector,
-        float3 specularTint, float3 f0, float roughness, float metallic
-    ) {
-        return float3(0.0);
-    }
+    // `PerformLighting_V1`은 여기 없다 — `GLSLTranslator.syntheticLightingV1`이
+    // `#require LightingV1`을 만나면 진짜 광원 루프(빛 유니폼 선언 +
+    // `common_pbr_2.h`의 `Distribution_GGX`·`GeoSmith`·`FresnelSchlick`로 짠
+    // 쿡-토런스 BRDF)를 GLSL 텍스트로 끼워 넣는다. 여기서 MSL 스텁으로 두면
+    // 그 진짜 정의와 이름이 겹쳐 재정의 오류가 난다.
 
     inline float3 hsv2rgb(float3 c) {
         float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
