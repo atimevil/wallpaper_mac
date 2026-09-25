@@ -88,6 +88,21 @@ final class EffectChain {
     /// 이 체인의 패스 수. 진단용이다.
     var passCount: Int { passes.count }
 
+    /// 다른 레이어의 합성 결과(`_rt_imageLayerComposite_<id>_a/_b`)를 읽는지,
+    /// 읽는다면 어느 레이어들을 읽는지. `SceneRenderer`가 그리기 순서를 정할
+    /// 때 쓴다 — 참조하는 레이어보다 참조당하는 레이어를 먼저 그려야 한다.
+    var referencedLayerIDs: Set<Int> {
+        Set(passes.flatMap {
+            $0.sceneTextures.compactMap { $0.flatMap(EffectDefinition.imageLayerCompositeID(for:)) }
+        })
+    }
+
+    /// 다른 이미지 레이어의 지금 결과(이펙트 있으면 그 출력, 없으면 원본)를
+    /// 묻는다. 씬이 렌더 타깃 이름(`_rt_imageLayerComposite_<id>_a/_b`)으로
+    /// 그 레이어를 가리키면 이걸로 찾는다. 기본은 nil — 이 레이어들을 모를 때는
+    /// 흰 판(placeholder)으로 채운다.
+    private let layerTexture: (Int) -> MTLTexture?
+
     /// 이 체인이 잡은 텍스처 메모리(바이트). 상시 구동 예산을 재는 근거다.
     var textureBytes: Int {
         let full = width * height * 4
@@ -100,8 +115,10 @@ final class EffectChain {
     init?(device: MTLDevice, effects: [EffectDefinition], effectBases: [String],
           source: MTLTexture, resolver: ReferenceResolver, includes: [String: String],
           makeTexture: (TextureData) throws -> MTLTexture,
-          diagnostics: inout [String]) {
+          diagnostics: inout [String],
+          layerTexture: @escaping (Int) -> MTLTexture? = { _ in nil }) {
         self.device = device
+        self.layerTexture = layerTexture
         guard source.width > 0, source.height > 0 else { return nil }
         // 긴 변을 상한에 맞춰 줄인다. 비율은 지킨다 — 안 지키면 이펙트가
         // 늘어난 좌표계에서 돌아 무늬가 찌그러진다.
@@ -183,6 +200,12 @@ final class EffectChain {
         // 미리 읽어 둔다. 슬롯마다 무엇이든 묶여 있어야 한다.
         for pass in compiled {
             for path in pass.sceneTextures.compactMap({ $0 }) where defaults[path] == nil {
+                if EffectDefinition.imageLayerCompositeID(for: path) != nil {
+                    // 파일이 아니라 다른 레이어의 렌더 타깃 참조다. 그 레이어의
+                    // 그림은 매 프레임 바뀔 수 있어 그리는 시점에 `layerTexture`로
+                    // 직접 묻는다 — 여기서 미리 읽어 캐시하면 안 된다.
+                    continue
+                }
                 for candidate in Self.textureCandidates(path, base: pass.base) {
                     guard let data = resolver.data(for: candidate),
                           let decoded = try? TexDecoder.decode(data),
@@ -518,6 +541,13 @@ final class EffectChain {
                           let loaded = defaults[path] {
                     // 씬이 이 슬롯에 준 텍스처. 마스크가 여기로 온다.
                     texture = loaded
+                } else if slot.index < pass.sceneTextures.count,
+                          let path = pass.sceneTextures[slot.index],
+                          let layerID = EffectDefinition.imageLayerCompositeID(for: path),
+                          let referenced = layerTexture(layerID) {
+                    // 다른 이미지 레이어의 지금 합성 결과. 그 레이어가 이번
+                    // 프레임에 먼저 그려졌어야 한다 — `SceneRenderer`가 순서를 맞춘다.
+                    texture = referenced
                 } else if let path = slot.defaultPath, let loaded = defaults[path] {
                     texture = loaded
                 } else {

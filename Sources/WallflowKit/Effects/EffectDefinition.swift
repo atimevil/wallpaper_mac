@@ -195,4 +195,21 @@ extension EffectDefinition {
             ? ["shaders/\(name)"] : ["\(base)/shaders/\(name)", "shaders/\(name)"]
         return (candidates.map { $0 + ".vert" }, candidates.map { $0 + ".frag" })
     }
+
+    /// `_rt_imageLayerComposite_<레이어id>_a`/`_b`를 그 레이어 id로 판다.
+    ///
+    /// 이펙트가 **다른** 이미지 레이어의 합성 결과(이펙트가 있으면 그 출력,
+    /// 없으면 원본 그림)를 슬롯에 받을 때 씬이 주는 이름이다. `_a`/`_b`는
+    /// 그 레이어 자신의 이펙트 체인이 번갈아 쓰는 두 버퍼 이름일 뿐이라
+    /// 우리는 구분하지 않는다 — 어느 쪽이든 "그 레이어의 지금 결과"를
+    /// 뜻한다. 실물 음반 커버 씬(2938612768)의 `blend`/`blendgradient`
+    /// 이펙트가 다른 "音频封面" 레이어를 이 이름으로 가리킨다.
+    public static func imageLayerCompositeID(for name: String) -> Int? {
+        let prefix = "_rt_imageLayerComposite_"
+        guard name.hasPrefix(prefix) else { return nil }
+        var rest = name.dropFirst(prefix.count)
+        guard rest.hasSuffix("_a") || rest.hasSuffix("_b") else { return nil }
+        rest = rest.dropLast(2)
+        return Int(rest)
+    }
 }

@@ -684,21 +684,18 @@ public struct SceneDocument: Sendable {
             //
             // 모델 JSON 자체가 `"fullscreen": true`를 선언하기도 한다(실물
             // `models/util/fullscreenlayer.json` — 재질이 그 자리에서 방금 합성된
-            // 화면(`_rt_FullFrameBuffer`)을 그대로 읽는 통과 셰이더다). effects가
+            // 화면(`_rt_FullFrameBuffer`)을 그대로 읽는 통과 셰이더다). effects 키가
             // 아예 없는 오브젝트도 있다(실물 "光标旋转后处理"는 커서 이벤트만 듣고
-            // 그림은 안 만든다, 로파이 카페 씬의 구분선 7개도 마찬가지). 그런
-            // 것까지 후처리로 취급하면 안 된다 — 걸 이펙트가 없다.
+            // 그림은 안 만든다, 로파이 카페 씬의 구분선 7개도 마찬가지) — 켤 이펙트가
+            // 영영 없으니 그룹처럼 조용히 넘긴다. 반대로 effects 키는 있는데 전부
+            // 꺼져 있으면(편집기에서 visible false) 버리지 않는다 — 후처리는 이펙트가
+            // 없으면 화면을 그대로 내는 것이 WE에서도 맞는 동작이고
+            // (`SceneRenderer.renderPostProcess`), 여기서 버리면 "그리지 못한
+            // 레이어"로 잘못 보고된다.
             let isFullscreenPassthrough = resolver.json(for: modelPath)?["fullscreen"] as? Bool == true
             if object["origin"] == nil, object["size"] == nil,
                object["effects"] != nil || isFullscreenPassthrough {
-                guard !effects.isEmpty else {
-                    // 통과 셰이더인데 걸 이펙트가 하나도 없으면 화면을 있는 그대로
-                    // 되읽어 그대로 낸다 — 아무것도 안 그리는 것과 같다. 조용히
-                    // 넘어간다. fullscreen 표시가 없는 일반 이미지가 이 자리에
-                    // 왔다면(effects만 있고 비어 있으면) 여전히 진짜 결함이니 알린다.
-                    if isFullscreenPassthrough { return group() }
-                    return unsupported("후처리 레이어인데 걸 이펙트가 없다")
-                }
+                if object["effects"] == nil { return group() }
                 return SceneLayer(
                     id: id, name: name, visible: visible,
                     origin: Vec3(x: 0, y: 0, z: 0),

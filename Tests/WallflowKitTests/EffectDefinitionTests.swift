@@ -148,4 +148,21 @@ final class EffectDefinitionTests: XCTestCase {
         XCTAssertEqual(textures[1], "masks/blur_mask")
         XCTAssertNil(textures[2])
     }
+
+    /// `_rt_imageLayerComposite_<id>_a`/`_b`는 다른 이미지 레이어의 합성 결과를
+    /// 가리키는 이름이다 — 실물 음반 커버 씬(2938612768)의 `blend` 이펙트가
+    /// 다른 "音频封面" 레이어를 이 이름으로 참조한다.
+    func testImageLayerCompositeIDParsesSuffixAOrB() {
+        XCTAssertEqual(EffectDefinition.imageLayerCompositeID(for: "_rt_imageLayerComposite_1174_a"), 1174)
+        XCTAssertEqual(EffectDefinition.imageLayerCompositeID(for: "_rt_imageLayerComposite_890_b"), 890)
+    }
+
+    func testImageLayerCompositeIDRejectsUnrelatedNames() {
+        // 화면 전체 버퍼처럼 아예 다른 렌더 타깃은 걸리면 안 된다.
+        XCTAssertNil(EffectDefinition.imageLayerCompositeID(for: "_rt_FullFrameBuffer"))
+        // 접미가 없거나 id가 숫자가 아니면 참조로 보지 않는다.
+        XCTAssertNil(EffectDefinition.imageLayerCompositeID(for: "_rt_imageLayerComposite_1174"))
+        XCTAssertNil(EffectDefinition.imageLayerCompositeID(for: "_rt_imageLayerComposite_abc_a"))
+        XCTAssertNil(EffectDefinition.imageLayerCompositeID(for: "masks/blur_mask"))
+    }
 }
