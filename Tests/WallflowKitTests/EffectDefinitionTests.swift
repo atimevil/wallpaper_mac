@@ -120,6 +120,32 @@ final class EffectDefinitionTests: XCTestCase {
         XCTAssertEqual(effect.passes[0].constants["speed"], .scalar(0.75))
     }
 
+    /// 재질 경로 후보 두 철자 다 pkg를 먼저 훑어야 한다. Assets에 이펙트 폴더
+    /// 기준 철자로 같은 이름의(그러나 다른 내용의) 표준판이 있어도, pkg가
+    /// 루트 기준 철자로 자기 사본을 들고 있으면 그게 이겨야 한다(실물
+    /// 1493910771 — 셰이더 쪽과 같은 사고 유형).
+    func testMaterialPathPrefersPkgAcrossCandidatesOverAssetsFirstCandidate() throws {
+        let pkg = try PkgReader(data: buildPkg(version: "PKGV0023", entries: [
+            ("effects/x/effect.json",
+             Data(#"{"passes": [{"material": "materials/shared.json"}]}"#.utf8)),
+            ("materials/shared.json",
+             Data(#"{"passes": [{"shader": "effects/from-pkg"}]}"#.utf8)),
+        ]))
+        let assetsRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wallflow-effdef-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: assetsRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: assetsRoot) }
+        let assetPath = assetsRoot.appendingPathComponent("effects/x/materials/shared.json")
+        try FileManager.default.createDirectory(
+            at: assetPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"passes": [{"shader": "effects/from-assets"}]}"#.utf8).write(to: assetPath)
+
+        let resolver = ReferenceResolver(pkg: pkg, assets: AssetsStore(root: assetsRoot))
+        let effect = try XCTUnwrap(EffectDefinition.load(
+            path: "effects/x/effect.json", scenePasses: [], resolver: resolver))
+        XCTAssertEqual(effect.passes[0].shaderName, "effects/from-pkg")
+    }
+
     func testShaderPathsPreferTheEffectFolder() {
         let paths = EffectDefinition.shaderPaths(for: "effects/iris", base: "effects/iris")
         XCTAssertEqual(paths.fragment.first, "effects/iris/shaders/effects/iris.frag")

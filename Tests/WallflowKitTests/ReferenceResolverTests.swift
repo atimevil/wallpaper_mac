@@ -80,4 +80,47 @@ final class ReferenceResolverTests: XCTestCase {
         XCTAssertNotNil(resolver.data(for: "models/x.json"), ".pkg 바이트는 존재한다")
         XCTAssertNil(resolver.json(for: "models/x.json"), ".pkg 깨진 JSON이므로 nil")
     }
+
+    /// `firstData`는 철자 후보 전부를 pkg로 먼저 훑어야 한다. 첫 철자가 pkg에
+    /// 없고 두 번째 철자가 pkg에 있는데, Assets에는 첫 철자로 다른 내용이 있으면
+    /// (실물 1493910771 waterwaves — 씬은 `shaders/effects/waterwaves.frag`로
+    /// 담았는데 첫 후보 `effects/waterwaves/shaders/effects/waterwaves.frag`가
+    /// Assets에만 있었다) pkg의 두 번째 철자가 이겨야 한다.
+    func testFirstDataPrefersPkgAcrossAllCandidatesOverAssetsFirstCandidate() throws {
+        let pkg = try PkgReader(data: buildPkg(version: "PKGV0023", entries: [
+            ("shaders/effects/waterwaves.frag", Data("pkg version".utf8)),
+        ]))
+        try writeAsset(
+            "effects/waterwaves/shaders/effects/waterwaves.frag", "assets version")
+        let resolver = ReferenceResolver(pkg: pkg, assets: AssetsStore(root: assetsRoot))
+        let candidates = [
+            "effects/waterwaves/shaders/effects/waterwaves.frag",
+            "shaders/effects/waterwaves.frag",
+        ]
+        let data = try XCTUnwrap(resolver.firstData(of: candidates))
+        XCTAssertEqual(String(data: data, encoding: .utf8), "pkg version")
+    }
+
+    /// 어느 철자도 pkg에 없으면 그제야 Assets를 본다(순서대로).
+    func testFirstDataFallsBackToAssetsWhenNoCandidateIsInPkg() throws {
+        let pkg = try PkgReader(data: buildPkg(version: "PKGV0023", entries: [
+            ("scene.json", Data("{}".utf8)),
+        ]))
+        try writeAsset("effects/blur/shaders/effects/blur.frag", "assets version")
+        let resolver = ReferenceResolver(pkg: pkg, assets: AssetsStore(root: assetsRoot))
+        let candidates = [
+            "effects/blur/shaders/effects/blur.frag",
+            "shaders/effects/blur.frag",
+        ]
+        let data = try XCTUnwrap(resolver.firstData(of: candidates))
+        XCTAssertEqual(String(data: data, encoding: .utf8), "assets version")
+    }
+
+    func testFirstDataNilWhenNoCandidateExistsAnywhere() throws {
+        let pkg = try PkgReader(data: buildPkg(version: "PKGV0023", entries: [
+            ("scene.json", Data("{}".utf8)),
+        ]))
+        let resolver = ReferenceResolver(pkg: pkg, assets: AssetsStore(root: assetsRoot))
+        XCTAssertNil(resolver.firstData(of: ["a/x.frag", "x.frag"]))
+    }
 }

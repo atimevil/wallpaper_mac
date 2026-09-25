@@ -183,8 +183,14 @@ extension EffectDefinition {
     static func resolveJSON(
         _ path: String, base: String, resolver: ReferenceResolver
     ) -> [String: Any]? {
-        if !base.isEmpty, let json = resolver.json(for: base + "/" + path) { return json }
-        return resolver.json(for: path)
+        let candidates = base.isEmpty ? [path] : [base + "/" + path, path]
+        // pkg를 두 철자 다 먼저 훑는다 — Assets에 같은 이름의 폴더 기준 사본이
+        // 있으면(`ReferenceResolver.firstData` 주석의 waterwaves 사례) pkg의
+        // 재질을 놔두고 Assets 재질을 집을 수 있다.
+        guard let data = resolver.firstData(of: candidates),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any] else { return nil }
+        return dict
     }
 
     /// 셰이더 짝의 경로. 재질은 확장자 없는 이름을 준다.
