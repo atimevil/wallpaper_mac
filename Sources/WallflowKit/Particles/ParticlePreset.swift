@@ -164,6 +164,30 @@ public enum ParticleInitializer: Equatable, Sendable {
     /// 보인다). `turbulence` 연산자와 같은 잡음 함수·같은 시간 배율(0.01)을
     /// 쓴다 — 한 코드베이스 안에서 "매끄러운 잡음"의 관례를 통일했다.
     case positionOffsetRandom(distance: Double, scale: Double, timeScale: Double)
+    /// 태어날 때 **한 번** `remapValue`와 같은 식으로 초기값을 정한다(WE 2.7).
+    /// `operation: "remap"`(실물 창작마당 미리보기)만 다룬다 — `output`·
+    /// `outputrangemin`/`outputrangemax`가 다 있어 `remapValue`와 똑같이
+    /// 읽을 수 있다. `operation: "multiply"`(실물 `thunderbolt_beam_child.json`
+    /// 등)는 `output` 필드가 아예 없어 **무엇을 곱하는지 실물만으로 알 수
+    /// 없다** — 지어내지 않고 `.multiplyUnsupported`로 남겨 보고만 한다.
+    case remapInitialValue(output: ParticleRemapOutput, input: ParticleRemapInput,
+                           outputMin: Vec3, outputMax: Vec3)
+    /// `remapinitialvalue`의 `operation: "multiply"` — output이 없어 모델링
+    /// 안 한다. 이름을 들고 있다가 보고한다.
+    case remapInitialValueMultiplyUnsupported
+    /// 제어점의 프레임 간 이동으로 낸 속도를 새로 나는 파티클에 준다(WE 2.7,
+    /// "applies the movement speed and direction of a control point to newly
+    /// spawned particles"). 실물 창작마당 미리보기 — `controlpoint`·`min`·`max`
+    /// (제어점 속도에 곱하는 배율의 난수 범위, `min:0.3, max:1`). 번호를 안
+    /// 적으면 0번(다른 제어점 초기화자들과 같은 관례), 배율을 안 적으면
+    /// 1~1(그대로).
+    case inheritControlPointVelocity(controlPoint: Int, scaleMin: Double, scaleMax: Double)
+    /// 태어날 때 **한 번** 부모 파티클의 색·크기·알파·속도를 그대로 받는다
+    /// (WE 2.7, "copy certain parent particle properties onto their children
+    /// ... color, size or opacity"). 실물 창작마당 미리보기가 필드를 하나도
+    /// 안 적는다 — 무엇 하나를 고르는 필드가 없어 넷 다 옮긴다. 부모가 없으면
+    /// (예: `once` 자식, 부모 파티클 하나에 안 묶인다) 아무것도 안 한다.
+    case inheritInitialValueFromEvent
 }
 public enum ParticleOperator: Equatable, Sendable {
     case movement(gravity: Vec3, drag: Double)
@@ -224,12 +248,14 @@ public enum ParticleOperator: Equatable, Sendable {
     /// 유리창에 맺힌 비가 이걸로 흘러내린다 — 방울마다 다른 속도를 잡음에서
     /// 받는다. 이 연산자가 없으면 중력만 남아 방울이 느리게 떨어지기만 한다.
     ///
-    /// **`input`을 읽는 쪽은 아직 안 만들었다.** 실물에서 쓰는 두 개가 둘 다
-    /// input 없이 잡음만 쓰고, 다른 input(`distancetocontrolpoint`)은 제어점
-    /// 데이터가 있어야 한다. 우리가 넣을 수 있는 출력만 넣고 나머지는 이름과
-    /// 함께 보고한다.
+    /// `input`(`ParticleRemapInput` 참고) — 안 적으면(대다수) 파티클마다 다른
+    /// 시드로 흐르는 잡음/사인이고, `particlesystemtime`이면 시스템 전체가
+    /// 같은 시각을 쓰며, `distancetocontrolpoint`면 거리를 그대로(잡음 없이)
+    /// 0~1로 정규화해 쓴다. 우리가 넣을 수 있는 출력·입력만 넣고 나머지는
+    /// 이름과 함께 보고한다.
     case remapValue(output: ParticleRemapOutput, transform: ParticleRemapTransform,
-                    inputScale: Double, outputMin: Vec3, outputMax: Vec3)
+                    inputScale: Double, outputMin: Vec3, outputMax: Vec3,
+                    input: ParticleRemapInput)
     case controlPointAttract(controlPoint: Int, origin: Vec3, scale: Double, threshold: Double)
     /// 속력 상한(WE 2.7). `maxspeed`를 넘는 파티클을 그 값으로 죈다.
     /// `blendinstart`~`blendinend`(수명 비율)에 걸쳐 0→1로 서서히 걸린다 —
@@ -280,9 +306,22 @@ public enum ParticleOperator: Equatable, Sendable {
     /// `maxLength` 부재 처리와 같은 "안전한 무효과" 기본값)으로 둔다. 씬이
     /// 반지름을 적으면 그 값을 쓴다.
     case collisionSphere(origin: Vec3, radius: Double, behavior: ParticleCollisionBehavior)
-    /// 사각 판과 충돌한다(WE 2.7) — 한쪽 면에서만 막는다(문서: "one side").
-    /// `axis`는 collisionPlane과 같은 이유로 기본 Y.
+    /// 사각 판과 충돌한다(WE 2.7) — 한쪽 면에서만 막는다(문서: "Since the
+    /// collision only occurs from one side, you can use -1 to switch the
+    /// side"). 별도 필드가 아니라 **axis의 부호**로 막는 쪽을 바꾼다 — "-1"은
+    /// axis 성분에 음수를 넣으라는 뜻으로 읽었다(실물에 반대쪽 예가 없어
+    /// 확정할 수는 없지만, 문서가 새 필드 이름을 안 주고 "-1을 쓰라"고만
+    /// 적어 axis 부호 말고 다른 자리가 없다). `axis`는 collisionPlane과 같은
+    /// 이유로 기본 Y.
     case collisionQuad(origin: Vec3, axis: Vec3, size: Vec2, behavior: ParticleCollisionBehavior)
+    /// `follow` 자식이 매 프레임 부모 파티클의 색·크기·알파를 그대로 받는다
+    /// (WE 2.7) — `inheritInitialValueFromEvent`의 매 프레임 판. **속도는 안
+    /// 옮긴다** — 실물 미리보기 자식이 `speedmin:50, speedmax:200`인 제 이미터를
+    /// 따로 갖는데, 속도까지 부모 것으로 덮으면 그 이미터 속도를 매 프레임
+    /// 지워 파티클이 부모와 한 덩어리로 뭉친다. WE 문서도 이 사건형의 용례로
+    /// "color, size or opacity"만 든다. 실물 창작마당 미리보기가 필드를
+    /// 하나도 안 적는다.
+    case inheritValueFromEvent
 }
 
 /// 충돌 연산자 네 가지가 공유하는 충돌 후 동작(WE 2.7 문서: Bounce/Slide/
@@ -364,6 +403,48 @@ public enum ParticleRemapTransform: Equatable, Sendable {
         // `simplexnoise`와 `fbmnoise`는 결이 다르지만 둘 다 매끄러운 잡음이다.
         // 우리 잡음 하나로 받고, 다르다는 사실은 주석으로 남긴다.
         default: return .noise
+        }
+    }
+}
+
+/// `remapvalue`/`remapinitialvalue`의 `input` — 0~1로 바뀌기 **전** 원시 값이
+/// 어디서 오는지. 실물의 절반은 이 필드가 아예 없다(잡음/사인이 파티클마다
+/// 다른 시드로 스스로 흐른다 — `.none`). 나머지 절반은 이 필드를 명시한다.
+public enum ParticleRemapInput: Equatable, Sendable {
+    /// 안 적으면 이것 — 파티클마다 다른 시드로 흐르는 잡음/사인을 그대로
+    /// `transform`에 먹인다(실물 대다수, `rain_screen*`). 물방울마다 다른
+    /// 속도로 흘러내리는 것이 이것이다.
+    case none
+    /// 시스템 전체가 같은 시각을 공유한다(실물 `thunderbolt.json` — 번개
+    /// 전체가 함께 깜빡인다, 파티클마다 따로 안 흔들린다). `.none`과 달리
+    /// 파티클별 시드를 안 섞는다.
+    case particleSystemTime
+    /// 제어점까지의 거리(실물 `remapvalue`/`remapinitialvalue` 둘 다 있는
+    /// 유일한 명시적 입력, `inputcontrolpoint0`이 번호를 정한다 — 안 적으면
+    /// 0번). `inputrangemin`~`inputrangemax`로 0~1로 정규화한다. 실물 셋 다
+    /// `transformfunction`을 같이 안 써서, 잡음/사인을 안 거치고 정규화한
+    /// 거리를 그대로 쓴다(공간 그라디언트 — 가까우면 한 색, 멀면 다른 색).
+    case distanceToControlPoint(controlPoint: Int, rangeMin: Double, rangeMax: Double)
+    /// 우리가 아직 안 넣는 입력. 이름을 들고 있다가 보고한다.
+    case unsupported(String)
+
+    public static func parse(
+        _ raw: Any?, controlPoint: Int, rangeMin: Double, rangeMax: Double
+    ) -> ParticleRemapInput {
+        switch (raw as? String)?.lowercased() {
+        case nil: return .none
+        case "particlesystemtime": return .particleSystemTime
+        case "distancetocontrolpoint":
+            return .distanceToControlPoint(
+                controlPoint: controlPoint, rangeMin: rangeMin, rangeMax: rangeMax)
+        case let other: return .unsupported(other ?? "(없음)")
+        }
+    }
+
+    public var name: String? {
+        switch self {
+        case .none, .particleSystemTime, .distanceToControlPoint: return nil
+        case .unsupported(let name): return name
         }
     }
 }
@@ -910,7 +991,8 @@ public struct ParticlePreset: Equatable, Sendable {
             "lifetimerandom", "sizerandom", "alpharandom", "velocityrandom",
             "colorrandom", "rotationrandom", "angularvelocityrandom", "turbulentvelocityrandom",
             "mapsequencearoundcontrolpoint", "mapsequencebetweencontrolpoints", "colorlist",
-            "hsvcolorrandom", "positionoffsetrandom"
+            "hsvcolorrandom", "positionoffsetrandom", "remapinitialvalue",
+            "inheritcontrolpointvelocity", "inheritinitialvaluefromevent"
         ])
         let knownOperatorNames = Set<String>([
             "movement", "angularmovement", "alphafade", "alphachange", "sizechange",
@@ -918,7 +1000,7 @@ public struct ParticlePreset: Equatable, Sendable {
             "turbulence", "vortex", "vortex_v2", "remapvalue", "controlpointattract",
             "capvelocity", "maintaindistancebetweencontrolpoints", "maintaindistancetocontrolpoint",
             "reducemovementnearcontrolpoint", "boids", "collisionplane", "collisionsphere",
-            "collisionquad"
+            "collisionquad", "inheritvaluefromevent"
         ])
 
         // Parse maxCount with clamping
@@ -1333,6 +1415,38 @@ public struct ParticlePreset: Equatable, Sendable {
             let timeScale = getDouble(dict["timescale"]) ?? 0
             return .positionOffsetRandom(distance: distance, scale: scale, timeScale: timeScale)
 
+        case "remapinitialvalue":
+            // "multiply"는 output 필드가 없어 무엇을 곱하는지 실물만으로 알 수
+            // 없다 — 타입 선언부 주석 참고. 모델링 안 하는 표시만 돌려준다.
+            let operation = (dict["operation"] as? String)?.lowercased()
+            guard operation == nil || operation == "remap" else {
+                return .remapInitialValueMultiplyUnsupported
+            }
+            let inputControlPoint = getInt(dict["inputcontrolpoint0"]) ?? 0
+            let inputRangeMin = getDouble(dict["inputrangemin"]) ?? 0
+            let inputRangeMax = getDouble(dict["inputrangemax"]) ?? 1
+            func range(_ key: String, _ fallback: Double) -> Vec3 {
+                if let text = dict[key] as? String, let vector = Vec3.parse(text) { return vector }
+                if let value = getDouble(dict[key]) { return Vec3(x: value, y: value, z: value) }
+                return Vec3(x: fallback, y: fallback, z: fallback)
+            }
+            return .remapInitialValue(
+                output: ParticleRemapOutput.parse(dict["output"] as? String),
+                input: ParticleRemapInput.parse(
+                    dict["input"], controlPoint: inputControlPoint,
+                    rangeMin: inputRangeMin, rangeMax: inputRangeMax),
+                outputMin: range("outputrangemin", 0), outputMax: range("outputrangemax", 1))
+
+        case "inheritcontrolpointvelocity":
+            let controlPoint = getInt(dict["controlpoint"]) ?? 0
+            let scaleMin = getDouble(dict["min"]) ?? 1
+            let scaleMax = getDouble(dict["max"]) ?? 1
+            return .inheritControlPointVelocity(
+                controlPoint: controlPoint, scaleMin: scaleMin, scaleMax: scaleMax)
+
+        case "inheritinitialvaluefromevent":
+            return .inheritInitialValueFromEvent
+
         default:
             return nil
         }
@@ -1452,12 +1566,20 @@ public struct ParticlePreset: Equatable, Sendable {
                 if let value = getDouble(dict[key]) { return Vec3(x: value, y: value, z: value) }
                 return Vec3(x: fallback, y: fallback, z: fallback)
             }
+            // input 번호를 안 적으면 0번(제어점 관례 그대로) — inputrangemin/max는
+            // "거리 0~1로 정규화" 구간이라 안 적으면 그대로(0~1)로 둔다.
+            let inputControlPoint = getInt(dict["inputcontrolpoint0"]) ?? 0
+            let inputRangeMin = getDouble(dict["inputrangemin"]) ?? 0
+            let inputRangeMax = getDouble(dict["inputrangemax"]) ?? 1
             return .remapValue(
                 output: ParticleRemapOutput.parse(dict["output"] as? String),
                 transform: ParticleRemapTransform.parse(dict["transformfunction"] as? String),
                 inputScale: getDouble(dict["transforminputscale"]) ?? 1,
                 outputMin: range("outputrangemin", 0),
-                outputMax: range("outputrangemax", 1))
+                outputMax: range("outputrangemax", 1),
+                input: ParticleRemapInput.parse(
+                    dict["input"], controlPoint: inputControlPoint,
+                    rangeMin: inputRangeMin, rangeMax: inputRangeMax))
 
         case "vortex", "vortex_v2":
             // 고리(`ringradius`/`ringwidth`/`ringpulldistance`)는 아직 모델링하지
@@ -1572,6 +1694,9 @@ public struct ParticlePreset: Equatable, Sendable {
             let behavior = ParticleCollisionBehavior.parse(
                 dict["collisionbehavior"], bounceFactor: bounceFactor)
             return .collisionQuad(origin: origin, axis: axis, size: size, behavior: behavior)
+
+        case "inheritvaluefromevent":
+            return .inheritValueFromEvent
 
         default:
             return nil

@@ -120,6 +120,17 @@ public final class ParticleSystem {
     /// 다음에 태어날 파티클에 매길 순번. 버퍼 슬롯은 재사용되므로 태어난
     /// 차례를 아는 유일한 길이다 — 로프가 `age` 동률을 가를 때 쓴다.
     private var nextSpawnSequence: Int = 0
+    /// 제어점의 지난 프레임 자리(`inheritControlPointVelocity`가 프레임 간
+    /// 이동으로 속도를 내려고 쓴다). 못 푼 프레임은 안 남긴다 — 다음 프레임에
+    /// 다시 시도한다.
+    private var previousControlPointPositions: [Int: Vec3] = [:]
+    /// `(현재 자리 − 지난 자리) / dt`. 매 프레임 `step` 시작에서 갱신한다.
+    private var controlPointVelocities: [Int: Vec3] = [:]
+    /// 부모 사건(자식을 낳은 파티클)의 스냅샷. `inheritInitialValueFromEvent`·
+    /// `inheritValueFromEvent`가 색·크기·알파·속도를 그대로 받을 때 쓴다.
+    /// `follow` 자식은 `updateChildren`이 매 프레임 다시 채운다 — 부모가
+    /// 계속 움직이며 값이 바뀔 수 있어서다.
+    var parentSnapshot: Particle?
 
     public init(preset: ParticlePreset, random: RandomSource) {
         self.preset = preset
@@ -156,10 +167,18 @@ public final class ParticleSystem {
                Self.unresolvableControlPoint(point, in: preset) {
                 unimplemented.insert("controlpointattract(제어점 \(point))")
             }
-            // 우리가 안 넣는 출력은 이름과 함께 남긴다.
-            if case .remapValue(let output, _, _, _, _) = op,
-               case .unsupported(let name) = output {
-                unimplemented.insert("remapvalue(\(name))")
+            // 우리가 안 넣는 출력·입력은 이름과 함께 남긴다.
+            if case .remapValue(let output, _, _, _, _, let input) = op {
+                if case .unsupported(let name) = output {
+                    unimplemented.insert("remapvalue(\(name))")
+                }
+                if case .unsupported(let name) = input {
+                    unimplemented.insert("remapvalue(입력 \(name))")
+                }
+                if case .distanceToControlPoint(let point, _, _) = input,
+                   Self.unresolvableControlPoint(point, in: preset) {
+                    unimplemented.insert("remapvalue(제어점 \(point))")
+                }
             }
             if case .maintainDistanceToControlPoint(let point, _) = op,
                Self.unresolvableControlPoint(point, in: preset) {
@@ -188,6 +207,27 @@ public final class ParticleSystem {
                     unimplemented.insert("mapsequencebetweencontrolpoints(arc)")
                 }
             }
+            if case .remapInitialValue(let output, let input, _, _) = initializer {
+                if case .unsupported(let name) = output {
+                    unimplemented.insert("remapinitialvalue(\(name))")
+                }
+                if case .unsupported(let name) = input {
+                    unimplemented.insert("remapinitialvalue(입력 \(name))")
+                }
+                if case .distanceToControlPoint(let point, _, _) = input,
+                   Self.unresolvableControlPoint(point, in: preset) {
+                    unimplemented.insert("remapinitialvalue(제어점 \(point))")
+                }
+            }
+            if case .remapInitialValueMultiplyUnsupported = initializer {
+                // output 필드가 없어 무엇을 곱하는지 실물만으로 알 수 없다
+                // (타입 선언부 주석 참고).
+                unimplemented.insert("remapinitialvalue(multiply)")
+            }
+            if case .inheritControlPointVelocity(let point, _, _) = initializer,
+               Self.unresolvableControlPoint(point, in: preset) {
+                unimplemented.insert("inheritcontrolpointvelocity(제어점 \(point))")
+            }
         }
         for emitter in preset.emitters {
             // 이미터가 못 푸는 제어점을 쓰면 뿌리는 자리는 원점으로 물러난다
@@ -203,14 +243,14 @@ public final class ParticleSystem {
         self.hasSizeCurve = preset.operators.contains {
             switch $0 {
             case .sizeChange, .oscillateSize: return true
-            case .remapValue(let output, _, _, _, _): return output == .size
+            case .remapValue(let output, _, _, _, _, _): return output == .size
             default: return false
             }
         }
         self.hasAlphaCurve = preset.operators.contains {
             switch $0 {
             case .alphaFade, .alphaChange, .oscillateAlpha: return true
-            case .remapValue(let output, _, _, _, _): return output == .opacity
+            case .remapValue(let output, _, _, _, _, _): return output == .opacity
             default: return false
             }
         }
@@ -369,6 +409,10 @@ public final class ParticleSystem {
 
     /// 시뮬레이션 한 걸음. `dt`는 이미 시뮬레이션 시간이다.
     private func step(_ dt: Double) {
+        // 이번 프레임 파티클이 새로 날 **전에** 갱신해야 그 파티클이
+        // `inheritControlPointVelocity`로 이번 프레임 속도를 받는다.
+        updateControlPointVelocities(dt: dt)
+
         // Remove dead particles from alive tracking
         removeDeadParticles()
 
@@ -424,6 +468,11 @@ public final class ParticleSystem {
             // 기본값(원점 0, 배율 1)이라 변환이 헛돈다(worldToLocal 참고).
             system.layerOrigin = layerOrigin
             system.layerScale = layerScale
+            // `inheritInitialValueFromEvent`/`inheritValueFromEvent`가 쓸
+            // 부모 스냅샷. `once`는 부모 파티클 하나에 안 묶여 slot이 nil이다.
+            if let slot, particleBuffer.indices.contains(slot) {
+                system.parentSnapshot = particleBuffer[slot]
+            }
             childInstances[index].append(
                 ChildInstance(system: system, followSlot: trigger == .follow ? slot : nil))
         }
@@ -447,6 +496,9 @@ public final class ParticleSystem {
                 if let slot = instance.followSlot {
                     if particleBuffer.indices.contains(slot), particleBuffer[slot].isAlive {
                         instance.system.originOffset = particleBuffer[slot].position
+                        // 부모가 계속 움직이며 값이 바뀔 수 있어 매 프레임 새로
+                        // 채운다 — `inheritValueFromEvent`가 이걸 읽는다.
+                        instance.system.parentSnapshot = particleBuffer[slot]
                     } else {
                         instance.followSlot = nil
                         instance.isRetiring = true
@@ -808,6 +860,65 @@ public final class ParticleSystem {
                 x: particle.position.x + field.x * distance,
                 y: particle.position.y + field.y * distance,
                 z: particle.position.z + field.z * distance)
+
+        case .remapInitialValue(let output, let input, let outputMin, let outputMax):
+            // remapValue와 같은 식이지만 태어날 때 한 번만 돈다 — transform이
+            // 없다(실물이 한 번도 안 쓴다, 타입 선언부 주석 참고).
+            let t: Double
+            switch input {
+            case .none, .particleSystemTime:
+                // 실물 remapinitialvalue는 이 둘을 안 쓴다 — 값을 못 정하니
+                // 손대지 않는다.
+                return
+            case .distanceToControlPoint(let controlPoint, let rangeMin, let rangeMax):
+                guard let center = controlPointPosition(controlPoint) else { return }
+                let delta = Vec3(x: particle.position.x - center.x,
+                                 y: particle.position.y - center.y,
+                                 z: particle.position.z - center.z)
+                let distance = Self.length(delta)
+                let span = rangeMax - rangeMin
+                t = span > 1e-9 ? min(max((distance - rangeMin) / span, 0), 1) : 0
+            case .unsupported:
+                return
+            }
+            let value = Vec3(
+                x: outputMin.x + (outputMax.x - outputMin.x) * t,
+                y: outputMin.y + (outputMax.y - outputMin.y) * t,
+                z: outputMin.z + (outputMax.z - outputMin.z) * t)
+            switch output {
+            case .velocity: particle.velocity = value
+            case .opacity: particle.alpha = min(max(value.x, 0), 1)
+            case .size: particle.size = max(0, value.x)
+            case .color: particle.color = value
+            case .speed:
+                let vx = particle.velocity.x, vy = particle.velocity.y, vz = particle.velocity.z
+                let magnitude = (vx * vx + vy * vy + vz * vz).squareRoot()
+                if magnitude > 1e-9 {
+                    let scale = value.x / magnitude
+                    particle.velocity = Vec3(x: vx * scale, y: vy * scale, z: vz * scale)
+                }
+            case .unsupported:
+                break
+            }
+
+        case .remapInitialValueMultiplyUnsupported:
+            // 생성자가 이미 이름과 함께 보고했다.
+            break
+
+        case .inheritControlPointVelocity(let controlPoint, let scaleMin, let scaleMax):
+            // 못 풀거나(제어점 없음) 아직 속도가 없으면(첫 프레임) 손대지 않는다.
+            guard let velocity = controlPointVelocities[controlPoint] else { return }
+            let scale = scaleMin + random.next() * (scaleMax - scaleMin)
+            particle.velocity = Vec3(
+                x: velocity.x * scale, y: velocity.y * scale, z: velocity.z * scale)
+
+        case .inheritInitialValueFromEvent:
+            // 부모가 없으면(예: `once` 자식) 아무것도 안 한다.
+            guard let parent = parentSnapshot else { return }
+            particle.color = parent.color
+            particle.size = parent.size
+            particle.alpha = parent.alpha
+            particle.velocity = parent.velocity
         }
     }
 
@@ -1134,21 +1245,41 @@ public final class ParticleSystem {
                 z: particle.velocity.z + tangent.z / tangentLength * speed * dt)
 
         case .remapValue(let output, let transform, let inputScale,
-                         let outputMin, let outputMax):
-            // 0~1 하나를 만들어 범위에 옮긴다. 파티클마다 다른 씨앗을 쓰고
-            // 시간에 따라 천천히 흐르게 한다 — 유리창의 물방울이 저마다 다른
-            // 속도로 흘러내리는 모양이 이것이다.
+                         let outputMin, let outputMax, let input):
+            // 0~1 하나를 만들어 범위에 옮긴다.
             //
-            // **입력을 고르는 부분은 아직 없다.** 실물이 쓰는 둘 다 입력 없이
-            // 잡음만 쓴다. 그리고 `simplexnoise`와 `fbmnoise`는 결이 다르지만
-            // 우리 잡음 하나로 받는다 — 흐르는 모양은 나오지만 같지는 않다.
-            let seed = Self.hash(particle.frameSeed, 41) * 64
+            // `simplexnoise`와 `fbmnoise`는 결이 다르지만 우리 잡음 하나로
+            // 받는다 — 흐르는 모양은 나오지만 같지는 않다.
             let t: Double
-            switch transform {
-            case .sine:
-                t = 0.5 + 0.5 * sin(elapsed * inputScale + seed)
-            case .noise:
-                t = 0.5 + 0.5 * Self.noise(seed, elapsed * inputScale * 0.05, 0)
+            switch input {
+            case .none:
+                // 안 적으면(실물 대다수) 파티클마다 다른 씨앗을 쓰고 시간에
+                // 따라 천천히 흐르게 한다 — 유리창의 물방울이 저마다 다른
+                // 속도로 흘러내리는 모양이 이것이다.
+                let seed = Self.hash(particle.frameSeed, 41) * 64
+                switch transform {
+                case .sine: t = 0.5 + 0.5 * sin(elapsed * inputScale + seed)
+                case .noise: t = 0.5 + 0.5 * Self.noise(seed, elapsed * inputScale * 0.05, 0)
+                }
+            case .particleSystemTime:
+                // 시스템 전체가 같은 시각을 쓴다 — 파티클별 씨앗을 안 섞는다
+                // (실물 thunderbolt.json — 번개 전체가 함께 깜빡인다).
+                switch transform {
+                case .sine: t = 0.5 + 0.5 * sin(elapsed * inputScale)
+                case .noise: t = 0.5 + 0.5 * Self.noise(0, elapsed * inputScale * 0.05, 0)
+                }
+            case .distanceToControlPoint(let controlPoint, let rangeMin, let rangeMax):
+                // 거리를 그대로(잡음 없이) 0~1로 정규화한다 — 타입 선언부
+                // 주석 참고. 제어점을 못 풀면(생성자가 이미 보고했다) 이번
+                // 프레임은 손대지 않는다.
+                guard let center = controlPointPosition(controlPoint) else { return }
+                let delta = Self.subtract(particle.position, center)
+                let distance = Self.length(delta)
+                let span = rangeMax - rangeMin
+                t = span > 1e-9 ? min(max((distance - rangeMin) / span, 0), 1) : 0
+            case .unsupported:
+                // 여기 오면 생성자가 이미 이름과 함께 보고했다.
+                return
             }
             let value = Vec3(
                 x: outputMin.x + (outputMax.x - outputMin.x) * t,
@@ -1331,6 +1462,21 @@ public final class ParticleSystem {
             guard abs(alongRight) <= size.x / 2, abs(alongForward) <= size.y / 2 else { return }
             particle.position = Self.subtract(particle.position, Self.scale(normal, alongNormal))
             Self.applyCollisionResponse(normal: normal, behavior: behavior, to: &particle)
+
+        case .inheritValueFromEvent:
+            // `inheritInitialValueFromEvent`의 매 프레임 판이지만 **속도는
+            // 안 옮긴다.** 실물 `inheritvaluefromevent` 미리보기의 자식은
+            // `speedmin:50, speedmax:200`인 자기 이미터가 있다 — follow
+            // 자식은 부모 위치를 `originOffset`으로 이미 따라가므로, 속도까지
+            // 부모 것으로 덮으면 사방으로 뿌려지는 이미터 속도를 매 프레임
+            // 지워 파티클이 부모와 한 덩어리로 뭉친다. WE 문서도 이 사건형의
+            // 용례로 "color, size or opacity"만 든다(속도는 없다) —
+            // `inheritInitialValueFromEvent`(한 번, onDeath 폭발이 죽은
+            // 부모의 운동을 물려받는 용도)만 속도를 옮긴다.
+            guard let parent = parentSnapshot else { return }
+            particle.color = parent.color
+            particle.size = parent.size
+            particle.alpha = parent.alpha
         }
     }
 
@@ -1420,6 +1566,24 @@ public final class ParticleSystem {
         return Vec3(x: base.x + raw.x,
                     y: base.y + raw.y,
                     z: base.z + raw.z)
+    }
+
+    /// 제어점 0~7의 이번 프레임 속도를 지난 프레임 자리와 비교해 낸다.
+    /// `inheritControlPointVelocity`가 쓴다 — 못 푸는 번호는 건너뛴다(다음
+    /// 프레임에 다시 시도, 풀리면 그때부터 속도가 생긴다. 첫 프레임은 지난
+    /// 자리가 없어 속도가 0이다).
+    private func updateControlPointVelocities(dt: Double) {
+        guard dt > 1e-9 else { return }
+        for id in 0...7 {
+            guard let current = controlPointPosition(id) else { continue }
+            if let previous = previousControlPointPositions[id] {
+                controlPointVelocities[id] = Vec3(
+                    x: (current.x - previous.x) / dt,
+                    y: (current.y - previous.y) / dt,
+                    z: (current.z - previous.z) / dt)
+            }
+            previousControlPointPositions[id] = current
+        }
     }
 
     /// 월드(화면) 좌표(플래그 2)를 이 시스템의 로컬 좌표로 바꾼다. 파티클
