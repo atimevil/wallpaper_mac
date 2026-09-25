@@ -80,6 +80,23 @@ struct ParticleSpriteSheet {
     var frameRatio: Float
 }
 
+/// 로프·로프 트레일 정점 하나. CPU가 `RopeGeometry`로 만든 점을 이미 씬
+/// 좌표(레이어 원점·배율까지 적용)로 옮겨 채운다 — 정점 셰이더는 T6 화면
+/// 맞춤(visibleOrigin/visibleSize)만 한 번 더 적용한다(particle_vertex와 같다).
+/// MSL의 `RopeVertex`와 배치가 **정확히** 같아야 한다.
+struct RopeVertex {
+    var positionX: Float
+    var positionY: Float
+    var positionZ: Float
+    /// 리본의 가로(U): 0 또는 1. 세로(V)는 로프를 따라 흐르는 값이다.
+    var u: Float
+    var v: Float
+    var color: SIMD4<Float>
+
+    /// MSL 구조체와 같은 48바이트여야 한다: float 5개(20) + float4 정렬 패딩(12) + color(16).
+    static let expectedStride = 48
+}
+
 /// 파티클을 인스턴싱으로 그린다. 파티클마다 정점 4개(삼각형 스트립)를 펼친다.
 ///
 /// 인스턴스 버퍼는 `maxCount`만큼 한 번만 잡고 매 프레임 덮어쓴다. 배경화면은
@@ -120,10 +137,21 @@ final class ParticleRenderer {
     private let sheet: ParticleSpriteSheet?
     /// 시트를 훑을지, 한 장을 골라 고정할지.
     private let animationMode: ParticleAnimationMode
-    /// spritetrail의 (length, maxlength, minlength). rope/ropetrail은 아직 이
-    /// 렌더러가 못 그려서(T8이 한다) nil로 두고 오늘의 스프라이트 경로로
-    /// 그대로 그린다 — sprite와 다르지 않다.
+    /// spritetrail의 (length, maxlength, minlength). rope/ropetrail은 nil이다.
     private let trailParams: (length: Float, maxLength: Float, minLength: Float)?
+    /// 이 렌더러가 그리는 방식. rope/ropetrail이면 `encode`가 인스턴싱 대신
+    /// `ropePipeline`으로 이어진 띠를 그린다.
+    let renderKind: ParticleRenderKind
+    private let ropePipeline: MTLRenderPipelineState?
+    private var ropeVertexBuffer: MTLBuffer?
+    private let ropeSubdivision: Int
+    private let ropeUVScale: Double
+    /// ropetrail만 쓴다. rope는 0(안 쓴다는 표시).
+    private let ropeSegments: Int
+    private let ropeFadeAlpha: Bool
+    /// 로프별 (정점 시작, 정점 개수). `encode`가 로프마다 draw 하나씩 부른다 —
+    /// 인스턴스마다 리본 길이가 달라 하나의 인스턴싱 draw로 못 묶는다.
+    private var ropeDrawRanges: [(start: Int, count: Int)] = []
 
     /// - Parameters:
     ///   - library: 컴포지터가 이미 컴파일해 둔 셰이더 라이브러리. 파티클 레이어마다
@@ -152,8 +180,25 @@ final class ParticleRenderer {
         if case .spriteTrail(let length, let maxLength, let minLength) = renderKind {
             trailParams = (Float(length), Float(maxLength), Float(minLength))
         } else {
-            // rope/ropetrail은 T8까지 오늘의 스프라이트로 그대로 그린다.
             trailParams = nil
+        }
+        self.renderKind = renderKind
+        switch renderKind {
+        case .rope(let subdivision, let uvScale, _):
+            ropeSubdivision = subdivision
+            ropeUVScale = uvScale
+            ropeSegments = 0
+            ropeFadeAlpha = false
+        case .ropeTrail(let subdivision, _, let segments, let fadeAlpha, let uvScale, _):
+            ropeSubdivision = subdivision
+            ropeUVScale = uvScale
+            ropeSegments = segments
+            ropeFadeAlpha = fadeAlpha
+        default:
+            ropeSubdivision = 0
+            ropeUVScale = 1
+            ropeSegments = 0
+            ropeFadeAlpha = false
         }
         // 빌보드는 정사각형 하나라 축별 배율을 표현할 수 없다. 평균이 가장 덜 틀린다.
         let averaged = (abs(layerScale.x) + abs(layerScale.y)) / 2
@@ -173,6 +218,12 @@ final class ParticleRenderer {
                 "ParticleUniforms 배치가 MSL과 다르다: "
                 + "\(MemoryLayout<ParticleUniforms>.stride)바이트, "
                 + "\(ParticleUniforms.expectedStride)여야 한다")
+        }
+        guard MemoryLayout<RopeVertex>.stride == RopeVertex.expectedStride else {
+            throw CompositorError.pipelineFailed(
+                "RopeVertex 배치가 MSL과 다르다: "
+                + "\(MemoryLayout<RopeVertex>.stride)바이트, "
+                + "\(RopeVertex.expectedStride)여야 한다")
         }
 
         // maxCount가 0인 프리셋이 있을 수 있다(깨진 파일을 0으로 죄었을 때).
@@ -213,6 +264,40 @@ final class ParticleRenderer {
             options: .storageModeShared
         ) else { throw CompositorError.bufferAllocationFailed }
         instanceBuffer = buffer
+
+        switch renderKind {
+        case .rope, .ropeTrail:
+            let ropeDescriptor = MTLRenderPipelineDescriptor()
+            ropeDescriptor.vertexFunction = library.makeFunction(name: "rope_vertex")
+            ropeDescriptor.fragmentFunction = library.makeFunction(name: "particle_fragment")
+            ropeDescriptor.colorAttachments[0].pixelFormat = descriptor.colorAttachments[0].pixelFormat
+            ropeDescriptor.colorAttachments[0].isBlendingEnabled = true
+            ropeDescriptor.colorAttachments[0].sourceRGBBlendFactor
+                = descriptor.colorAttachments[0].sourceRGBBlendFactor
+            ropeDescriptor.colorAttachments[0].destinationRGBBlendFactor
+                = descriptor.colorAttachments[0].destinationRGBBlendFactor
+            ropeDescriptor.colorAttachments[0].sourceAlphaBlendFactor
+                = descriptor.colorAttachments[0].sourceAlphaBlendFactor
+            ropeDescriptor.colorAttachments[0].destinationAlphaBlendFactor
+                = descriptor.colorAttachments[0].destinationAlphaBlendFactor
+            do {
+                ropePipeline = try device.makeRenderPipelineState(descriptor: ropeDescriptor)
+            } catch {
+                throw CompositorError.pipelineFailed("\(error)")
+            }
+            // `maxCount`(이 값을 받는 호출자, `SceneRenderer.buildParticleRenderers`)는
+            // 이미 "프리셋 자체 maxCount × 인스턴스(벌) 수"다 — 벌 하나가 낼 수 있는
+            // 최대 점 수는 (프리셋 maxCount-1)*(subdivision+1)+1이므로, 벌을 다 합친
+            // 상한은 대략 maxCount*(subdivision+1)이다. 넉넉히 +1을 더 얹는다.
+            let maxVerts = 2 * (maxCount * (max(0, ropeSubdivision) + 1) + 1)
+            guard let ropeBuffer = device.makeBuffer(
+                length: MemoryLayout<RopeVertex>.stride * maxVerts, options: .storageModeShared
+            ) else { throw CompositorError.bufferAllocationFailed }
+            ropeVertexBuffer = ropeBuffer
+        default:
+            ropePipeline = nil
+            ropeVertexBuffer = nil
+        }
     }
 
     /// 시뮬레이션 상태를 인스턴스 버퍼로 옮긴다.
@@ -228,6 +313,10 @@ final class ParticleRenderer {
     /// 새 시스템이 생기는데, 그때마다 렌더러를 만들면 파이프라인과 버퍼가
     /// 프레임마다 새로 잡힌다.
     func update(particles live: [Particle], textureRatio: Float) {
+        // rope/ropetrail은 `updateRope`로 옮긴다 — 인스턴스 버퍼가 아니라
+        // 정점 버퍼를 쓴다(호출자가 실수로 여기로 부르면 인스턴스가 안 갱신된
+        // 채 이전 프레임 것을 계속 그리는 것보다, 아무것도 안 그리는 편이 낫다).
+        guard ropePipeline == nil else { instanceCount = 0; return }
         self.textureRatio = textureRatio
         let count = min(live.count, capacity)
         let pointer = instanceBuffer.contents().bindMemory(
@@ -258,6 +347,75 @@ final class ParticleRenderer {
         instanceCount = count
     }
 
+    /// 로프·로프 트레일 상태를 정점 버퍼로 옮긴다. `instances`는
+    /// `ParticleSystem.ropeGroups`가 준 벌별 순서 있는 파티클 배열이다 —
+    /// **벌끼리 안 잇는다**(오브 하나의 꼬리가 다른 오브로 튀면 안 된다).
+    ///
+    /// 위치·크기를 먼저 씬 좌표(레이어 원점·배율)로 옮긴 뒤 `RopeGeometry`를
+    /// 돌린다 — 배율이 축마다 다르면(레이어가 안 정사각형으로 늘어나면) 법선
+    /// 방향이 변환 **전**과 **후**에 다르다. 변환 후에 계산해야 화면에서 실제로
+    /// 수직인 리본이 나온다.
+    func updateRope(instances: [[Particle]]) {
+        guard let ropeVertexBuffer else { instanceCount = 0; return }
+        let stride = MemoryLayout<RopeVertex>.stride
+        let capacityVerts = ropeVertexBuffer.length / stride
+        let pointer = ropeVertexBuffer.contents().bindMemory(
+            to: RopeVertex.self, capacity: capacityVerts)
+
+        var offset = 0
+        ropeDrawRanges.removeAll(keepingCapacity: true)
+
+        for particles in instances {
+            guard particles.count >= 2 else { continue }
+            // 위치·크기를 씬 좌표로 먼저 옮긴다(레이어 원점·배율).
+            let sceneParticles = particles.map { p -> Particle in
+                var copy = p
+                copy.position = Vec3(
+                    x: Double(layerOrigin.x) + p.position.x * Double(layerScale.x),
+                    y: Double(layerOrigin.y) + p.position.y * Double(layerScale.y),
+                    z: Double(layerOrigin.z) + p.position.z * Double(layerScale.z))
+                copy.size = p.size * Double(sizeScale)
+                return copy
+            }
+            let points: [RopeGeometry.Point]
+            if case .ropeTrail = renderKind {
+                points = RopeGeometry.ropeTrail(
+                    orderedParticles: sceneParticles, subdivision: ropeSubdivision,
+                    segments: ropeSegments, fadeAlpha: ropeFadeAlpha, uvScale: ropeUVScale)
+            } else {
+                points = RopeGeometry.rope(
+                    orderedParticles: sceneParticles, subdivision: ropeSubdivision,
+                    uvScale: ropeUVScale)
+            }
+            guard points.count >= 2 else { continue }
+            let neededVerts = points.count * 2
+            // 예산을 넘으면 이 벌은 자른다 — 넘치는 벌 하나가 다른 벌을 밀어내면
+            // 안 그려지는 것이 프레임마다 바뀌어 더 눈에 띈다.
+            guard offset + neededVerts <= capacityVerts else { continue }
+
+            for (i, point) in points.enumerated() {
+                let color = SIMD4<Float>(
+                    Float(point.color.x), Float(point.color.y), Float(point.color.z),
+                    Float(point.alpha))
+                let left = RopeVertex(
+                    positionX: Float(point.position.x - point.right.x),
+                    positionY: Float(point.position.y - point.right.y),
+                    positionZ: Float(point.position.z - point.right.z),
+                    u: 0, v: Float(point.v), color: color)
+                let right = RopeVertex(
+                    positionX: Float(point.position.x + point.right.x),
+                    positionY: Float(point.position.y + point.right.y),
+                    positionZ: Float(point.position.z + point.right.z),
+                    u: 1, v: Float(point.v), color: color)
+                pointer[offset + i * 2] = left
+                pointer[offset + i * 2 + 1] = right
+            }
+            ropeDrawRanges.append((offset, neededVerts))
+            offset += neededVerts
+        }
+        instanceCount = ropeDrawRanges.isEmpty ? 0 : 1
+    }
+
     /// 어느 칸을 그릴지.
     ///
     /// 기본은 사는 동안 칸을 훑는 것이다 — 꽃잎이 도는 것처럼 보이게 하는 용도다.
@@ -283,6 +441,12 @@ final class ParticleRenderer {
     func encode(into encoder: MTLRenderCommandEncoder, visibleOrigin: SIMD2<Float>,
                 visibleSize: SIMD2<Float>, transform: simd_float4x4? = nil) {
         guard instanceCount > 0 else { return }
+        if let ropePipeline, let ropeVertexBuffer {
+            encodeRope(
+                pipeline: ropePipeline, buffer: ropeVertexBuffer, into: encoder,
+                visibleOrigin: visibleOrigin, visibleSize: visibleSize, transform: transform)
+            return
+        }
         var uniforms = ParticleUniforms(
             visibleOrigin: visibleOrigin, visibleSize: visibleSize,
             frameScale: sheet?.frameScale ?? SIMD2(1, 1),
@@ -315,5 +479,29 @@ final class ParticleRenderer {
         }
         encoder.drawPrimitives(
             type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: instanceCount)
+    }
+
+    /// 로프별로 `drawPrimitives`를 따로 부른다 — 벌마다 리본 길이가 달라
+    /// 인스턴싱 하나로 못 묶는다(`ropeDrawRanges`가 `updateRope`가 채운 목록).
+    private func encodeRope(
+        pipeline: MTLRenderPipelineState, buffer: MTLBuffer,
+        into encoder: MTLRenderCommandEncoder, visibleOrigin: SIMD2<Float>,
+        visibleSize: SIMD2<Float>, transform: simd_float4x4?
+    ) {
+        guard !ropeDrawRanges.isEmpty else { return }
+        var uniforms = ParticleUniforms(
+            visibleOrigin: visibleOrigin, visibleSize: visibleSize,
+            frameScale: SIMD2(1, 1), textureRatio: 1, framesPerRow: 1,
+            useTransform: transform == nil ? 0 : 1,
+            transform: transform ?? matrix_identity_float4x4)
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setVertexBuffer(buffer, offset: 0, index: 2)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<ParticleUniforms>.stride, index: 3)
+        encoder.setFragmentTexture(texture, index: 0)
+        encoder.setFragmentSamplerState(sampler, index: 0)
+        for range in ropeDrawRanges {
+            encoder.drawPrimitives(
+                type: .triangleStrip, vertexStart: range.start, vertexCount: range.count)
+        }
     }
 }

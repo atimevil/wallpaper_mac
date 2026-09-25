@@ -48,7 +48,7 @@ final class ParticleOverrideTests: XCTestCase {
         let p = preset().applying(o)
         XCTAssertEqual(p.instance, o)
         XCTAssertEqual(p.initializers, preset().initializers)
-        guard case .sphereRandom(let rate, _, _, let lo, let hi, _, _) = p.emitters[0] else {
+        guard case .sphereRandom(let rate, _, _, let lo, let hi, _, _, _) = p.emitters[0] else {
             return XCTFail("sphererandom이어야 한다")
         }
         // rate는 방출률이 아니다(시뮬레이션 속도). 이미터는 그대로다.
