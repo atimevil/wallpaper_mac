@@ -333,6 +333,13 @@ enum SceneShaders {
         // 스프라이트 시트의 프레임 번호. 시트가 아니면 0이다.
         float frame;
         float4 color;
+        // spritetrail이 속도 방향(레이어 배율 걸림, 거울상 반영)으로 늘여
+        // 그리는 데 쓴다. 다른 렌더러는 무시한다.
+        packed_float3 velocity;
+        // 배율 걸기 **전** 속력 — clamp 크기는 이 값으로 잰다(size에 이미
+        // 배율이 있어 velocity 크기까지 쓰면 두 번 걸린다). ParticleInstance.swift
+        // 필드 주석 참고.
+        float localSpeed;
     };
 
     struct ParticleUniforms {
@@ -347,7 +354,13 @@ enum SceneShaders {
         // 원근 씬이면 1. 그때는 visibleOrigin/visibleSize 대신 transform으로
         // 클립 공간에 놓는다.
         float useTransform;
-        float _pad;
+        // spritetrail이면 1 — 속도 기반 트레일 축을 쓴다. 아니면(sprite·rope·
+        // ropetrail, 후자 둘은 T8 전까지 스프라이트로 그린다) 회전 기반 축이다.
+        float isTrail;
+        // `g_RenderVar0`(length, maxlength, minlength). isTrail이 0이면 안 쓴다.
+        float trailLength;
+        float trailMaxLength;
+        float trailMinLength;
         // 레이어의 세계 변환 × 카메라 뷰·투영. 파티클 좌표는 레이어 기준이다.
         float4x4 transform;
     };
@@ -365,6 +378,39 @@ enum SceneShaders {
         up = m[1];
     }
 
+    // common_particles.h의 ComputeParticleTrailTangents를 옮긴 것.
+    // velocity는 방향(레이어 배율 걸림)용, localSpeed는 clamp 크기(배율 걸기
+    // 전, WE가 로컬 공간에서 계산하는 것과 같다)용으로 나뉜다 — 하나로 합치면
+    // 레이어 배율이 clamp에 두 번 걸린다. 속도 0·NaN이거나 velocity가
+    // eyeDirection과 평행(3D spritetrail에서 순수 z 속도)이면 false를 돌려
+    // 호출자가 스프라이트 경로(회전 기반 축)로 떨어지게 한다 — Kit의
+    // ParticleTrailTangent.compute와 같은 분기다.
+    static bool particleTrailTangents(
+        float3 velocity, float localSpeed, float trailLength, float trailMaxLength,
+        float trailMinLength, thread float3 &right, thread float3 &up
+    ) {
+        // `speed <= 0`이 아니라 `!(speed > 0)`을 쓴다 — NaN과의 비교는 항상
+        // false라 `<=`는 NaN을 통과시키지만 `!(>)`은 막는다.
+        if (!(localSpeed > 0)) return false;
+        float dirLength = length(velocity);
+        if (!(dirLength > 0)) return false;
+        // 직교 2D 시선. 카메라가 +z에 있고 -z를 보는 쪽으로 뒀다 — 세로 속도
+        // (0,1,0)일 때 cross((0,0,-1),(0,1,0)) = (1,0,0)이 스프라이트 기본
+        // right(회전 0일 때 (1,0,0))와 같은 부호라 텍스처가 안 뒤집힌다.
+        // (right,up) 기저의 행렬식이 vx²+vy² > 0이라 z 평면 위 속도에서는
+        // 항상 오른손 방향 — 거울상이 될 일이 없다.
+        float3 eyeDirection = float3(0, 0, -1);
+        float3 rawRight = cross(eyeDirection, velocity);
+        float rightLength = length(rawRight);
+        // velocity가 eyeDirection과 평행하면(3D spritetrail의 순수 z 속도)
+        // cross가 0이라 나눗셈이 NaN을 낳는다 — 그 전에 막는다.
+        if (!(rightLength > 0)) return false;
+        right = rawRight / rightLength;
+        up = (velocity / dirLength)
+            * max(trailMinLength, min(localSpeed * trailLength, trailMaxLength));
+        return true;
+    }
+
     // 인스턴스마다 정점 4개를 펼친다. 지오메트리 셰이더가 필요 없다 —
     // genericparticle의 GS_ENABLED = 0 경로와 같은 방식이다.
     vertex VertexOut particle_vertex(
@@ -378,7 +424,15 @@ enum SceneShaders {
         ParticleInstance p = instances[iid];
 
         float3 right, up;
-        particleTangents(float3(p.rotation), right, up);
+        bool drewTrail = false;
+        if (u.isTrail > 0.5) {
+            drewTrail = particleTrailTangents(
+                float3(p.velocity), p.localSpeed, u.trailLength, u.trailMaxLength,
+                u.trailMinLength, right, up);
+        }
+        if (!drewTrail) {
+            particleTangents(float3(p.rotation), right, up);
+        }
 
         // ComputeParticlePosition 그대로.
         float3 world = float3(p.position)

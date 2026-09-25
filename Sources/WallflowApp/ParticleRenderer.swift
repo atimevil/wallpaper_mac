@@ -8,7 +8,8 @@ import WallflowKit
 /// 정렬된다. 그래서 위치와 회전을 개별 `Float`로 편다. 여기서 어긋나면 컴파일은
 /// 통과하고 파티클만 엉뚱한 자리·크기로 나온다.
 ///
-/// 배치: position 0..<12, size 12..<16, rotation 16..<28, _pad 28..<32, color 32..<48.
+/// 배치: position 0..<12, size 12..<16, rotation 16..<28, frame 28..<32, color 32..<48,
+/// velocity 48..<60, localSpeed 60..<64.
 struct ParticleInstance {
     var positionX: Float
     var positionY: Float
@@ -20,9 +21,23 @@ struct ParticleInstance {
     /// 스프라이트 시트의 프레임 번호. 시트가 아니면 0이다.
     var frame: Float
     var color: SIMD4<Float>
+    /// spritetrail이 속도 방향으로 늘여 그리는 데 쓴다(레이어 배율이 걸려 있다 —
+    /// 화면에서 실제로 보이는 방향·거울상 여부가 이 값에 반영돼야 한다).
+    /// sprite/rope/ropetrail은 셰이더가 이 값을 무시한다(회전 기반 축으로
+    /// 그대로 그린다).
+    var velocityX: Float
+    var velocityY: Float
+    var velocityZ: Float
+    /// **레이어 배율을 적용하기 전** 속력. WE의 `ComputeParticleTrailTangents`는
+    /// 로컬(모델 변환 이전) 공간에서 clamp를 계산하고, 그 결과가 나중에
+    /// `size`(이미 배율이 걸려 있다)에 곱해져 화면에 나온다. `velocity*layerScale`의
+    /// 크기를 그대로 clamp에 쓰면 배율이 두 번(여기서 한 번, size에서 또 한 번)
+    /// 걸려 레이어 배율이 1이 아닌 씬(실물 0.44~9.0배)에서 트레일 길이가
+    /// 완전히 틀어진다.
+    var localSpeed: Float
 
-    /// MSL 구조체와 같은 48바이트여야 한다.
-    static let expectedStride = 48
+    /// MSL 구조체와 같은 64바이트여야 한다.
+    static let expectedStride = 64
 }
 
 /// 정점 셰이더에 넘기는 파티클 공통 값.
@@ -37,16 +52,22 @@ struct ParticleUniforms {
     var framesPerRow: Float
     /// 원근 씬이면 1. MSL 쪽 `useTransform`과 같은 자리다.
     var useTransform: Float = 0
-    var padding: Float = 0
+    /// spritetrail이면 1(트레일 축 계산), 아니면 0(회전 기반 축). MSL 쪽에서
+    /// `padding`이었던 자리를 그대로 쓴다.
+    var isTrail: Float = 0
+    /// `g_RenderVar0`(length, maxlength, minlength). isTrail이 0이면 안 쓴다.
+    var trailLength: Float = 0
+    var trailMaxLength: Float = 0
+    var trailMinLength: Float = 0
     /// 레이어 세계 변환 × 뷰·투영. 직교 씬에서는 쓰지 않는다.
     var transform: simd_float4x4 = matrix_identity_float4x4
 
-    /// MSL의 ParticleUniforms와 같은 112바이트여야 한다: float2 3개(visibleOrigin·
-    /// visibleSize·frameScale, 24) + float 4개(textureRatio·framesPerRow·
-    /// useTransform·padding, 16) = 40 + 암묵 패딩(8, float4x4 정렬) +
-    /// transform(64) = 112. init(device:library:...)이 이 값을 실제로 검증한다 —
-    /// ParticleInstance.expectedStride와 같은 이유다.
-    static let expectedStride = 112
+    /// MSL의 ParticleUniforms와 같은 128바이트여야 한다: float2 3개(visibleOrigin·
+    /// visibleSize·frameScale, 24) + float 7개(textureRatio·framesPerRow·
+    /// useTransform·isTrail·trailLength·trailMaxLength·trailMinLength, 28) = 52 +
+    /// 암묵 패딩(12, float4x4 정렬) + transform(64) = 128. init(device:library:...)이
+    /// 이 값을 실제로 검증한다 — ParticleInstance.expectedStride와 같은 이유다.
+    static let expectedStride = 128
 }
 
 /// 텍스처가 스프라이트 시트일 때의 배치. `rosepetals.tex`가 512x128에 102x128
@@ -99,6 +120,10 @@ final class ParticleRenderer {
     private let sheet: ParticleSpriteSheet?
     /// 시트를 훑을지, 한 장을 골라 고정할지.
     private let animationMode: ParticleAnimationMode
+    /// spritetrail의 (length, maxlength, minlength). rope/ropetrail은 아직 이
+    /// 렌더러가 못 그려서(T8이 한다) nil로 두고 오늘의 스프라이트 경로로
+    /// 그대로 그린다 — sprite와 다르지 않다.
+    private let trailParams: (length: Float, maxLength: Float, minLength: Float)?
 
     /// - Parameters:
     ///   - library: 컴포지터가 이미 컴파일해 둔 셰이더 라이브러리. 파티클 레이어마다
@@ -115,6 +140,7 @@ final class ParticleRenderer {
         layerScale: SIMD3<Float>,
         sheet: ParticleSpriteSheet?,
         animationMode: ParticleAnimationMode,
+        renderKind: ParticleRenderKind = .sprite,
         normalMap: MTLTexture? = nil,
         refractAmount: Float = 0.05
     ) throws {
@@ -123,6 +149,12 @@ final class ParticleRenderer {
         self.layerOrigin = layerOrigin
         self.layerScale = layerScale
         self.animationMode = animationMode
+        if case .spriteTrail(let length, let maxLength, let minLength) = renderKind {
+            trailParams = (Float(length), Float(maxLength), Float(minLength))
+        } else {
+            // rope/ropetrail은 T8까지 오늘의 스프라이트로 그대로 그린다.
+            trailParams = nil
+        }
         // 빌보드는 정사각형 하나라 축별 배율을 표현할 수 없다. 평균이 가장 덜 틀린다.
         let averaged = (abs(layerScale.x) + abs(layerScale.y)) / 2
         self.sizeScale = averaged.isFinite && averaged > 0 ? averaged : 1
@@ -212,7 +244,15 @@ final class ParticleRenderer {
                 rotationZ: Float(p.rotation.z),
                 frame: frameIndex(for: p),
                 color: SIMD4(Float(p.color.x), Float(p.color.y), Float(p.color.z),
-                             Float(p.alpha))
+                             Float(p.alpha)),
+                // 방향(거울상 포함)은 배율이 걸린 속도로 — 벡터라 origin은 안 더한다.
+                velocityX: Float(p.velocity.x) * layerScale.x,
+                velocityY: Float(p.velocity.y) * layerScale.y,
+                velocityZ: Float(p.velocity.z) * layerScale.z,
+                // clamp 크기는 배율 걸기 **전** 속력. size가 이미 배율을 지녀서
+                // 여기서까지 곱하면 두 번 걸린다(위 필드 주석 참고).
+                localSpeed: Float((p.velocity.x * p.velocity.x + p.velocity.y * p.velocity.y
+                    + p.velocity.z * p.velocity.z).squareRoot())
             )
         }
         instanceCount = count
@@ -249,6 +289,10 @@ final class ParticleRenderer {
             textureRatio: sheet?.frameRatio ?? textureRatio,
             framesPerRow: Float(max(1, sheet?.framesPerRow ?? 1)),
             useTransform: transform == nil ? 0 : 1,
+            isTrail: trailParams == nil ? 0 : 1,
+            trailLength: trailParams?.length ?? 0,
+            trailMaxLength: trailParams?.maxLength ?? 0,
+            trailMinLength: trailParams?.minLength ?? 0,
             transform: transform ?? matrix_identity_float4x4)
         encoder.setRenderPipelineState(pipeline)
         // index 2·3을 쓴다. index 0은 컴포지터가 루프 밖에서 묶어 둔 쿼드 정점

@@ -1236,6 +1236,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                                       Float(layer.scale.z)),
                     sheet: Self.spriteSheet(of: raw),
                     animationMode: preset.animationMode,
+                    renderKind: preset.renderKind,
                     normalMap: normalMap, refractAmount: Float(refractAmount))
                 out.append((key, renderer, ratio))
                 for (index, child) in preset.children.enumerated() {
