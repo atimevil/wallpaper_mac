@@ -1615,12 +1615,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             }
         }
 
-        // 비디오·파티클·텍스트는 모두 시간에 따라 바뀐다.
-        // 시간을 쓰는 이펙트(`g_Time`)도 마찬가지다 — 빼면 빛줄기가 첫 프레임에
-        // 멈춘 채로 남는다. 움직이지 않는 이펙트는 여기 해당하지 않는다.
-        let hasAnimatedEffect = effectChains.contains { $0.chain.isAnimated }
-        if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty || hasAnimatedEffect
-            || scriptHost != nil || !puppets.isEmpty {
+        // 비디오·파티클·텍스트는 모두 시간에 따라 바뀐다. 시간을 쓰는
+        // 이펙트(`g_Time`)·스크립트·퍼펫도 마찬가지다 — 빠지면 빛줄기 같은
+        // 이펙트 전용 씬이 첫 프레임에 멈춘 채로 남는다. 붙일 때와
+        // apply(.playing)이 needsContinuousDrawing 하나를 같이 써야 한다 —
+        // 갈라지면 가려짐으로 멈췄다가 재개될 때만 멈춘 채로 남는 씬이 생긴다.
+        if needsContinuousDrawing {
             view.isPaused = false
             view.enableSetNeedsDisplay = false
             // 전력 정책이 30fps를 지시한다. 60fps 소스라도 그 이상 그리지 않는다.
@@ -1632,6 +1632,18 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         // 상태로 보여 아무것도 재생되지 않는다.
         applySoundSetting()
         updateAudioNeed()
+    }
+
+    /// 이 씬을 매 프레임 다시 그려야 하는지. 붙일 때와 재생을 다시 시작할
+    /// 때(`apply(.playing)`) 둘 다 이 속성 하나를 쓴다 — 따로 판단하면
+    /// 이펙트·스크립트·퍼펫만 움직이는 씬이 한쪽에서 빠져, 가려짐으로
+    /// 멈췄다가 재개돼도 검은 화면으로 남는다.
+    private var needsContinuousDrawing: Bool {
+        PowerPolicy.needsContinuousDrawing(
+            hasVideo: !videos.isEmpty, hasParticles: !particles.isEmpty,
+            hasText: !texts.isEmpty,
+            hasAnimatedEffect: effectChains.contains { $0.chain.isAnimated },
+            hasScriptHost: scriptHost != nil, hasPuppets: !puppets.isEmpty)
     }
 
     func apply(_ directive: PlaybackDirective) {
@@ -1652,7 +1664,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             // VideoRenderer.apply와 맞춘다: 이미 재생 중이면 다시 부르지 않는다.
             for video in videos where !video.isPlaying { video.play() }
             applySoundSetting()
-            if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty {
+            // 붙일 때와 같은 needsContinuousDrawing을 쓴다 — 예전에는 여기서
+            // 비디오·파티클·텍스트만 봐서, 이펙트·스크립트·퍼펫만으로 움직이는
+            // 씬이 가려짐으로 멈췄다가 재개돼도 검은 화면으로 남았다.
+            if needsContinuousDrawing {
                 view?.isPaused = false
                 view?.preferredFramesPerSecond = fps
             }
