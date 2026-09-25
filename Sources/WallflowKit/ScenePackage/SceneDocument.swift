@@ -831,6 +831,16 @@ public struct SceneDocument: Sendable {
         return Vec2(x: 0, y: 0)
     }
 
+    /// 파티클 머티리얼의 텍스처 슬롯이 없거나 null일 때 쓸 기본 텍스처.
+    ///
+    /// WE 셰이더 `genericparticle.frag`의 선언이 근거다:
+    /// `uniform sampler2D g_Texture0; // {"label":"ui_editor_properties_albedo","default":"util/white"}`
+    /// — 슬롯이 비어 있으면 엔진이 이 기본값을 쓴다는 뜻이다. 실물 DELTARUNE
+    /// (3793923399)의 `materials/particle/halo_1.json`이 `"textures": [null]`로
+    /// 정확히 이 경우다. 파티클은 GLSLTranslator를 거치지 않아 셰이더 주석을 코드로
+    /// 못 읽으니, 여기 상수로 값만 박아 둔다.
+    static let defaultParticleTextureName = "util/white"
+
     /// 파티클 프리셋을 따라가 레이어 내용을 판정한다.
     static func resolveParticleContent(
         presetPath: String, resolver: ReferenceResolver, override: ParticleOverride
@@ -852,11 +862,10 @@ public struct SceneDocument: Sendable {
             return .unsupported(reason: "파티클 머티리얼을 찾을 수 없다: \(preset.materialPath)")
         }
 
-        // 첫 텍스처 이름을 얻는다
-        guard let textures = pass["textures"] as? [Any],
-              let textureName = textures.first as? String else {
-            return .unsupported(reason: "파티클 머티리얼의 첫 텍스처가 없다: \(preset.materialPath)")
-        }
+        // 첫 텍스처 이름을 얻는다. 슬롯이 없거나 null이면 셰이더 기본값(흰색)을 쓴다 —
+        // `defaultParticleTextureName` 주석 참고.
+        let textures = pass["textures"] as? [Any] ?? []
+        let textureName = (textures.first as? String) ?? defaultParticleTextureName
 
         // **굴절 파티클**은 색이 아니라 **배경을 휘게 하는 렌즈**다. 함께 선언된
         // 노멀맵으로 뒤 그림을 밀어 읽어야 유리에 맺힌 물방울로 보인다.
@@ -917,10 +926,12 @@ public struct SceneDocument: Sendable {
                   let child = ParticlePreset.parse(json),
                   let material = resolver.json(for: child.materialPath),
                   let passes = material["passes"] as? [[String: Any]],
-                  let pass = passes.first,
-                  let textures = pass["textures"] as? [Any],
-                  let textureName = textures.first as? String
+                  let pass = passes.first
             else { continue }
+            // 자식도 부모(resolveParticleContent)와 같은 이유로 null 슬롯을
+            // 기본값으로 채운다 — defaultParticleTextureName 주석 참고.
+            let textures = pass["textures"] as? [Any] ?? []
+            let textureName = (textures.first as? String) ?? defaultParticleTextureName
             // 굴절 자식도 부모와 같은 길로 그린다. 불꽃이 터질 때의 충격파가
             // 이것이라, 건너뛰면 폭발에서 일그러짐만 빠진다.
             let refractOn = ((pass["combos"] as? [String: Any])?["REFRACT"] as? NSNumber)?
