@@ -36,6 +36,10 @@ final class WebRenderer: NSObject, WallpaperRenderer {
     /// 정지 동안은 멎는다 — 어차피 페이지가 애니메이션을 멈춰 뒀으니 계속
     /// evaluateJavaScript를 부를 이유가 없다.
     private var audioTimer: Timer?
+    /// 마지막으로 이 페이지에 보낸 커서 페이지 좌표. 안 바뀌었으면 mousemove를
+    /// 또 쏘지 않는다 — 매 폴에 evaluateJavaScript를 부르는 낭비를 막는다.
+    private var lastPagePoint: CGPoint?
+    private var lastLeftButtonDown = false
 
     /// 페이지가 만드는 모든 video/audio 엘리먼트를 강제로 음소거한다.
     /// 새로 추가되는 엘리먼트까지 잡기 위해 MutationObserver를 쓴다.
@@ -271,6 +275,40 @@ final class WebRenderer: NSObject, WallpaperRenderer {
                 webView.evaluateJavaScript(
                     WebEngineBridge.dispatchAudioJS(left: bands.left, right: bands.right))
             }
+        }
+    }
+
+    /// 데스크톱 마우스를 이 페이지에 넘긴다. `DisplayManager`가 전역 커서 위치를
+    /// 폴링해 화면마다 불러 준다. 실물 WE는 데스크톱이 드러나 있을 때만(다른 창이
+    /// 안 덮을 때만) 커서를 웹 배경화면에 준다 — `desktopVisible`가 그 판정을
+    /// 들고 온다(어떤 창이 덮었는지는 AppKit/CG API라 DisplayManager 쪽 일이다).
+    /// 정지 동안은 건너뛴다 — 페이지가 애니메이션을 멈춰 뒀는데 마우스만 계속
+    /// 흘려보낼 이유가 없다.
+    func forwardCursor(
+        screenPoint: CGPoint, windowFrame: CGRect, desktopVisible: Bool, leftButtonDown: Bool
+    ) {
+        guard let webView, !isPaused, desktopVisible,
+              let point = WebCursorBridge.pagePoint(screenPoint: screenPoint, windowFrame: windowFrame)
+        else {
+            lastPagePoint = nil
+            return
+        }
+        if lastPagePoint != point {
+            lastPagePoint = point
+            webView.evaluateJavaScript(WebCursorBridge.mouseEventJS(
+                type: "mousemove", x: Double(point.x), y: Double(point.y),
+                buttons: leftButtonDown ? 1 : 0))
+        }
+        guard leftButtonDown != lastLeftButtonDown else { return }
+        lastLeftButtonDown = leftButtonDown
+        webView.evaluateJavaScript(WebCursorBridge.mouseEventJS(
+            type: leftButtonDown ? "mousedown" : "mouseup",
+            x: Double(point.x), y: Double(point.y), buttons: leftButtonDown ? 1 : 0))
+        // 실물 브라우저처럼 mouseup 다음에 click도 낸다 — mousedown만 보는
+        // 페이지(1748506393)도, click을 보는 페이지도 다 받는다.
+        if !leftButtonDown {
+            webView.evaluateJavaScript(WebCursorBridge.mouseEventJS(
+                type: "click", x: Double(point.x), y: Double(point.y)))
         }
     }
 
