@@ -128,6 +128,15 @@ public enum ParticleOperator: Equatable, Sendable {
     /// `rain_splashes_droplets`는 수명이 0.3~0.5초인데 `fadeouttime: 0.9`다 —
     /// 초로 읽으면 태어나기도 전에 사라져야 한다. 비율이 유일하게 말이 된다.
     case alphaFade(fadeInTime: Double, fadeOutTime: Double)
+    /// 수명에 따라 알파에 곱하는 값. `sizeChange`의 알파 판이다 — 실물 창작마당
+    /// 4곳(`matrix_trail_copy1.json`·`fireworks2stars.json`·`Rain_Splash_Drops_copy1.json`
+    /// 2곳)이 정확히 `sizeChange`와 같은 필드 이름(`starttime`/`endtime`/
+    /// `startvalue`/`endvalue`)을 쓴다. 기본값도 `sizeChange`와 같게 뒀다 —
+    /// 값은 처음 알파에 **곱한다**(1→0, 수명 내내 옅어지다 0). `alphaFade`와
+    /// 다르다: `alphaFade`는 나타남/사라짐의 **비율 구간**(fadeintime/
+    /// fadeouttime)을 적지만, 이건 `sizeChange`처럼 구간 안에서 시작값→끝값을
+    /// 그대로 잇는다.
+    case alphaChange(startTime: Double, endTime: Double, startValue: Double, endValue: Double)
     /// 수명에 따라 크기에 곱하는 값. 실물에서 세 번째로 많이 쓰는 연산자다(112곳).
     ///
     /// 값은 처음 크기에 **곱한다** — `startvalue: 2`로 적은 프리셋이 있어 절대
@@ -780,9 +789,9 @@ public struct ParticlePreset: Equatable, Sendable {
             "mapsequencearoundcontrolpoint"
         ])
         let knownOperatorNames = Set<String>([
-            "movement", "angularmovement", "alphafade", "sizechange", "colorchange",
-            "oscillateposition", "oscillatealpha", "oscillatesize", "turbulence",
-            "vortex", "vortex_v2", "remapvalue", "controlpointattract"
+            "movement", "angularmovement", "alphafade", "alphachange", "sizechange",
+            "colorchange", "oscillateposition", "oscillatealpha", "oscillatesize",
+            "turbulence", "vortex", "vortex_v2", "remapvalue", "controlpointattract"
         ])
 
         // Parse maxCount with clamping
@@ -1194,6 +1203,18 @@ public struct ParticlePreset: Equatable, Sendable {
             let fadeInTime = getDouble(dict["fadeintime"]) ?? 0
             let fadeOutTime = getDouble(dict["fadeouttime"]) ?? 1
             return .alphaFade(fadeInTime: fadeInTime, fadeOutTime: fadeOutTime)
+
+        case "alphachange":
+            // `sizechange`와 필드·기본값이 같다(실물 `matrix_trail_copy1.json`·
+            // `fireworks2stars.json`이 `starttime`/`endtime`/`startvalue`/
+            // `endvalue`를 그대로 쓴다). 맨 `alphachange`(실물
+            // `Rain_Splash_Drops_copy1.json` 2곳)는 `sizechange`와 같은 기본값
+            // (1→0, 수명 내내 옅어지다 0)을 쓴다.
+            return .alphaChange(
+                startTime: getDouble(dict["starttime"]) ?? 0,
+                endTime: getDouble(dict["endtime"]) ?? 1,
+                startValue: getDouble(dict["startvalue"]) ?? 1,
+                endValue: getDouble(dict["endvalue"]) ?? 0)
 
         case "sizechange":
             return .sizeChange(
