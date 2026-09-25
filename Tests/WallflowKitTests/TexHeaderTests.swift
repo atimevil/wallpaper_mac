@@ -303,4 +303,58 @@ final class TexHeaderTests: XCTestCase {
         let sheet = TexSpriteSheet(frameCount: 2, gridWidth: nil, gridHeight: nil, frames: frames)
         XCTAssertEqual(sheet.frame(atElapsed: 5), frames[0])
     }
+
+    // MARK: - 칸 시작 시각 (Task 5 fix round 1, 순수 함수)
+
+    /// n번째 칸이 시작되는 시각은 그 앞 칸들의 duration 합이다.
+    func testStartTimeOfFrameSumsEarlierDurations() {
+        let frames = (0..<4).map {
+            TexSpriteFrame(x: Double($0), y: 0, width: 1, height: 1, duration: 0.5)
+        }
+        let sheet = TexSpriteSheet(frameCount: 4, gridWidth: nil, gridHeight: nil, frames: frames)
+        XCTAssertEqual(sheet.startTime(ofFrame: 0), 0)
+        XCTAssertEqual(sheet.startTime(ofFrame: 1), 0.5)
+        XCTAssertEqual(sheet.startTime(ofFrame: 3), 1.5)
+    }
+
+    /// 범위를 벗어난 n(음수 포함)도 count로 감싸 항상 유효한 칸을 가리킨다.
+    func testStartTimeOfFrameWrapsOutOfRangeIndices() {
+        let frames = (0..<3).map {
+            TexSpriteFrame(x: Double($0), y: 0, width: 1, height: 1, duration: 1)
+        }
+        let sheet = TexSpriteSheet(frameCount: 3, gridWidth: nil, gridHeight: nil, frames: frames)
+        XCTAssertEqual(sheet.startTime(ofFrame: 3), 0)     // 한 바퀴 돌아 0번과 같다
+        XCTAssertEqual(sheet.startTime(ofFrame: 4), 1)     // 4 % 3 = 1
+        XCTAssertEqual(sheet.startTime(ofFrame: -1), 2)    // 마지막 칸
+    }
+
+    /// duration이 전부 0인 시트(TEXS0002 파티클 시트가 실물로 이 모양이다)는
+    /// 더할 것이 없어 어느 n을 줘도 0이다 — 크래시도, 의미 없는 값도 아니다.
+    func testStartTimeOfFrameOnAllZeroDurationSheetIsZero() {
+        let frames = [TexSpriteFrame(x: 0, y: 0, width: 1, height: 1, duration: 0),
+                     TexSpriteFrame(x: 1, y: 0, width: 1, height: 1, duration: 0)]
+        let sheet = TexSpriteSheet(frameCount: 2, gridWidth: nil, gridHeight: nil, frames: frames)
+        XCTAssertEqual(sheet.startTime(ofFrame: 0), 0)
+        XCTAssertEqual(sheet.startTime(ofFrame: 1), 0)
+    }
+
+    func testStartTimeOfEmptySheetIsZero() {
+        let sheet = TexSpriteSheet(frameCount: 0, gridWidth: nil, gridHeight: nil, frames: [])
+        XCTAssertEqual(sheet.startTime(ofFrame: 5), 0)
+    }
+
+    /// 렌더러가 실제로 기대는 성질: `elapsed`를 n번 칸의 시작 시각으로 옮기면
+    /// `frame(atElapsed:)`가 정확히 그 n번 칸을 돌려준다. 이게 깨지면 setFrame(n)이
+    /// 화면에 다른 칸을 그린다.
+    func testStartTimeOfFrameRoundTripsThroughFrameAtElapsed() {
+        let frames = [
+            TexSpriteFrame(x: 0, y: 0, width: 1, height: 1, duration: 1),
+            TexSpriteFrame(x: 1, y: 0, width: 1, height: 1, duration: 1),
+            TexSpriteFrame(x: 2, y: 0, width: 1, height: 1, duration: 1),
+        ]
+        let sheet = TexSpriteSheet(frameCount: 3, gridWidth: nil, gridHeight: nil, frames: frames)
+        for n in 0..<3 {
+            XCTAssertEqual(sheet.frame(atElapsed: sheet.startTime(ofFrame: n)), frames[n])
+        }
+    }
 }
