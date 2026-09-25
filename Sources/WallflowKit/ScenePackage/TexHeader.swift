@@ -110,6 +110,17 @@ public enum TexPixelFormat: Int32, Sendable {
     /// DXT1(BC1). 4x4 블록 하나가 8바이트다. 알파가 없거나 1비트다.
     /// 실물 `absbg.tex`(2560x1728)의 선언 크기가 정확히 8바이트/블록이다.
     case dxt1 = 7
+    /// DXT3(BC2). 블록 크기는 DXT5와 같은 16바이트라 크기만으로는 못 가른다.
+    ///
+    /// 실물 워크숍 3000562427의 `VinylDisc.tex`(format=6) 밉맵2(비압축, 76x76)를
+    /// 직접 까 보면 알파 8바이트가 `00 00 00 00 77 77 ff ff`처럼 니블 두 개씩
+    /// 4행이 나란히 반복되는 꼴이다 — DXT3가 4x4 블록의 각 픽셀 알파를 4비트
+    /// 그대로(0~15) 행 순서로 박아넣는 구조 그대로다(바이트[0..2)=1행,
+    /// [2..4)=2행, [4..6)=3행, [6..8)=4행, 같은 니블이 반복되면 그 행 전체가
+    /// 같은 알파라는 뜻). DXT5라면 이 8바이트가 [끝점 a0, 끝점 a1, 3비트 인덱스
+    /// 6바이트]라 이렇게 깔끔한 행 단위 반복이 나올 이유가 없다 — dxt5 케이스의
+    /// `flatnormal.tex`/`sphere.tex` 증거와 같은 방법으로 확인했다.
+    case dxt3 = 6
     /// 두 채널. 실물에서 light_shafts처럼 흑백+알파 파티클 텍스처가 쓴다.
     case rg88 = 8
     /// 단일 채널. 마스크에 쓰인다.
@@ -122,7 +133,7 @@ public enum TexPixelFormat: Int32, Sendable {
     public var bytesPerBlock: Int {
         switch self {
         case .dxt1: return 8
-        case .dxt5: return 16
+        case .dxt5, .dxt3: return 16
         case .rgba8888, .rg88, .r8: return 0
         }
     }
@@ -133,7 +144,7 @@ public enum TexPixelFormat: Int32, Sendable {
         case .rgba8888: return 4
         case .rg88: return 2
         case .r8: return 1
-        case .dxt5, .dxt1: return 0
+        case .dxt5, .dxt1, .dxt3: return 0
         }
     }
 
@@ -259,7 +270,15 @@ public struct TexHeader: Equatable, Sendable {
             throw TexError.unsupportedContainer(container)
         }
 
-        _ = try cursor.readInt32()          // imageCount. 실물은 항상 1이었다.
+        // imageCount. 실물 대부분은 1이지만, 워크숍 3000562427의
+        // day_photoshop.tex/night_photoshop.tex처럼 3인 것도 있다(SPRITESHEET
+        // 재질 콤보가 켜진 다중 프레임 텍스처로 보인다). 그 셋째 이미지들은
+        // 이 매직 없이 "mipCount + 밉맵들"이 그대로 이어 붙는 구조라 아래
+        // 루프 하나로는 못 읽는다 — 이미지 0(첫 프레임)만 읽고 나머지는 건드리지
+        // 않는다. mip.range가 이미지 0 안에서만 계산되므로 잘못 읽지는 않지만,
+        // consumedBytes가 파일 끝에 못 미친다. 여러 프레임을 도는 애니메이션은
+        // 별도 작업이다.
+        _ = try cursor.readInt32()
         let freeImageFormat = hasFreeImageFormat ? try cursor.readInt32() : -1
         if hasExtraField { _ = try cursor.readInt32() }
         let mipCount = try cursor.readInt32()
