@@ -1195,20 +1195,34 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private func renderComposition(
         _ id: Int, commands: MTLCommandBuffer, frame: MTLTexture
     ) -> MTLTexture? {
-        guard let layer = compositionLayers[id] else { return nil }
-        // 이펙트가 없거나(편집기에서 꺼 뒀거나) 디버그로 이펙트를 껐으면
-        // 걸 것이 없다. 화면을 그대로 낸다 — 상자를 안 그리는 것과 다르게
-        // 틴트·블렌드모드는 호출자가 quad에서 이미 적용한다.
-        guard !layer.effects.isEmpty, Self.effectsEnabled else { return frame }
-        guard let resolver = compositionResolver,
-              let device = compositor?.device else { return nil }
+        guard let layer = compositionLayers[id], let device = compositor?.device else { return nil }
+        // `copybackground: false`면 이 레이어는 화면을 안 받는다 — 이펙트 체인의
+        // 입구가 진짜 화면(`frame`) 대신 빈 투명 텍스처를 받는다. WE에서
+        // composelayer의 텍스처는 "그 지점까지 그려진 화면"이고 이펙트의 출력이
+        // 그 자리를 대신하는데(`renderComposition`이 없을 때 `frame`을 그대로
+        // 내는 것과 같은 규칙), `copybackground`가 꺼져 있으면 애초에 그 화면을
+        // 안 준다는 뜻이다. 실물 음반 커버 씬(3299228616)의 "Bar 3"가 이 경우다 —
+        // 오디오 바 이펙트는 (스타일이 안 맞아) 꺼져 있고 남은 `scroll` 이펙트는
+        // 알파를 전혀 안 건드린다. `frame`을 그대로 줬다면 시계 글자가 그려진
+        // 화면을 불투명하게 돌려줘 시계를 덮어 버린다 — 빈 텍스처를 주면 알파가
+        // 여전히 0으로 남아 투명하다.
+        let source = layer.copyBackground
+            ? frame : (Self.blankTransparent(like: frame, device: device, commands: commands) ?? frame)
+        // 이펙트가 없거나(편집기에서 꺼 뒀거나) 디버그로 이펙트를 껐으면 걸 것이
+        // 없다. 화면을 받는 레이어는 화면을 그대로 낸다(상자를 안 그리는 것과
+        // 다르게 틴트·블렌드모드는 호출자가 quad에서 이미 적용한다) — 화면을 안
+        // 받는 레이어는 낼 것 자체가 없으니 그린다.
+        guard !layer.effects.isEmpty, Self.effectsEnabled else {
+            return layer.copyBackground ? frame : nil
+        }
+        guard let resolver = compositionResolver else { return nil }
         if compositionChains[id] == nil {
             var ignored: [String] = []
             guard let chain = EffectChain(
                 device: device,
                 effects: layer.effects.map(\.definition),
                 effectBases: layer.effects.map(\.base),
-                source: frame, resolver: resolver, includes: compositionIncludes,
+                source: source, resolver: resolver, includes: compositionIncludes,
                 makeTexture: { [weak self] in
                     guard let compositor = self?.compositor else {
                         throw RendererError.noDrawableLayers
@@ -1233,8 +1247,29 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let start = effectStartTime ?? now
         effectStartTime = start
         chain.audioBands = Self.audioBands
-        chain.render(commandBuffer: commands, source: frame, time: Float(now - start))
+        chain.render(commandBuffer: commands, source: source, time: Float(now - start))
         return chain.texture
+    }
+
+    /// `frame`과 같은 크기의 빈 투명 텍스처를 만든다. `copybackground: false`인
+    /// 합성 레이어의 이펙트 체인 입구로 쓴다 — 진짜 화면이 아니라 아무것도
+    /// 그려지지 않은 빈 캔버스를 받아야 한다.
+    private static func blankTransparent(
+        like frame: MTLTexture, device: MTLDevice, commands: MTLCommandBuffer
+    ) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: frame.pixelFormat, width: frame.width, height: frame.height,
+            mipmapped: false)
+        descriptor.usage = [.shaderRead, .renderTarget]
+        descriptor.storageMode = .private
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        pass.colorAttachments[0].storeAction = .store
+        commands.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
+        return texture
     }
 
     /// 합성이 끝난 화면에 후처리를 건다.

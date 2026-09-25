@@ -444,6 +444,50 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(doc.layers[0].content, .composition)
     }
 
+    /// `copybackground`가 없으면 기본 true — 합성 레이어가 진짜 화면을 받는다
+    /// (지금까지의 동작 그대로).
+    func testCompositionLayerCopiesBackgroundByDefault() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "Green", "image": "models/util/composelayer.json",
+                          "origin": "50 50 0", "size": "10 10"}]}
+            """,
+            extras: [
+                "models/util/composelayer.json":
+                    #"{"material":"materials/util/composelayer.json","passthrough":true}"#,
+                "materials/util/composelayer.json":
+                    #"{"passes":[{"shader":"composelayer","textures":["_rt_FullFrameBuffer"]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        XCTAssertTrue(doc.layers[0].copyBackground)
+    }
+
+    /// `copybackground: false`는 합성 레이어가 실제 화면을 받지 않는다는 뜻이다.
+    /// 실물 음반 커버 씬(3299228616)의 "Bar 3"가 이 경우다 — 오디오 바 이펙트는
+    /// 꺼져 있고 알파를 안 건드리는 `scroll`만 남는데, 화면을 그대로 받으면
+    /// 시계 글자가 불투명하게 덮인다. `SceneRenderer.renderComposition`이 이
+    /// 값을 보고 빈 텍스처를 대신 준다.
+    func testCompositionLayerCanOptOutOfCopyingBackground() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "Bar 3", "image": "models/util/composelayer.json",
+                          "origin": "50 50 0", "size": "10 10", "copybackground": false}]}
+            """,
+            extras: [
+                "models/util/composelayer.json":
+                    #"{"material":"materials/util/composelayer.json","passthrough":true}"#,
+                "materials/util/composelayer.json":
+                    #"{"passes":[{"shader":"composelayer","textures":["_rt_FullFrameBuffer"]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        XCTAssertEqual(doc.layers[0].content, .composition)
+        XCTAssertFalse(doc.layers[0].copyBackground)
+    }
+
     func testSolidColorDefaultsToWhiteWhenColorMissing() throws {
         let reader = try makeScenePkg(
             scene: """
