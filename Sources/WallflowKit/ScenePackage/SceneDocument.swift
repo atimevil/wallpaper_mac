@@ -473,6 +473,12 @@ public struct SceneDocument: Sendable {
         // origin이 **없는 것**과 **읽히지 않는 것**은 다르다. 부모가 있는데 origin이
         // 없으면 "부모와 같은 자리"라는 뜻이고, 부모 사슬을 합친 값이 이미 그 좌표다.
         // 둘을 같이 버려서 실물 음악 위젯의 진행 막대가 통째로 사라졌다.
+        //
+        // 부모가 **없는데** origin도 없는 이미지 레이어는 계속 버린다
+        // (`testMissingOriginWithoutParentIsRejected`) — 화면 구석에 정체불명의
+        // 상자가 뜨는 것보다 안 그리는 쪽이 정직하다. 텍스트는 다르다 — 최상위
+        // origin 없는 텍스트가 실물에 있다("RST文字"). 그건 텍스트 분기에서
+        // 따로 구제한다.
         let originIsRelativeToParent = object["origin"] == nil && object["parent"] != nil
         let ownOriginParsed = originIsRelativeToParent
             || Self.scalarOrScripted(object["origin"]).flatMap(Vec3.parse) != nil
@@ -527,6 +533,21 @@ public struct SceneDocument: Sendable {
             )
         }
 
+        // 자기 그림이 없는 오브젝트(그룹·solid·light·카메라). 자식이 부모 변환을
+        // 쓰도록 트리에는 남기되, 조용히 넘어간다 — `unsupported`로 두면 실물 씬마다
+        // 이런 오브젝트가 수십 개라 로그가 진짜 결함을 파묻는다.
+        func group() -> SceneLayer {
+            SceneLayer(
+                id: id, name: name, visible: visible,
+                origin: origin ?? Vec3(x: 0, y: 0, z: 0),
+                size: size ?? Vec2(x: 0, y: 0),
+                content: .group, unrunScripts: unrun,
+                alpha: alpha, tint: tint, rotation: rotation,
+                displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
+                colorBlendMode: blendMode, brightness: brightness
+            )
+        }
+
         if let particlePresetPath = object["particle"] as? String {
             guard let origin else {
                 return unsupported("파티클 레이어지만 origin이 스크립트다. 스크립팅은 M5에서 지원한다")
@@ -567,7 +588,16 @@ public struct SceneDocument: Sendable {
             let textObject: [String: Any]? = (object["text"] as? [String: Any])
                 ?? (object["text"] as? String).map { ["value": $0] }
             if let text = textObject {
-                guard let origin else {
+                // 텍스트는 최상위(부모 없음)에서도 origin이 아예 없을 수 있다(실물
+                // "RST文字"). 부모가 없으면 "부모와 같은 자리"가 곧 화면 원점이라,
+                // `resolveTransforms`가 이미 그렇게 계산해 둔 값(대개 0,0,0)을 쓴다.
+                // origin 키가 **있는데 못 읽는** 경우는 여전히 버린다 — 이미지
+                // 레이어와 같은 이유다(`testUnparsableOriginIsStillRejected`).
+                let ownOriginMissingEntirely = object["origin"] == nil
+                let composedIsFinite = transform.origin.x.isFinite && transform.origin.y.isFinite
+                guard let origin = origin
+                    ?? (ownOriginMissingEntirely && composedIsFinite ? transform.origin : nil)
+                else {
                     return unsupported("텍스트 레이어의 origin에 좌표가 없다")
                 }
                 // 텍스트 전용 `anchor`는 문서상 "화면(캔버스) 닻"이다 — 레이어 자기
@@ -634,7 +664,11 @@ public struct SceneDocument: Sendable {
                     scale: transform.scale, parallaxDepth: depth,
                     colorBlendMode: blendMode, brightness: brightness)
             }
-            return unsupported("알 수 없는 레이어 종류")
+            // 여기까지 왔으면 image·model·particle·text·sound·shape 중 아무 키도
+            // 없다 — 실물에서 전부 그룹(자식만 있는 폴더)·`solid`(파티클 충돌
+            // 경계)·`light`(광원)·카메라 경로점이었다. 그릴 그림이 없을 뿐 씬이
+            // 깨진 게 아니다.
+            return group()
         }
         // 원근 씬의 이미지 레이어는 origin이 없는 것이 보통이다 — 원점에 놓인
         // 세계 단위의 판이다(실물 배경 구름). 직교 씬에서는 원점이 화면 왼쪽
@@ -647,8 +681,22 @@ public struct SceneDocument: Sendable {
             // 말하면 사용자를 엉뚱한 원인으로 보낸다.
             // 화면 전체에 거는 후처리 레이어. `fullscreenlayer` 모델을 쓰고
             // origin도 size도 없다 — 화면이 곧 그 크기다.
-            if object["origin"] == nil, object["size"] == nil, object["effects"] != nil {
+            //
+            // 모델 JSON 자체가 `"fullscreen": true`를 선언하기도 한다(실물
+            // `models/util/fullscreenlayer.json` — 재질이 그 자리에서 방금 합성된
+            // 화면(`_rt_FullFrameBuffer`)을 그대로 읽는 통과 셰이더다). effects가
+            // 아예 없는 오브젝트도 있다(실물 "光标旋转后处理"는 커서 이벤트만 듣고
+            // 그림은 안 만든다, 로파이 카페 씬의 구분선 7개도 마찬가지). 그런
+            // 것까지 후처리로 취급하면 안 된다 — 걸 이펙트가 없다.
+            let isFullscreenPassthrough = resolver.json(for: modelPath)?["fullscreen"] as? Bool == true
+            if object["origin"] == nil, object["size"] == nil,
+               object["effects"] != nil || isFullscreenPassthrough {
                 guard !effects.isEmpty else {
+                    // 통과 셰이더인데 걸 이펙트가 하나도 없으면 화면을 있는 그대로
+                    // 되읽어 그대로 낸다 — 아무것도 안 그리는 것과 같다. 조용히
+                    // 넘어간다. fullscreen 표시가 없는 일반 이미지가 이 자리에
+                    // 왔다면(effects만 있고 비어 있으면) 여전히 진짜 결함이니 알린다.
+                    if isFullscreenPassthrough { return group() }
                     return unsupported("후처리 레이어인데 걸 이펙트가 없다")
                 }
                 return SceneLayer(

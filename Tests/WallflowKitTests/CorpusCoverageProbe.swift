@@ -75,6 +75,7 @@ final class CorpusCoverageProbe: XCTestCase {
                     case .solidColor: kinds["solid", default: 0] += 1
                     case .text: kinds["text", default: 0] += 1
                     case .sound: kinds["sound", default: 0] += 1
+                    case .group: kinds["group", default: 0] += 1
                     case .postProcess: kinds["postProcess", default: 0] += 1
                     case .composition: kinds["composition", default: 0] += 1
                     case .particle(let preset, _, _, _, _):
