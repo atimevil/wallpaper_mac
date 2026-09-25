@@ -175,7 +175,16 @@ final class ModelRenderer {
                 vertexDescriptor.attributes[attribute.slot].bufferIndex = 1
             } else {
                 // 메시에 없는 속성. 0으로 채운 버퍼를 한 자리에서 계속 읽게 한다.
-                vertexDescriptor.attributes[attribute.slot].format = .float4
+                //
+                // **포맷은 셰이더가 선언한 타입을 따라야 한다.** 여기서 무조건
+                // `.float4`를 쓰면, `#if SKINNING` 블록의 `a_BlendIndices`(GLSL
+                // `uvec4` → MSL `uint4`)처럼 정수 타입 속성에서 Metal이 파이프라인
+                // 생성 자체를 거부한다("... of type uint4 cannot be read using
+                // MTLAttributeFormatFloat4") — SKINNING이 실제로 꺼져 있어도,
+                // 번역기가 `#if`와 무관하게 선언을 전부 걷어 내므로 이 속성 자체는
+                // 항상 나타난다(실물 Star1/2/3·Earth4 등, generic3/4 계열 전부).
+                vertexDescriptor.attributes[attribute.slot].format =
+                    Self.zeroFillFormat(for: attribute.type)
                 vertexDescriptor.attributes[attribute.slot].offset = 0
                 vertexDescriptor.attributes[attribute.slot].bufferIndex = 2
                 usesZero = true
@@ -273,6 +282,28 @@ final class ModelRenderer {
         case "a_Tangent4", "a_Tangent": return (.float4, 24)
         case "a_TexCoord": return (.float2, 40)
         default: return nil
+        }
+    }
+
+    /// 메시에 없는 속성을 0-버퍼로 채울 때 쓰는 포맷. GLSL 선언 타입(번역기가
+    /// 돌려주는 `attribute.type`, 예: `uvec4`·`vec3`)을 그대로 따라가야 한다 —
+    /// 0은 어느 타입으로 읽어도 0이라 값은 안 바뀌지만, **포맷 자체가 셰이더의
+    /// 선언과 안 맞으면 Metal이 파이프라인을 통째로 거부한다.**
+    static func zeroFillFormat(for glslType: String) -> MTLVertexFormat {
+        switch glslType {
+        case "float": return .float
+        case "vec2": return .float2
+        case "vec3": return .float3
+        case "vec4": return .float4
+        case "int": return .int
+        case "ivec2": return .int2
+        case "ivec3": return .int3
+        case "ivec4": return .int4
+        case "uint": return .uint
+        case "uvec2": return .uint2
+        case "uvec3": return .uint3
+        case "uvec4": return .uint4
+        default: return .float4
         }
     }
 
