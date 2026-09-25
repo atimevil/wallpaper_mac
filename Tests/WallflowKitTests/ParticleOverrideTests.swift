@@ -51,7 +51,8 @@ final class ParticleOverrideTests: XCTestCase {
         guard case .sphereRandom(let rate, _, _, let lo, let hi, _) = p.emitters[0] else {
             return XCTFail("sphererandom이어야 한다")
         }
-        XCTAssertEqual(rate, 10, accuracy: 0.001)
+        // rate는 방출률이 아니다(시뮬레이션 속도). 이미터는 그대로다.
+        XCTAssertEqual(rate, 20, accuracy: 0.001)
         // **뿌리는 범위는 배율을 따르지 않는다.** 한동안 크기 배율을 범위에까지
         // 곱했는데, 그러면 비가 화면 일부에만 내린다(실물에서 반경 1024가 0.65배로
         // 줄어 가로 3분의 2에만 왔다).

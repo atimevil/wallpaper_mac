@@ -42,7 +42,9 @@ public enum ParticleEmitter: Equatable, Sendable {
         }
     }
 
-    /// 씬의 조정값을 얹는다. **방출 주기만** 바꾼다.
+    /// 방출 주기에 배율을 곱한다(현재는 예산 축소 `scaledToBudget`만 부른다 — 씬
+    /// `instanceoverride.rate`는 더 이상 방출률이 아니라 시뮬레이션 속도라 여길 거치지
+    /// 않는다). **방출 주기만** 바꾼다.
     ///
     /// 뿌리는 범위는 건드리지 않는다. 공식 문서가 못박고 있다 —
     /// "All factors are multiplied with the initializers and operators of your
@@ -509,7 +511,7 @@ public struct ParticlePreset: Equatable, Sendable {
             maxCount: scaledCount,
             startTime: startTime,
             materialPath: materialPath,
-            emitters: emitters.map { $0.scaled(rate: override.rate) },
+            emitters: emitters,
             initializers: initializers,
             operators: operators,
             unsupportedNames: unsupportedNames,

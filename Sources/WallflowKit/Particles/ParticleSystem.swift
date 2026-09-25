@@ -245,8 +245,10 @@ public final class ParticleSystem {
         // Check for invalid deltaTime
         guard deltaTime.isFinite, deltaTime > 0, isPlaying else { return }
 
-        // Clamp to maxTimeStep
-        let dt = Swift.min(deltaTime, Self.maxTimeStep)
+        // rate는 "simulation rate"(공식 문서) — 이 시스템의 시계를 늦추거나 당긴다.
+        // 곱한 뒤 다시 죈다. 큰 배율이 한 걸음에 길게 걷게 두면 적분이 튄다.
+        let dt = Swift.min(deltaTime * instance.rate, Self.maxTimeStep)
+        guard dt > 0 else { return }
 
         // Remove dead particles from alive tracking
         removeDeadParticles()
@@ -344,8 +346,12 @@ public final class ParticleSystem {
     /// 이미터가 하고 `rate`는 0이다. 그래서 불꽃이 통째로 안 보였다.
     private func emitBurst() {
         for emitter in preset.emitters {
-            let count = emitter.burst.count
-            guard count > 0 else { continue }
+            // count는 한꺼번에 뿌리는 몫에도 먹는다. 있던 것을 0으로 만들지는 않는다
+            // (실물 PS2 오브는 일괄 1개다). 슬롯 수보다 크게 잡을 이유는 없다.
+            let authored = emitter.burst.count
+            guard authored > 0 else { continue }
+            let count = Swift.max(1, Int(Swift.min((Double(authored) * instance.count).rounded(),
+                                                   Double(particleBuffer.count))))
             for _ in 0..<count {
                 guard let slot = deadSlots.popLast() else { break }
                 var particle = emitParticle(from: emitter)
@@ -373,7 +379,8 @@ public final class ParticleSystem {
                 rate = r
             }
 
-            emissionCredits[emitterIndex] += rate * dt
+            // count는 "emission rate"(공식 문서). 개수 상한은 불러올 때 이미 곱했다.
+            emissionCredits[emitterIndex] += rate * instance.count * dt
 
             // Clamp credit to prevent infinite loops
             guard emissionCredits[emitterIndex].isFinite else {

@@ -149,4 +149,60 @@ final class ParticleInstanceTests: XCTestCase {
         XCTAssertEqual(back, o)
         XCTAssertNil(o.scriptValues["colorn"])
     }
+
+    /// rate는 "simulation rate" — 시간을 늦춘다. 방출률이 아니다.
+    /// 실물 The Gilded Shore의 소용돌이 8개가 rate 0.18이다(magic_vortex_0: maxcount 256,
+    /// 방출 512/s, 수명 0.4~0.7). 방출률로 읽으면 ~50개가 빨리 돌고, 시간으로 읽으면
+    /// ~256개가 5.5배 느리게 돈다.
+    func testRateSlowsSimulationNotEmission() {
+        let preset = ParticlePreset(
+            maxCount: 256, startTime: 0, materialPath: "m.json",
+            emitters: [.sphereRandom(rate: 512, origin: zero, directions: Vec3(x: 1, y: 1, z: 0),
+                                     distanceMin: 0, distanceMax: 0)],
+            initializers: [.lifetimeRandom(min: 0.4, max: 0.7)],
+            operators: [], unsupportedNames: [])
+        var o = ParticleOverride()
+        o.rate = 0.18
+        let system = ParticleSystem(preset: preset.applying(o), random: SeededRandom(seed: 3))
+        for _ in 0..<150 { system.update(deltaTime: 1.0 / 30) }  // 5초
+        XCTAssertGreaterThan(system.aliveCount, 200)
+    }
+
+    /// 나이도 같은 시계를 따른다 — rate 0.5면 1초 뒤 나이는 0.5초다.
+    func testRateScalesAge() throws {
+        var o = ParticleOverride()
+        o.rate = 0.5; o.lifetime = 100
+        let system = ParticleSystem(preset: bare(burst: ParticleEmitterBurst(count: 1)).applying(o),
+                                    random: SeededRandom(seed: 5))
+        for _ in 0..<10 { system.update(deltaTime: 0.1) }
+        XCTAssertEqual(try XCTUnwrap(system.particles.first).age, 0.5, accuracy: 1e-9)
+    }
+
+    /// 큰 rate도 한 걸음에 maxTimeStep을 넘지 않는다. (0.05초 × 100 = 5초 → 0.1초로 죈다.
+    /// 옛 코드는 rate를 무시해 0.05초라 실패한다.)
+    func testHugeRateIsClamped() throws {
+        var o = ParticleOverride()
+        o.rate = 100; o.lifetime = 1000
+        let system = ParticleSystem(preset: bare(burst: ParticleEmitterBurst(count: 1)).applying(o),
+                                    random: SeededRandom(seed: 5))
+        system.update(deltaTime: 0.05)
+        XCTAssertEqual(try XCTUnwrap(system.particles.first).age, ParticleSystem.maxTimeStep,
+                       accuracy: 1e-9)
+    }
+
+    /// count는 "emission rate" — 계속 뿌리는 양도, 한꺼번에 뿌리는 양도 곱한다.
+    func testCountScalesEmissionAndBurst() {
+        var o = ParticleOverride()
+        o.count = 3; o.lifetime = 100
+        let continuous = ParticleSystem(preset: bare(rate: 10, burst: .none).applying(o),
+                                        random: SeededRandom(seed: 1))
+        for _ in 0..<10 { continuous.update(deltaTime: 0.1) }
+        XCTAssertTrue((29...31).contains(continuous.aliveCount), "\(continuous.aliveCount)")
+
+        o.count = 0.5
+        XCTAssertEqual(spawn(bare(burst: ParticleEmitterBurst(count: 4)), o, dt: 1e-6).count, 2)
+        // 있던 일괄 방출을 0으로 만들지는 않는다(실물 PS2 오브는 일괄 1개다).
+        o.count = 0.05
+        XCTAssertEqual(spawn(bare(burst: ParticleEmitterBurst(count: 1)), o, dt: 1e-6).count, 1)
+    }
 }
