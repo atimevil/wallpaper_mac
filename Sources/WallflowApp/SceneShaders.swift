@@ -24,6 +24,13 @@ enum SceneShaders {
         float2 size;
         // 직교 공간의 전체 크기
         float2 projection;
+        // 화면 맞춤(T6)이 캔버스에서 실제로 보이는 사각형. NDC는 world를 이걸로
+        // 맞춰 잰다 — projection 그대로 나누면 늘이기(예전 동작)가 된다.
+        // 화면을 꽉 채우기만 할 자리(합성 떠내기 목적지, 최종 표시)는 origin
+        // (0,0)·size를 목적지 크기 그대로 줘 항등으로 만든다. 그러지 않으면
+        // 맞춤이 두 번 걸린다.
+        float2 visibleOrigin;
+        float2 visibleSize;
         // 스프라이트 시트 프레임의 UV 사각형(0~1). 시트가 아니면 (0,0)/(1,1)이라
         // quad_vertex가 텍스처 전체를 그대로 읽는다.
         float2 uvOrigin;
@@ -70,15 +77,17 @@ enum SceneShaders {
         // **원점만** 뒤집는다 — NDC 자체를 뒤집으면 쿼드의 로컬 좌표까지 뒤집혀
         // 그림과 글자가 상하로 뒤집힌다.
         float2 world = float2(u.origin.x, u.projection.y - u.origin.y) + rotated;
-        // 직교 공간 원점은 좌상단, Y는 아래로 증가한다.
+        // 직교 공간 원점은 좌상단, Y는 아래로 증가한다. 화면 맞춤이 자른/남긴
+        // 사각형(visibleOrigin·visibleSize) 기준으로 재므로, 채우기는 캔버스
+        // 가장자리가 클립 공간 밖으로 나가 잘리고 전체 보기는 안쪽에 남는다.
         float2 ndc = float2(
-            (world.x / u.projection.x) * 2.0 - 1.0,
-            1.0 - (world.y / u.projection.y) * 2.0
+            ((world.x - u.visibleOrigin.x) / u.visibleSize.x) * 2.0 - 1.0,
+            1.0 - ((world.y - u.visibleOrigin.y) / u.visibleSize.y) * 2.0
         );
         VertexOut out;
         out.position = float4(ndc, 0.0, 1.0);
         // 스프라이트 시트 한 칸만 읽는다. uvOrigin/uvScale이 기본값(0,0)/(1,1)이면
-        // 예전과 똑같이 텍스처 전체를 읽는다 — NDC(위)는 T6이 다룰 몫이라 손대지 않는다.
+        // 예전과 똑같이 텍스처 전체를 읽는다.
         out.uv = u.uvOrigin + (in.position + 0.5) * u.uvScale;
         out.color = u.color;
         out.screenTangents = float4(0.0);
@@ -101,8 +110,8 @@ enum SceneShaders {
         float2 rotated = float2(scaled.x * c - scaled.y * s, scaled.x * s + scaled.y * c);
         float2 world = float2(u.origin.x, u.projection.y - u.origin.y) + rotated;
         float2 ndc = float2(
-            (world.x / u.projection.x) * 2.0 - 1.0,
-            1.0 - (world.y / u.projection.y) * 2.0
+            ((world.x - u.visibleOrigin.x) / u.visibleSize.x) * 2.0 - 1.0,
+            1.0 - ((world.y - u.visibleOrigin.y) / u.visibleSize.y) * 2.0
         );
         VertexOut out;
         out.position = float4(ndc, 0.0, 1.0);
@@ -303,7 +312,9 @@ enum SceneShaders {
         float c = cos(u.rotation), s = sin(u.rotation);
         float2 rotated = float2(local.x * c - local.y * s, local.x * s + local.y * c);
         float2 world = float2(u.origin.x, u.projection.y - u.origin.y) + rotated;
-        return tex.sample(samp, world / u.projection);
+        // tex는 드로어블 크기 오프스크린이다 — 화면 맞춤으로 자른/남긴 사각형
+        // 기준으로 읽어야 그 안에 실제로 그려진 그림을 짚는다.
+        return tex.sample(samp, (world - u.visibleOrigin) / u.visibleSize);
     }
 
     fragment float4 solid_fragment(
@@ -325,12 +336,16 @@ enum SceneShaders {
     };
 
     struct ParticleUniforms {
-        float2 projection;
+        // 화면 맞춤(T6)이 캔버스에서 실제로 보이는 사각형. quad_vertex의
+        // visibleOrigin/visibleSize와 같은 뜻이다.
+        float2 visibleOrigin;
+        float2 visibleSize;
         // 프레임 한 장이 시트에서 차지하는 비율. 시트가 아니면 (1,1)이다.
         float2 frameScale;
         float textureRatio;
         float framesPerRow;
-        // 원근 씬이면 1. 그때는 projection 대신 transform으로 클립 공간에 놓는다.
+        // 원근 씬이면 1. 그때는 visibleOrigin/visibleSize 대신 transform으로
+        // 클립 공간에 놓는다.
         float useTransform;
         float _pad;
         // 레이어의 세계 변환 × 카메라 뷰·투영. 파티클 좌표는 레이어 기준이다.
@@ -371,10 +386,10 @@ enum SceneShaders {
             - p.size * up * (corner.y - 0.5) * u.textureRatio;
 
         // 파티클 위치 계산은 씬 좌표계(Y가 위로 증가)에서 이뤄진다. 중력이 -Y인
-        // 것도 그래서다. 그래서 여기서는 화면 좌표로 한 번만 뒤집으면 된다 —
-        // 빌보드의 up 벡터도 함께 뒤집혀 스프라이트가 바로 선다.
-        float2 ndc = float2((world.x / u.projection.x) * 2.0 - 1.0,
-                            (world.y / u.projection.y) * 2.0 - 1.0);
+        // 것도 그래서다. quad_vertex와 달리 Y를 뒤집지 않는다 — 파티클 world는
+        // 이미 y-up이라 NDC의 y-up과 방향이 같다(화면 맞춤 사각형만 끼운다).
+        float2 ndc = float2(((world.x - u.visibleOrigin.x) / u.visibleSize.x) * 2.0 - 1.0,
+                            ((world.y - u.visibleOrigin.y) / u.visibleSize.y) * 2.0 - 1.0);
         // 스프라이트 시트면 코너를 그 프레임의 칸으로 옮긴다. 안 그러면 파티클
         // 하나가 시트 전체(꽃잎 5장)를 한 칸에 뭉개 그린다.
         float col = fmod(p.frame, u.framesPerRow);

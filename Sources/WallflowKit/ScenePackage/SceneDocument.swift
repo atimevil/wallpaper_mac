@@ -41,6 +41,9 @@ public struct SceneDocument: Sendable {
     /// 씬마다 같은 모듈을 여러 스크립트가 쓰므로 문서에서 한 번만 읽는다.
     public let scriptModules: [String: String]
     public let parallaxAmount: Double
+    /// `general.zoom`. 저자가 편집기에서 정해 둔 확대율 — 화면 맞춤(`CanvasFit`)이
+    /// 배율에 곱한다. 0 이하이거나 유한하지 않거나 없으면 1(확대 없음)이다.
+    public let zoom: Double
 
     /// 도형(`shape: quad`) 레이어의 기준 한 변. 파일에는 크기가 없다.
     /// 근거는 `presets/lightshafts/`의 미리보기 씬(256x256 캔버스)과
@@ -146,6 +149,10 @@ public struct SceneDocument: Sendable {
             ?? Vec3(x: 0.302, y: 0.302, z: 0.302)
         let skylightColor = (general["skylightcolor"] as? String).flatMap(Vec3.parse)
             ?? Vec3(x: 1, y: 1, z: 1)
+        // 편집기에서 캔버스를 더 확대해 둔 정도. 화면 맞춤이 배율에 곱한다(T6).
+        // 0 이하나 NaN, 아예 없으면 확대 없음(1)로 본다 — 깨진 값이 화면을 통째로
+        // 밀어내면 안 된다.
+        let zoom = doubleValue(general["zoom"]).map { $0 > 0 ? $0 : 1 } ?? 1
 
         let resolver = ReferenceResolver(pkg: reader, assets: assets)
 
@@ -185,7 +192,8 @@ public struct SceneDocument: Sendable {
             ambientColor: ambientColor, skylightColor: skylightColor,
             layers: layers,
             scriptModules: scriptModules,
-            parallaxAmount: parallaxOn && amount.isFinite ? Swift.min(Swift.max(amount, 0), 2) : 0
+            parallaxAmount: parallaxOn && amount.isFinite ? Swift.min(Swift.max(amount, 0), 2) : 0,
+            zoom: zoom
         )
     }
 

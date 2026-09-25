@@ -20,6 +20,12 @@ struct QuadUniforms {
     var origin: SIMD2<Float>
     var size: SIMD2<Float>
     var projection: SIMD2<Float>
+    /// 화면 맞춤(T6)이 캔버스에서 실제로 보이는 사각형. NDC는 world를 이걸로
+    /// 맞춰 잰다 — 목적지를 그대로 채우기만 할 자리(합성 떠내기 목적지, 최종
+    /// 표시)는 origin (0,0)·size를 목적지 크기 그대로 줘 항등으로 만든다.
+    /// 그러지 않으면 맞춤이 두 번 걸린다.
+    var visibleOrigin: SIMD2<Float>
+    var visibleSize: SIMD2<Float>
     /// 스프라이트 시트 프레임의 UV 사각형(0~1). 시트가 아니면 (0,0)/(1,1)이라
     /// 텍스처 전체를 그대로 읽는다 — quad_vertex의 기본값과 같다.
     var uvOrigin: SIMD2<Float> = SIMD2(0, 0)
@@ -29,11 +35,11 @@ struct QuadUniforms {
     var rotation: Float
     var padding: (Float, Float, Float) = (0, 0, 0)
 
-    /// MSL의 QuadUniforms와 같은 80바이트여야 한다: float2 5개(origin·size·
-    /// projection·uvOrigin·uvScale, 40) + 암묵 패딩(8, float4 정렬) + color(16) +
-    /// rotation(4) + pad[3](12) = 80. init(device:)이 이 값을 실제로 검증한다 —
-    /// ParticleInstance.expectedStride와 같은 이유다.
-    static let expectedStride = 80
+    /// MSL의 QuadUniforms와 같은 96바이트여야 한다: float2 7개(origin·size·
+    /// projection·visibleOrigin·visibleSize·uvOrigin·uvScale, 56) + 암묵 패딩(8,
+    /// float4 정렬) + color(16) + rotation(4) + pad[3](12) = 96. init(device:)이 이
+    /// 값을 실제로 검증한다 — ParticleInstance.expectedStride와 같은 이유다.
+    static let expectedStride = 96
 }
 
 struct QuadInstance {
@@ -121,6 +127,14 @@ final class MetalCompositor {
     private let library: MTLLibrary
 
     private var projection = SIMD2<Float>(1, 1)
+    /// 마지막으로 그린 drawable 크기(픽셀). 화면 맞춤 계산에 쓴다. 첫 draw
+    /// 전에는 캔버스와 같다고 본다 — 그러면 화면 맞춤이 항등이라 첫 프레임의
+    /// 지오메트리가 클립 공간 밖으로 밀려나지 않는다.
+    private var drawableSize = SIMD2<Float>(1, 1)
+    /// 배경화면마다 고른 화면 맞춤 방식. 기본은 채우기다.
+    private var fitMode = CanvasFit.Mode.default
+    /// `general.zoom`. 씬을 열 때 한 번 정해지고 이후 안 바뀐다.
+    private var fitZoom: Double = 1
     private var layers: [(QuadInstance, LayerSource)] = []
     private var clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
     /// 지금 프레임의 시차 밀림(직교 단위). 레이어마다 깊이를 곱해 쓴다.
@@ -287,6 +301,43 @@ final class MetalCompositor {
         projection = SIMD2(Float(width), Float(height))
     }
 
+    /// drawable(화면) 크기를 정한다. 화면 맞춤이 이 크기와 캔버스 비율을 견준다.
+    /// 디스플레이가 바뀌거나 창 크기가 바뀔 때마다 다시 부른다 — `draw(in:)`이
+    /// 매 프레임 스스로 갱신하지만, 첫 프레임 전에 커서 좌표 등이 이 값을 미리
+    /// 물어볼 수 있어 씬을 열 때도 한 번 준다.
+    func setDrawableSize(_ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        drawableSize = SIMD2(Float(size.width), Float(size.height))
+    }
+
+    /// `general.zoom`. 씬을 열 때 한 번 정한다.
+    func setZoom(_ zoom: Double) {
+        fitZoom = zoom.isFinite && zoom > 0 ? zoom : 1
+    }
+
+    /// 화면 맞춤 방식을 바꾼다. 메뉴가 재시작 없이 바로 부를 수 있다.
+    func setCanvasFit(_ mode: CanvasFit.Mode) {
+        fitMode = mode
+    }
+
+    /// 지금 화면에 실제로 보이는 캔버스 사각형(화면 맞춤 결과). 커서를 씬 좌표로
+    /// 되돌리는 등 정방향 NDC 매핑의 역을 쓰는 자리가 이것을 읽는다.
+    ///
+    /// 원근 씬(카메라가 있음)은 캔버스가 화면 크기를 정하는 진짜 단위가 아니라
+    /// 스크립트·글자용 이름뿐인 1920x1080이다(SceneDocument 주석 참고) — 화면
+    /// 맞춤을 걸면 그 이름뿐인 캔버스가 잘려 커서·오버레이 쿼드가 안 맞는다.
+    /// 그래서 원근 씬은 늘 항등이다.
+    var visibleRect: CanvasFit.Rect {
+        guard viewProjection == nil else {
+            return CanvasFit.Rect(
+                origin: .zero, size: SIMD2(Double(projection.x), Double(projection.y)))
+        }
+        return CanvasFit.visibleRect(
+            canvas: SIMD2(Double(projection.x), Double(projection.y)),
+            screen: SIMD2(Double(drawableSize.x), Double(drawableSize.y)),
+            mode: fitMode, zoom: fitZoom)
+    }
+
     /// 원근 씬의 카메라. 매 프레임 바뀔 수 있다(스크립트가 움직인다).
     /// nil로 두면 직교 씬처럼 그린다.
     func setCamera(viewProjection: simd_float4x4?, eye: SIMD3<Float> = .zero) {
@@ -356,11 +407,15 @@ final class MetalCompositor {
     /// 창작마당 씬이 4551x2560짜리 레이어를 두기도 한다.
     private func extractComposition(
         id: Int, quad: QuadInstance, uniforms: QuadUniforms,
-        from frame: MTLTexture, commands: MTLCommandBuffer
+        visibleSize: SIMD2<Float>, from frame: MTLTexture, commands: MTLCommandBuffer
     ) -> MTLTexture? {
-        guard let compositionPipeline, projection.x > 0, projection.y > 0 else { return nil }
-        let scaleX = Double(frame.width) / Double(projection.x)
-        let scaleY = Double(frame.height) / Double(projection.y)
+        guard let compositionPipeline, visibleSize.x > 0, visibleSize.y > 0 else { return nil }
+        // frame(오프스크린)은 화면 맞춤이 이미 걸려 그려진 드로어블 크기 텍스처다.
+        // 캔버스 단위 하나가 그 안에서 몇 픽셀인지는 전체 캔버스가 아니라 실제로
+        // 보이는 사각형(visibleSize) 기준이다 — projection으로 재면 채우기·전체
+        // 보기에서 상자 크기가 어긋난다.
+        let scaleX = Double(frame.width) / Double(visibleSize.x)
+        let scaleY = Double(frame.height) / Double(visibleSize.y)
         let width = Int((Double(abs(quad.size.x)) * scaleX).rounded())
         let height = Int((Double(abs(quad.size.y)) * scaleY).rounded())
         let bounded = (
@@ -386,10 +441,12 @@ final class MetalCompositor {
         encoder.setRenderPipelineState(compositionPipeline)
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
         // 목적지를 꽉 채우는 쿼드. 배치는 목적지 기준이라 회전 없이 그린다.
+        // visibleOrigin (0,0)·visibleSize = 목적지 크기 그대로라 항등이다 — 여기서
+        // 또 화면 맞춤을 걸면 상자 그림에 맞춤이 두 번 적용된다.
+        let boundedSize = SIMD2<Float>(Float(bounded.0), Float(bounded.1))
         var fill = QuadUniforms(
-            origin: SIMD2(Float(bounded.0) / 2, Float(bounded.1) / 2),
-            size: SIMD2(Float(bounded.0), Float(bounded.1)),
-            projection: SIMD2(Float(bounded.0), Float(bounded.1)),
+            origin: boundedSize / 2, size: boundedSize, projection: boundedSize,
+            visibleOrigin: SIMD2(0, 0), visibleSize: boundedSize,
             color: SIMD4(1, 1, 1, 1), rotation: 0)
         encoder.setVertexBytes(&fill, length: MemoryLayout<QuadUniforms>.stride, index: 1)
         // 읽을 자리는 원래 레이어의 배치다.
@@ -434,6 +491,14 @@ final class MetalCompositor {
               let drawable = view.currentDrawable,
               let commands = queue.makeCommandBuffer() else { return }
 
+        // 화면 맞춤은 drawable 크기와 캔버스 비율을 견준다 — 디스플레이가
+        // 바뀌거나 창 크기가 바뀌어도 매 프레임 여기서 다시 재므로 따로
+        // 갱신하는 훅이 필요 없다.
+        drawableSize = SIMD2(Float(drawable.texture.width), Float(drawable.texture.height))
+        let fit = visibleRect
+        let visibleOrigin = SIMD2<Float>(Float(fit.origin.x), Float(fit.origin.y))
+        let visibleSize = SIMD2<Float>(Float(fit.size.x), Float(fit.size.y))
+
         prepare?(commands)
 
         // 후처리가 있으면 화면이 아니라 텍스처에 모아 그린다.
@@ -465,6 +530,7 @@ final class MetalCompositor {
             var uniforms = QuadUniforms(
                 origin: quad.origin + parallax * quad.parallaxDepth,
                 size: quad.size, projection: projection,
+                visibleOrigin: visibleOrigin, visibleSize: visibleSize,
                 uvOrigin: quad.uvOrigin, uvScale: quad.uvScale,
                 color: quad.color, rotation: quad.rotation)
 
@@ -542,7 +608,7 @@ final class MetalCompositor {
                 // 화면 아래에 그려지고 상자에는 배경만 비친다.
                 let source = offscreen.flatMap {
                     extractComposition(id: id, quad: quad, uniforms: uniforms,
-                                       from: $0, commands: commands)
+                                       visibleSize: visibleSize, from: $0, commands: commands)
                 }
                 let result = source.flatMap { composite?(id, commands, $0) }
                 guard let restarted = startEncoder(clear: false) else { return }
@@ -610,7 +676,8 @@ final class MetalCompositor {
                 }
                 // 파티클은 자기 draw를 인코딩한다. 아래 공통 drawPrimitives까지
                 // 실행되면 파티클 위에 정체불명의 쿼드가 한 장 더 그려진다.
-                renderer.encode(into: encoder, projection: projection,
+                renderer.encode(into: encoder, visibleOrigin: visibleOrigin,
+                                visibleSize: visibleSize,
                                 transform: viewProjection.map { $0 * quad.world })
                 // 파티클 파이프라인이 정점 버퍼 결합을 바꿨을 수 있으므로
                 // 다음 쿼드 레이어를 위해 index 0을 되돌린다.
@@ -636,8 +703,12 @@ final class MetalCompositor {
                 encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
                 encoder.setRenderPipelineState(pipeline)
                 // 화면을 꽉 채우는 쿼드. 시차는 이미 반영돼 있으므로 0이다.
+                // offscreen은 이미 화면 맞춤이 걸려 그려진 결과라, 여기서 또 걸면
+                // 두 번 잘린다 — visibleOrigin (0,0)·visibleSize = projection으로
+                // 항등을 만들어 드로어블을 정확히 그대로 채운다.
                 var uniforms = QuadUniforms(
                     origin: projection * 0.5, size: projection, projection: projection,
+                    visibleOrigin: SIMD2(0, 0), visibleSize: projection,
                     color: SIMD4(1, 1, 1, 1), rotation: 0)
                 encoder.setVertexBytes(
                     &uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 1)

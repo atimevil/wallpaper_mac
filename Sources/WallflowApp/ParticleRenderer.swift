@@ -27,7 +27,10 @@ struct ParticleInstance {
 
 /// 정점 셰이더에 넘기는 파티클 공통 값.
 struct ParticleUniforms {
-    var projection: SIMD2<Float>
+    /// 화면 맞춤(T6)이 캔버스에서 실제로 보이는 사각형. `QuadUniforms`의
+    /// visibleOrigin/visibleSize와 같은 뜻이다.
+    var visibleOrigin: SIMD2<Float>
+    var visibleSize: SIMD2<Float>
     /// 프레임 한 장이 시트에서 차지하는 비율. 시트가 아니면 (1,1).
     var frameScale: SIMD2<Float>
     var textureRatio: Float
@@ -37,6 +40,13 @@ struct ParticleUniforms {
     var padding: Float = 0
     /// 레이어 세계 변환 × 뷰·투영. 직교 씬에서는 쓰지 않는다.
     var transform: simd_float4x4 = matrix_identity_float4x4
+
+    /// MSL의 ParticleUniforms와 같은 112바이트여야 한다: float2 3개(visibleOrigin·
+    /// visibleSize·frameScale, 24) + float 4개(textureRatio·framesPerRow·
+    /// useTransform·padding, 16) = 40 + 암묵 패딩(8, float4x4 정렬) +
+    /// transform(64) = 112. init(device:library:...)이 이 값을 실제로 검증한다 —
+    /// ParticleInstance.expectedStride와 같은 이유다.
+    static let expectedStride = 112
 }
 
 /// 텍스처가 스프라이트 시트일 때의 배치. `rosepetals.tex`가 512x128에 102x128
@@ -125,6 +135,12 @@ final class ParticleRenderer {
                 "ParticleInstance 배치가 MSL과 다르다: "
                 + "\(MemoryLayout<ParticleInstance>.stride)바이트, "
                 + "\(ParticleInstance.expectedStride)여야 한다")
+        }
+        guard MemoryLayout<ParticleUniforms>.stride == ParticleUniforms.expectedStride else {
+            throw CompositorError.pipelineFailed(
+                "ParticleUniforms 배치가 MSL과 다르다: "
+                + "\(MemoryLayout<ParticleUniforms>.stride)바이트, "
+                + "\(ParticleUniforms.expectedStride)여야 한다")
         }
 
         // maxCount가 0인 프리셋이 있을 수 있다(깨진 파일을 0으로 죄었을 때).
@@ -224,11 +240,11 @@ final class ParticleRenderer {
     /// 살아 있는 파티클이 없으면 아무것도 인코딩하지 않는다.
     /// `instanceCount: 0`으로 draw를 부르는 것은 낭비다.
     /// - Parameter transform: 원근 씬이면 레이어 세계 변환 × 뷰·투영. 직교면 nil.
-    func encode(into encoder: MTLRenderCommandEncoder, projection: SIMD2<Float>,
-                transform: simd_float4x4? = nil) {
+    func encode(into encoder: MTLRenderCommandEncoder, visibleOrigin: SIMD2<Float>,
+                visibleSize: SIMD2<Float>, transform: simd_float4x4? = nil) {
         guard instanceCount > 0 else { return }
         var uniforms = ParticleUniforms(
-            projection: projection,
+            visibleOrigin: visibleOrigin, visibleSize: visibleSize,
             frameScale: sheet?.frameScale ?? SIMD2(1, 1),
             textureRatio: sheet?.frameRatio ?? textureRatio,
             framesPerRow: Float(max(1, sheet?.framesPerRow ?? 1)),

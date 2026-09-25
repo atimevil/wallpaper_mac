@@ -380,6 +380,13 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 
+    /// 메뉴에서 이 씬이 보여 주는 배경화면의 화면 맞춤 방식을 바꿨을 때 부른다.
+    /// 씬을 다시 열지 않고 바로 적용한다.
+    func setCanvasFit(_ mode: CanvasFit.Mode) {
+        compositor?.setCanvasFit(mode)
+        view?.needsDisplay = true
+    }
+
     /// 마우스 위치를 따라 레이어를 조금씩 민다.
     ///
     /// 화면 중심에서 얼마나 떨어졌는지를 -1~1로 재고, 씬이 정한 강도와 레이어의
@@ -414,14 +421,20 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     ///
     /// 씬 좌표는 y가 위로 증가하고 `NSEvent.mouseLocation`도 그러므로 부호를
     /// 그대로 쓴다. 파티클 좌표계는 레이어 기준이라 부르는 쪽에서 원점을 뺀다.
+    ///
+    /// 화면 비율(0~1)을 캔버스 좌표로 옮기는 건 `quad_vertex`가 하는 NDC 매핑의
+    /// 역이다 — 채우기로 잘린 캔버스라면 화면 비율 전체가 캔버스의 일부에만
+    /// 대응해야 커서가 화면에 보이는 그림과 맞게 움직인다.
     private func sceneCursorPosition(in view: MTKView) -> SIMD2<Float>? {
-        guard let screen = view.window?.screen ?? NSScreen.main else { return nil }
+        guard let screen = view.window?.screen ?? NSScreen.main,
+              let compositor else { return nil }
         let frame = screen.frame
         guard frame.width > 0, frame.height > 0 else { return nil }
         let mouse = NSEvent.mouseLocation
-        let nx = Float(min(max((mouse.x - frame.minX) / frame.width, 0), 1))
-        let ny = Float(min(max((mouse.y - frame.minY) / frame.height, 0), 1))
-        return SIMD2(nx * ortho.x, ny * ortho.y)
+        let nx = Double(min(max((mouse.x - frame.minX) / frame.width, 0), 1))
+        let ny = Double(min(max((mouse.y - frame.minY) / frame.height, 0), 1))
+        let point = compositor.visibleRect.canvasPoint(atScreenFraction: SIMD2(nx, ny))
+        return SIMD2(Float(point.x), Float(point.y))
     }
 
     /// 글자를 굽고 텍스처와 쿼드 크기를 갱신한다. **동기**로 메인에서 굽는다 —
@@ -1664,6 +1677,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
         let compositor = try MetalCompositor(device: device)
         compositor.setProjection(width: document.orthoWidth, height: document.orthoHeight)
+        // 첫 draw 전에도 커서 계산 등이 drawable 크기를 물어볼 수 있어 미리 준다.
+        // draw(in:)이 매 프레임 다시 재므로 창 크기가 달라져도 스스로 맞는다.
+        compositor.setDrawableSize(view.drawableSize)
+        compositor.setZoom(document.zoom)
+        // 배경화면마다 저장해 둔 화면 맞춤 방식(없으면 기본값 채우기).
+        compositor.setCanvasFit(CanvasFitPreferencesStore.mode(for: item.id))
         parallaxAmount = document.parallaxAmount
         ortho = SIMD2(Float(document.orthoWidth), Float(document.orthoHeight))
         camera = document.camera
@@ -1916,6 +1935,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
 extension SceneRenderer: MTKViewDelegate {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        // 다음 draw(in:)도 스스로 갱신하지만, 이 프레임 안에서 draw보다 먼저
+        // sceneCursorPosition(tickScripts)이 돌 수 있어 미리 갱신해 둔다 —
+        // 안 그러면 리사이즈 프레임에서 커서가 지난 프레임의 크기를 기준으로 잡힌다.
+        compositor?.setDrawableSize(size)
         view.needsDisplay = true
     }
 
