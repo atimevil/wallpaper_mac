@@ -708,7 +708,30 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     degraded.append("스크립트가 만든 레이어를 세우지 못했다: \(state.asset ?? "?")")
                 }
             }
-            guard appliedStates[id] != state else { continue }
+            // 부모(그룹)를 스크립트가 옮겼으면(실물 "Clock Layer 1"의 드래그 스크립트가
+            // `thisLayer.origin`을 바꾼다) 자식의 화면 자리도 다시 구해야 한다.
+            // `ScriptTarget.parentOrigin/Scale/Rotation`은 씬을 열 때 한 번 굳는데,
+            // 그러면 그룹을 드래그해도 자식(시계 숫자·막대)이 안 따라간다.
+            // `snapshot.layers`는 스크립트가 없는 레이어도 포함한다(seed 그대로) —
+            // 파일 값과 같아 안전하다.
+            var parentMoved = false
+            if let parentID = parentOf[id] {
+                let live = SceneDocument.composeLiveTransform(of: parentID, parentOf: parentOf) { ancestorID in
+                    guard let s = snapshot.layers[ancestorID] else { return nil }
+                    return SceneDocument.LayerTransform(
+                        origin: s.origin, scale: s.scale, rotation: s.angles.z,
+                        alpha: s.alpha, visible: s.visible)
+                }
+                if let target = scriptTargets[id],
+                   target.parentOrigin != live.origin || target.parentScale != live.scale
+                    || target.parentRotation != live.rotation {
+                    parentMoved = true
+                }
+                scriptTargets[id]?.parentOrigin = live.origin
+                scriptTargets[id]?.parentScale = live.scale
+                scriptTargets[id]?.parentRotation = live.rotation
+            }
+            guard appliedStates[id] != state || parentMoved else { continue }
             appliedStates[id] = state
             let applied = applyScriptState(state, to: id)
             if Self.scriptDebug {
