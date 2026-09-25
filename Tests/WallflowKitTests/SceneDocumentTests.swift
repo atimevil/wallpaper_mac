@@ -820,6 +820,82 @@ extension SceneDocumentTests {
         let child = try XCTUnwrap(doc.layers.first { $0.name == "자식" })
         XCTAssertFalse(child.visible, "부모가 숨으면 자식도 숨어야 한다")
     }
+
+    /// 그룹(`.group`) 자신도 부모 사슬의 변환을 합쳐야 한다 — `resolveTransforms`는
+    /// 파일의 id/parent만 보고 내용 종류는 안 따진다. 실물 3299228616의 "Clock Layer
+    /// 1"(그룹, origin이 부모 안 상대값)이 부모 246 안에 있고, 그 자식 "Clock 12"가
+    /// 다시 그 아래 있는 3단 사슬이다 — 중간 그룹이 origin을 안 옮겨도 회전·배율은
+    /// 반드시 내려가야 한다.
+    func testTransformComposesThroughNestedGroupObjects() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 246, "name": "grandparent", "origin": "100 200 0", "scale": "2 2 2"},
+           {"id": 210, "name": "Clock Layer 1", "parent": 246,
+            "angles": "0.00000 -0.00000 0.00000", "origin": "0.00037 0.00012 0.00000",
+            "locktransforms": true},
+           {"id": 312, "name": "Clock 12", "parent": 210, "origin": "0 -121 0",
+            "size": "10 10", "image": "models/x.json"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        let group = try XCTUnwrap(doc.layers.first { $0.id == 210 })
+        XCTAssertEqual(group.content, .group)
+        // 조부모(scale 2) → 그룹(거의 0,0) → 자식(로컬 0,-121) = (100, 200-242).
+        let clock = try XCTUnwrap(doc.layers.first { $0.id == 312 })
+        XCTAssertEqual(clock.origin.x, 100, accuracy: 0.01)
+        XCTAssertEqual(clock.origin.y, 200 - 242, accuracy: 0.01)
+        XCTAssertEqual(clock.scale.x, 2, accuracy: 0.001, "조부모의 배율까지 내려와야 한다")
+    }
+
+    /// 그룹이 `visible:false`면(WE 편집기에서 그룹을 접어 끄는 것과 같다) 자식도
+    /// 전부 숨어야 한다 — 실물 3509243656의 "MAIN"(solid 그룹) 아래 여러 레이어가
+    /// 이 모양이다.
+    func testGroupVisibilityHidesAllDescendants() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 1326, "name": "MAIN", "disablepropagation": false, "solid": true,
+            "visible": false},
+           {"id": 205, "name": "MAIN 0-0", "parent": 1326, "angles": "0 0 0",
+            "disablepropagation": false, "solid": true},
+           {"id": 999, "name": "leaf", "parent": 205, "origin": "0 0 0", "size": "1 1",
+            "image": "models/x.json"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        XCTAssertEqual(try XCTUnwrap(doc.layers.first { $0.id == 1326 }).content, .group)
+        XCTAssertFalse(try XCTUnwrap(doc.layers.first { $0.id == 999 }).visible,
+                       "그룹 두 단계 위가 꺼지면 잎 레이어도 꺼져야 한다")
+    }
+
+    /// `composeLiveTransform`은 파일이 아니라 **스크립트가 방금 바꿨을 수 있는**
+    /// 로컬 값을 받아 같은 식으로 합친다 — `SceneRenderer.apply`가 매 틱 이걸로
+    /// 그룹을 드래그한 스크립트의 결과를 자식에 내려보낸다(실물 "Clock Layer 1"의
+    /// 드래그 스크립트). 순수 함수라 Metal 없이도 여기서 확인할 수 있다.
+    func testComposeLiveTransformFollowsScriptMovedParent() {
+        // 210(그룹)이 246(조부모) 밑에 있고, 312(자식)이 210 밑에 있다 — 실물 사슬과 같다.
+        let parentOf: [Int: Int] = [210: 246, 312: 210]
+        func local(_ id: Int, groupOrigin: Vec3) -> SceneDocument.LayerTransform? {
+            switch id {
+            case 246: return .identity
+            case 210: return SceneDocument.LayerTransform(
+                origin: groupOrigin, scale: Vec3(x: 1, y: 1, z: 1),
+                rotation: 0, alpha: 1, visible: true)
+            default: return nil
+            }
+        }
+        // 씬을 열었을 때의 그룹 자리.
+        let atOpen = SceneDocument.composeLiveTransform(of: 210, parentOf: parentOf) {
+            local($0, groupOrigin: Vec3(x: 0, y: 0, z: 0))
+        }
+        XCTAssertEqual(atOpen.origin, Vec3(x: 0, y: 0, z: 0))
+        // 드래그 스크립트가 `thisLayer.origin`을 옮긴 뒤 — 자식이 물려받는 부모
+        // 자리(`composeLiveTransform(of: 자식의 parent, ...)`)도 같이 옮겨져야 한다.
+        let afterDrag = SceneDocument.composeLiveTransform(of: 210, parentOf: parentOf) {
+            local($0, groupOrigin: Vec3(x: 50, y: -30, z: 0))
+        }
+        XCTAssertEqual(afterDrag.origin, Vec3(x: 50, y: -30, z: 0),
+                       "그룹을 드래그하면 자식이 물려받을 부모 자리도 따라가야 한다")
+    }
 }
 
 extension SceneDocumentTests {
@@ -976,6 +1052,31 @@ extension SceneDocumentTests {
         """)).layers.first)
         XCTAssertEqual(layer.content, .postProcess)
         XCTAssertTrue(layer.effects.isEmpty)
+    }
+
+    /// 오브젝트에 `size`가 아예 없는데 모델 JSON이 `width`/`height`를 직접 박아
+    /// 두면 그걸 쓴다(실물 833227004·820654165 "Background" — `models/background.json`
+    /// 이 `{"width": 1920, "height": 1080}`). 안 그러면 배경이 통째로 "origin이나
+    /// size를 읽을 수 없다"로 버려진다.
+    func testModelDeclaredSizeIsUsedWhenObjectHasNoSize() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}},
+             "objects": [{"id": 1, "name": "Background", "image": "models/background.json",
+                          "origin": "960.000 540.000 0.000", "angles": "0 0 0",
+                          "scale": "1.500 1.500 1.500"}]}
+            """,
+            extras: [
+                "models/background.json":
+                    #"{"width": 1920, "height": 1080, "material": "materials/background.json"}"#,
+                "materials/background.json":
+                    #"{"passes": [{"shader": "genericimage4", "textures": ["t"]}]}"#,
+            ])).layers.first)
+        guard case .image = layer.content else {
+            return XCTFail("배경 이미지를 그려야 한다: \(layer.content)")
+        }
+        // scale 1.5가 모델이 준 1920×1080에 곱해져야 한다.
+        XCTAssertEqual(layer.size, Vec2(x: 1920 * 1.5, y: 1080 * 1.5))
     }
 
     /// 모델 JSON이 `"fullscreen": true`를 선언하는데 걸 이펙트가 없으면(실물

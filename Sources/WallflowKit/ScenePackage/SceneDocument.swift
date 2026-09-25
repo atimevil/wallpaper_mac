@@ -332,20 +332,89 @@ public struct SceneDocument: Sendable {
     }
 
     /// 레이어 하나의 최종 배치. 부모 사슬을 이미 합쳐 놓은 값이다.
-    struct LayerTransform {
-        var origin: Vec3
-        var scale: Vec3
+    ///
+    /// `public`이다 — 파일을 열 때(`resolveTransforms`)뿐 아니라, 스크립트가 그룹의
+    /// origin을 틱마다 옮길 때도 같은 합성식이 필요하다(`composeLiveTransform`,
+    /// `SceneRenderer.apply`가 쓴다). App은 WallflowKit을 보통 import로 쓰므로
+    /// 여기 노출돼야 재사용할 수 있다 — 안 그러면 같은 삼각함수 식을 App에 다시
+    /// 베껴 적어야 하고, 그러면 둘이 갈라질 때 아무도 못 알아챈다.
+    public struct LayerTransform: Equatable, Sendable {
+        public var origin: Vec3
+        public var scale: Vec3
         /// 화면 평면 회전(라디안). 실물에서 z 말고는 쓰이지 않는다.
-        var rotation: Double
+        public var rotation: Double
         /// 부모의 투명도가 곱해진 값.
-        var alpha: Double
+        public var alpha: Double
         /// 부모가 하나라도 숨겨져 있으면 false.
-        var visible: Bool
+        public var visible: Bool
 
-        static let identity = LayerTransform(
+        public init(origin: Vec3, scale: Vec3, rotation: Double, alpha: Double, visible: Bool) {
+            self.origin = origin; self.scale = scale; self.rotation = rotation
+            self.alpha = alpha; self.visible = visible
+        }
+
+        public static let identity = LayerTransform(
             origin: Vec3(x: 0, y: 0, z: 0),
             scale: Vec3(x: 1, y: 1, z: 1),
             rotation: 0, alpha: 1, visible: true)
+
+        /// 부모 변환 안에 놓인 자식의 화면 변환. 파일을 열 때와 틱마다 스크립트
+        /// 결과를 합칠 때가 정확히 같은 식을 써야 한다 — 갈라지면 스크립트가
+        /// 그룹을 움직인 프레임에서만 자식이 다른 자리로 튄다.
+        public static func compose(parent: LayerTransform, child: LayerTransform) -> LayerTransform {
+            let scaledX = child.origin.x * parent.scale.x
+            let scaledY = child.origin.y * parent.scale.y
+            let cosR = cos(parent.rotation), sinR = sin(parent.rotation)
+            return LayerTransform(
+                origin: Vec3(
+                    x: parent.origin.x + scaledX * cosR - scaledY * sinR,
+                    y: parent.origin.y + scaledX * sinR + scaledY * cosR,
+                    z: parent.origin.z + child.origin.z * parent.scale.z),
+                scale: Vec3(
+                    x: parent.scale.x * child.scale.x,
+                    y: parent.scale.y * child.scale.y,
+                    z: parent.scale.z * child.scale.z),
+                rotation: parent.rotation + child.rotation,
+                // **투명도는 부모에게서 물려받지 않는다.** 실물 픽셀 씬이 alpha 0인
+                // `solidlayer`를 닻으로 삼아 글자·달력 숫자를 그 밑에 매다는데,
+                // 곱해 버리면 그 패널이 전부 빈 채로 남는다(미리보기에는 다 보인다).
+                // 한때 곱했던 근거였던 음악 재생기 UI는 자식마다 자기 스크립트로 숨는다.
+                // 보임은 물려받는다 — 창을 숨기면 그 안의 글자도 사라진다.
+                alpha: child.alpha,
+                visible: parent.visible && child.visible)
+        }
+    }
+
+    /// `resolveTransforms`와 같은 사슬-합성이지만, 파일이 아니라 **지금** 값(스크립트가
+    /// 방금 옮겼을 수 있는 로컬 변환)을 받는다. 실물 "Clock Layer 1"(3299228616)처럼
+    /// 그룹 자체가 드래그 스크립트로 `thisLayer.origin`을 바꾸는 씬이 있다 — 그
+    /// 그룹의 화면 자리가 파일을 열 때 한 번 굳어 버리면 드래그해도 자식(시계
+    /// 숫자·막대)이 안 따라간다. `SceneRenderer.apply`가 틱마다 이걸 불러 스크립트
+    /// 대상의 `parentOrigin`/`parentScale`/`parentRotation`을 다시 굽는다.
+    ///
+    /// - Parameters:
+    ///   - id: 화면 자리를 구할 레이어.
+    ///   - parentOf: 자식 id → 부모 id.
+    ///   - local: 그 id의 **로컬**(부모 기준) 변환. 스크립트가 안 건드렸으면 파일의
+    ///     값과 같다 — 호출자가 스냅샷에서 가져온다. 없으면(끊긴 참조) identity로 본다.
+    public static func composeLiveTransform(
+        of id: Int, parentOf: [Int: Int], local: (Int) -> LayerTransform?
+    ) -> LayerTransform {
+        var chain: [Int] = [id]
+        var seen: Set<Int> = [id]
+        var current = id
+        // 파일 쪽과 같은 상한이다 — 고리 있는 parent를 돌다 멈추지 않는 사고를 막는다.
+        for _ in 0..<32 {
+            guard let parentID = parentOf[current], !seen.contains(parentID) else { break }
+            seen.insert(parentID)
+            chain.append(parentID)
+            current = parentID
+        }
+        var transform = LayerTransform.identity
+        for ancestorID in chain.reversed() {
+            transform = LayerTransform.compose(parent: transform, child: local(ancestorID) ?? .identity)
+        }
+        return transform
     }
 
     /// 오브젝트마다 부모 사슬을 따라 올라가며 변환을 합친다.
@@ -374,30 +443,6 @@ public struct SceneDocument: Sendable {
                 visible: boolValue(object["visible"]) ?? true)
         }
 
-        /// 부모 변환 안에 놓인 자식의 화면 변환.
-        func compose(parent: LayerTransform, child: LayerTransform) -> LayerTransform {
-            let scaledX = child.origin.x * parent.scale.x
-            let scaledY = child.origin.y * parent.scale.y
-            let cosR = cos(parent.rotation), sinR = sin(parent.rotation)
-            return LayerTransform(
-                origin: Vec3(
-                    x: parent.origin.x + scaledX * cosR - scaledY * sinR,
-                    y: parent.origin.y + scaledX * sinR + scaledY * cosR,
-                    z: parent.origin.z + child.origin.z * parent.scale.z),
-                scale: Vec3(
-                    x: parent.scale.x * child.scale.x,
-                    y: parent.scale.y * child.scale.y,
-                    z: parent.scale.z * child.scale.z),
-                rotation: parent.rotation + child.rotation,
-                // **투명도는 부모에게서 물려받지 않는다.** 실물 픽셀 씬이 alpha 0인
-                // `solidlayer`를 닻으로 삼아 글자·달력 숫자를 그 밑에 매다는데,
-                // 곱해 버리면 그 패널이 전부 빈 채로 남는다(미리보기에는 다 보인다).
-                // 한때 곱했던 근거였던 음악 재생기 UI는 자식마다 자기 스크립트로 숨는다.
-                // 보임은 물려받는다 — 창을 숨기면 그 안의 글자도 사라진다.
-                alpha: child.alpha,
-                visible: parent.visible && child.visible)
-        }
-
         var resolved: [Int: LayerTransform] = [:]
         for (id, object) in byID {
             // 사슬을 위로 모은 뒤 부모부터 차례로 합친다.
@@ -419,7 +464,7 @@ public struct SceneDocument: Sendable {
             }
             var transform = LayerTransform.identity
             for object in chain.reversed() {
-                transform = compose(parent: transform, child: local(object))
+                transform = LayerTransform.compose(parent: transform, child: local(object))
             }
             resolved[id] = transform
         }
@@ -487,7 +532,20 @@ public struct SceneDocument: Sendable {
             && transform.scale.x.isFinite && transform.scale.y.isFinite
         let origin = ownOriginParsed && composedIsFinite ? transform.origin : nil
         // 크기에도 scale이 곱해진다. 무시하면 실물 시계가 67% 크게 나온다.
-        let size = Self.scalarOrScripted(object["size"]).flatMap(Vec2.parse).map {
+        //
+        // 오브젝트에 size가 아예 없는데 모델 JSON 자체가 `width`/`height`를 박아
+        // 두는 경우가 있다(실물 833227004·820654165의 "Background" — 둘 다
+        // `models/background.json`이 `{"width": 1920, "height": 1080, ...}`다).
+        // 이걸 놓치면 이미지가 origin/size를 못 읽는 레이어로 버려진다 — 배경이
+        // 통째로 사라진다.
+        let modelDeclaredSize: Vec2? = (object["image"] as? String).flatMap { path in
+            guard let model = resolver.json(for: path),
+                  let w = (model["width"] as? NSNumber)?.doubleValue,
+                  let h = (model["height"] as? NSNumber)?.doubleValue,
+                  w > 0, h > 0 else { return nil }
+            return Vec2(x: w, y: h)
+        }
+        let size = (Self.scalarOrScripted(object["size"]).flatMap(Vec2.parse) ?? modelDeclaredSize).map {
             Vec2(x: $0.x * transform.scale.x, y: $0.y * transform.scale.y)
         }
         // 스크립트가 붙어 있는데 우리가 못 돌리는 경우를 사용자에게 알린다.
