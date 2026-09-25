@@ -4,19 +4,37 @@ import WallflowKit
 
 /// HTML/JS 배경화면을 WKWebView로 렌더한다.
 ///
-/// 정지는 페이지를 언로드하지 않는다(상태를 잃지 않기 위해). 대신 두 가지를 함께 한다:
-/// 1) document.getAnimations()로 문서의 모든 애니메이션(자식 엘리먼트 것 포함)을 멈추고,
-/// 2) 뷰를 isHidden=true로 감춘다. 비가시 뷰가 되면 WebKit이 그리기를 멈추고
-///    requestAnimationFrame 콜백도 더 이상 호출하지 않는다.
+/// 정지는 페이지를 언로드하지 않는다(상태를 잃지 않기 위해).
+/// document.getAnimations()로 문서의 모든 애니메이션(자식 엘리먼트 것 포함)을 멈춘다.
 ///
-/// 이 클래스는 rAF를 직접 후킹하지 않는다. rAF가 멎는 것은 isHidden의 결과다.
+/// **뷰는 절대 isHidden으로 감추지 않는다** — `SceneRenderer.apply(_:)`와 같은 이유다
+/// ("뷰를 숨기지 않는다. 마지막 프레임이 남아야 검은 화면이 되지 않는다"). 실물 앱에서
+/// 확인한 결정적 이유: `AppCoordinator`는 `power.start()`(가려짐 여부를 한 번 즉시
+/// poll한다)를 `restoreLastSelection()`(첫 배경화면을 붙인다)보다 **먼저** 부른다.
+/// 갓 만든 윈도우는 그 순간 `occlusionState`가 아직 `.visible`을 안 담고 있는 게
+/// 보통이라, 이 첫 poll은 거의 항상 `.paused`로 판정하고 `DisplayManager.lastDirective`에
+/// 그게 그대로 박힌다. 그러니 **모든 웹 배경화면은 붙자마자 `apply(.paused)`를 먼저
+/// 받는다** — 뷰를 숨기면 첫 프레임을 그리기도 전에 감춰져, 다음 poll(최대 5초 뒤,
+/// 이 컴퓨터가 바쁘면 더 늦게)이 되돌려 놓을 때까지 검은 창 배경(`WallpaperWindow`의
+/// `backgroundColor = .black`)만 보인다 — 실물 3개(1081733658/1748506393/893418273)가
+/// 정확히 이 경로로 흰/검은 화면이었다(로그의 첫 줄이 "가려져 멈춘다", 마지막 줄이
+/// "재개한다"인 이유).
+///
+/// 그 대가로, 가려진 동안 canvas/WebGL을 requestAnimationFrame으로 계속 그리는
+/// 페이지는 CSS 애니메이션과 달리 못 멈춘다(getAnimations()는 CSS만 본다).
+/// ponytail: rAF까지 가려짐에 맞춰 멈추려면 document-start에 rAF를 감싸는 스크립트가
+/// 더 필요하다 — 지금은 "검은 화면 없음"이 "가려진 동안 CPU 약간 더 씀"보다 우선이라
+/// 뒤로 미룬다.
 @MainActor
 final class WebRenderer: NSObject, WallpaperRenderer {
     private let item: WallpaperItem
     private var webView: WKWebView?
+    /// 지금 정지 상태인지. 오디오 디스패치를 건너뛰는 데만 쓴다 — 뷰 자체는
+    /// 가려짐과 상관없이 계속 보인다(위 클래스 설명 참고).
+    private var isPaused = false
     /// ~30Hz로 `wallpaperRegisterAudioListener` 콜백에 스펙트럼을 밀어 넣는다.
-    /// 감춰진 동안은 멎는다 — 애니메이션과 같은 이유다(뷰가 안 그리는데 계속
-    /// evaluateJavaScript를 부를 이유가 없다).
+    /// 정지 동안은 멎는다 — 어차피 페이지가 애니메이션을 멈춰 뒀으니 계속
+    /// evaluateJavaScript를 부를 이유가 없다.
     private var audioTimer: Timer?
 
     /// 페이지가 만드는 모든 video/audio 엘리먼트를 강제로 음소거한다.
@@ -90,6 +108,42 @@ final class WebRenderer: NSObject, WallpaperRenderer {
     })();
     """
 
+    /// `WALLFLOW_WEB_DEBUG`가 있으면 페이지의 console.log/warn/error와
+    /// window.onerror를 앱 stderr로 그대로 흘린다. 로그가 비어 있던 실물
+    /// 3개(1081733658/1748506393/893418273)를 실사용 창(WallpaperWindow, 데스크톱
+    /// 레벨) 안에서 진단하는 데 썼다 — 헤드리스 하네스에서는 안 보이던 문제가
+    /// 실제 창에서만 나서, 그 창 안의 콘솔을 직접 봐야 했다.
+    private static let webDebug = ProcessInfo.processInfo.environment["WALLFLOW_WEB_DEBUG"] != nil
+    private static let consoleMessageName = "wallflowConsole"
+    private static let consoleHookJS = """
+    (function() {
+        function send(level, args) {
+            try {
+                var parts = Array.prototype.slice.call(args).map(function (a) {
+                    try { return typeof a === 'string' ? a : JSON.stringify(a); }
+                    catch (e) { return String(a); }
+                });
+                window.webkit.messageHandlers.\(consoleMessageName).postMessage(
+                    level + ': ' + parts.join(' '));
+            } catch (e) {}
+        }
+        ['log', 'warn', 'error'].forEach(function (level) {
+            var orig = console[level];
+            console[level] = function () {
+                send(level, arguments);
+                if (orig) { orig.apply(console, arguments); }
+            };
+        });
+        window.addEventListener('error', function (e) {
+            send('onerror', [e.message, e.filename, e.lineno, e.colno,
+                (e.error && e.error.stack) || '']);
+        });
+        window.addEventListener('unhandledrejection', function (e) {
+            send('onunhandledrejection', [String(e.reason)]);
+        });
+    })();
+    """
+
     init(item: WallpaperItem) {
         self.item = item
         super.init()
@@ -99,6 +153,18 @@ final class WebRenderer: NSObject, WallpaperRenderer {
         let config = WKWebViewConfiguration()
         config.suppressesIncrementalRendering = false
         config.defaultWebpagePreferences.allowsContentJavaScript = true
+
+        // file://로 연 문서와 그게 불러오는 다른 file:// 리소스(같은 폴더의
+        // script.js, 텍스처 이미지 등)를 WebKit은 기본적으로 서로 다른 출처로
+        // 본다. 그러면 이미지를 WebGL 텍스처로 쓰려는 시도가 보안 예외로 막혀
+        // 스크립트가 그 자리에서 죽는다 — 실물 1748506393이 이 경로였다:
+        // LDR_RGB1_0.png를 텍스처로 로드하다 죽어서 update() 렌더 루프
+        // 진입 자체가 안 됐다(로그의 "Script error."가 그 흔적 — 이 키를
+        // 켜면 사라진다. WKWebView는 예외 message를 그대로 안 주고 출처가
+        // 갈리면 "Script error."로 뭉갠다). 비공개 키지만, file:// 콘텐츠를
+        // 여는 앱들이 널리 쓰는 표준적인 우회다 — allowingReadAccessTo로 이미
+        // 그 폴더 전체를 읽게 해 준 것과 같은 취지, 출처 판정만 맞춘다.
+        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
         // 배경화면은 소리를 내면 안 된다. 오디오가 있는 미디어는 사용자 제스처
         // 없이 재생될 수 없게 막는다. 음소거된 비디오는 오디오가 없는 것으로
@@ -129,6 +195,26 @@ final class WebRenderer: NSObject, WallpaperRenderer {
         // 이 메시지가 온다 — 그때만 소리가 필요한 렌더러로 등록한다.
         config.userContentController.add(self, name: WebEngineBridge.audioNeededMessageName)
 
+        if Self.webDebug {
+            config.userContentController.add(self, name: Self.consoleMessageName)
+            config.userContentController.addUserScript(WKUserScript(
+                source: Self.consoleHookJS, injectionTime: .atDocumentStart,
+                forMainFrameOnly: false))
+            // 페이지 자신의 스크립트가 돌기 전(atDocumentStart) 뷰포트 크기를 찍는다.
+            // 일부 페이지(1748506393)는 로드 시점의 canvas.clientWidth로 프레임버퍼를
+            // 만들고, 매 프레임 resizeCanvas()가 그 값이 바뀌면 프레임버퍼를 통째로
+            // 새로 만든다 — 로드 시점 크기가 최종 창 크기와 다르면 초기 스플랫이
+            // 사라진다.
+            config.userContentController.addUserScript(WKUserScript(
+                source: """
+                (function() {
+                    window.webkit.messageHandlers.\(Self.consoleMessageName).postMessage(
+                        'earlyViewport: ' + window.innerWidth + 'x' + window.innerHeight);
+                })();
+                """,
+                injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        }
+
         let view = WKWebView(frame: .zero, configuration: config)
         // drawsBackground는 비공개 프로퍼티라 쓰지 않는다.
         // 배경 윈도우가 이미 불투명 검정이므로 이것으로 충분하다.
@@ -155,6 +241,18 @@ final class WebRenderer: NSObject, WallpaperRenderer {
             let values = SceneRenderer.userPropertyValues(for: item)
             webView.evaluateJavaScript(WebEngineBridge.applyPropertiesJS(values))
             startAudioTimer()
+            if Self.webDebug {
+                // 뜨자마자는 아직 그릴 시간이 없다. 2초 뒤 실제로 뭐가
+                // 그려졌는지(캔버스 크기·픽셀 유무·WebGL 상태) 한 번 찍는다.
+                let debugItemID = item.id
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak webView] in
+                    webView?.evaluateJavaScript(WebEngineBridge.debugDiagnosticsJS) { result, error in
+                        FileHandle.standardError.write(Data(
+                            "[web \(debugItemID)] +2s diag=\(result ?? "nil") err=\(String(describing: error))\n"
+                                .utf8))
+                    }
+                }
+            }
         }
     }
 
@@ -167,7 +265,7 @@ final class WebRenderer: NSObject, WallpaperRenderer {
         audioTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) {
             [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, let webView = self.webView, !webView.isHidden else { return }
+                guard let self, let webView = self.webView, !self.isPaused else { return }
                 let silence = [Float](repeating: 0, count: 64)
                 let bands = SceneRenderer.audioBands[64] ?? (left: silence, right: silence)
                 webView.evaluateJavaScript(
@@ -179,12 +277,10 @@ final class WebRenderer: NSObject, WallpaperRenderer {
     func apply(_ directive: PlaybackDirective) {
         switch directive {
         case .paused:
-            // 감추기 전에 JS를 먼저 보낸다. 순서가 바뀌면 비가시 뷰에서
-            // 평가가 지연될 수 있다.
+            isPaused = true
             webView?.evaluateJavaScript(Self.pauseAnimationsJS)
-            webView?.isHidden = true
         case .playing:
-            webView?.isHidden = false
+            isPaused = false
             webView?.evaluateJavaScript(Self.resumeAnimationsJS)
         }
     }
@@ -200,6 +296,10 @@ final class WebRenderer: NSObject, WallpaperRenderer {
         // 있어 순환 참조로 이 렌더러가 절대 해제되지 않는다.
         webView?.configuration.userContentController
             .removeScriptMessageHandler(forName: WebEngineBridge.audioNeededMessageName)
+        if Self.webDebug {
+            webView?.configuration.userContentController
+                .removeScriptMessageHandler(forName: Self.consoleMessageName)
+        }
         webView?.stopLoading()
         // 델리게이트를 먼저 떼어낸다 — 안 떼면 이 빈 페이지의 didFinish가 다시
         // 걸려 applyUserProperties를 빈 문서에 헛되이 부르고 오디오 타이머를
@@ -221,8 +321,13 @@ extension WebRenderer: WKScriptMessageHandler {
         _ userContentController: WKUserContentController, didReceive message: WKScriptMessage
     ) {
         MainActor.assumeIsolated {
-            guard message.name == WebEngineBridge.audioNeededMessageName else { return }
-            SceneRenderer.setAudioNeeded(true, for: ObjectIdentifier(self))
+            if message.name == WebEngineBridge.audioNeededMessageName {
+                SceneRenderer.setAudioNeeded(true, for: ObjectIdentifier(self))
+                return
+            }
+            if message.name == Self.consoleMessageName {
+                FileHandle.standardError.write(Data("[web \(item.id)] \(message.body)\n".utf8))
+            }
         }
     }
 }

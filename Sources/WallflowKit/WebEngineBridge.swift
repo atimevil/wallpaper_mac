@@ -21,11 +21,27 @@ public enum WebEngineBridge {
     public static func propertiesJSON(_ values: [String: UserPropertyValue]) -> String {
         var wrapped: [String: Any] = [:]
         for (name, value) in values {
-            wrapped[name] = ["value": value.sceneJSONValue]
+            wrapped[name] = ["value": jsonValue(for: value)]
         }
         guard let data = try? JSONSerialization.data(withJSONObject: wrapped, options: [.sortedKeys]),
               let json = String(data: data, encoding: .utf8) else { return "{}" }
         return json
+    }
+
+    /// `UserProperty`는 콤보 값을 전부 문자열로 정규화해 둔다(씬 쪽의 JS 조건식
+    /// 평가, 예: `mode.value === "clock"`, 는 그래야 한다). 하지만 실물 WE는
+    /// project.json에 적힌 타입 그대로 보낸다 — 콤보 옵션 값이 숫자면 숫자로.
+    /// 실물 893418273의 `backgroundsource` 콤보가 project.json에 1~4 숫자로 있는데
+    /// 문자열 "1"로 보내면, 페이지의 `switch (properties.backgroundsource.value) {
+    /// case 1: ... }`가 (`"1" === 1`이 거짓이라) 전부 비교에 실패해 `imageBackground`
+    /// 같은 변수가 끝내 선언되지 않고 ReferenceError로 applyUserProperties 중간에
+    /// 죽는다 — 그 뒤에 오는 모든 속성 설정이 통째로 안 먹혔다. 숫자로 온전히
+    /// 파싱되는 문자열만 되돌린다 — "clock" 같은 진짜 문자열 콤보는 그대로 둔다.
+    private static func jsonValue(for value: UserPropertyValue) -> Any {
+        guard case .text(let s) = value else { return value.sceneJSONValue }
+        if let intValue = Int(s) { return intValue }
+        if let doubleValue = Double(s) { return doubleValue }
+        return s
     }
 
     /// 페이지가 다 뜬 뒤(딱 한 번) evaluate할 JS. 페이지가 자기 손으로
@@ -87,4 +103,38 @@ public enum WebEngineBridge {
         let values = combined.map { String(format: "%.4f", $0) }.joined(separator: ",")
         return "window.__wallflowDispatchAudio && window.__wallflowDispatchAudio([\(values)]);"
     }
+
+    /// `WALLFLOW_WEB_DEBUG`가 켜졌을 때, 페이지가 뜨고 잠시 뒤 실제로 뭔가
+    /// 그려졌는지 한 번에 찍어 보는 JS. 흰/검은 화면 신고가 들어오면 이걸로
+    /// canvas 크기·rAF 동작·실제 픽셀 유무·WebGL 상태를 한 번에 본다 —
+    /// 1748506393(유체 시뮬레이션) 진단에 실제로 썼다: canvas는 올바른 크기고
+    /// requestAnimationFrame도 매끄럽게 돌고 gl.getError()도 0인데, **전체
+    /// 캔버스를 스캔하면 픽셀이 한 개도 안 채워져 있었다** — 그리기 호출 자체는
+    /// 성공하는데 결과가 비어 있는, 셰이더/텍스처 포맷 수준의 문제라는 뜻이다
+    /// (원인은 못 찾았다 — 아래 첫 캔버스만 본다).
+    public static let debugDiagnosticsJS = """
+    (function() {
+        var c = document.querySelector('canvas');
+        if (!c) { return 'no-canvas'; }
+        var out = { size: c.width + 'x' + c.height, inner: window.innerWidth + 'x' + window.innerHeight };
+        try {
+            var snap = document.createElement('canvas');
+            snap.width = c.width; snap.height = c.height;
+            var ctx2d = snap.getContext('2d');
+            ctx2d.drawImage(c, 0, 0);
+            var full = ctx2d.getImageData(0, 0, c.width, c.height).data;
+            var maxRGB = 0, nonZeroPixels = 0;
+            for (var i = 0; i < full.length; i += 4) {
+                var m = Math.max(full[i], full[i + 1], full[i + 2]);
+                if (m > maxRGB) { maxRGB = m; }
+                if (m > 0) { nonZeroPixels++; }
+            }
+            out.maxRGB = maxRGB;
+            out.nonZeroPixels = nonZeroPixels + '/' + (full.length / 4);
+        } catch (e) { out.snapshotError = String(e); }
+        var gl = c.getContext('webgl2') || c.getContext('webgl');
+        out.gl = gl ? { lost: gl.isContextLost(), error: gl.getError() } : 'no-webgl';
+        return JSON.stringify(out);
+    })();
+    """
 }

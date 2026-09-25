@@ -17,6 +17,31 @@ final class WebEngineBridgeTests: XCTestCase {
         XCTAssertEqual(object["bloom_intensity"]?["value"] as? Double, 0.8)
     }
 
+    /// 실물 893418273의 `backgroundsource` 콤보는 project.json에 1~4 "숫자"로
+    /// 적혀 있다. `UserProperty`는 씬 조건식 평가를 위해 콤보를 전부 `.text(String)`로
+    /// 정규화해 두지만, 그걸 그대로 JSON 문자열로 보내면 페이지의
+    /// `switch (properties.backgroundsource.value) { case 1: ... }`가 `"1" === 1`이
+    /// 거짓이라 전부 비교에 실패해 그 안에서 설정하는 변수(`imageBackground`)가
+    /// 끝내 선언되지 않고 ReferenceError로 applyUserProperties 전체가 중간에
+    /// 죽는다(실물 앱에서 직접 관측). 숫자로 온전히 파싱되는 문자열은 JSON 숫자로
+    /// 되돌려야 한다.
+    func testNumericComboValueIsSentAsJSONNumberNotString() throws {
+        let json = WebEngineBridge.propertiesJSON(["backgroundsource": .text("1")])
+        let data = try XCTUnwrap(json.data(using: .utf8))
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: [String: Any]])
+        XCTAssertEqual(object["backgroundsource"]?["value"] as? Int, 1)
+        XCTAssertNil(object["backgroundsource"]?["value"] as? String,
+            "숫자로 파싱되면 문자열로 남으면 안 된다")
+    }
+
+    /// 진짜 문자열 콤보("clock"/"orbs" 같은)는 그대로 문자열로 남아야 한다 —
+    /// 숫자로 안 파싱되니 위 되돌리기가 손대지 않는다.
+    func testNonNumericComboValueStaysString() throws {
+        let json = WebEngineBridge.propertiesJSON(["mode": .text("clock")])
+        XCTAssertTrue(json.contains("\"clock\""), json)
+    }
+
     /// 실물 스크립트(1748506393/script.js:87)가 `properties.background_color.value.split(" ")`로
     /// 읽는다 — 색은 공백으로 나눈 "r g b" 문자열이어야 한다.
     func testColorPropertyIsSpaceSeparated() throws {
