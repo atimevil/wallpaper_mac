@@ -233,7 +233,7 @@ extension ParticleOperatorTests {
             with: Data(json.utf8)) as? [String: Any])
         let preset = try XCTUnwrap(ParticlePreset.parse(object))
         XCTAssertEqual(preset.operators.count, 2)
-        guard case .remapValue(let output, _, let scale, let lo, let hi) = preset.operators[0]
+        guard case .remapValue(let output, _, let scale, let lo, let hi, _) = preset.operators[0]
         else { return XCTFail("remapvalue여야 한다") }
         XCTAssertEqual(output, .velocity)
         XCTAssertEqual(scale, 10)
@@ -242,7 +242,7 @@ extension ParticleOperatorTests {
 
         // 실물 rain_screen*.json이 4곳에서 쓰는 두 번째 연산자. `output: "speed"`는
         // 속도의 크기만 바꾸는 출력이고, 이제 넣었으니 더 이상 못 넣는 목록에 없다.
-        guard case .remapValue(let output2, _, let scale2, let lo2, let hi2) = preset.operators[1]
+        guard case .remapValue(let output2, _, let scale2, let lo2, let hi2, _) = preset.operators[1]
         else { return XCTFail("remapvalue여야 한다") }
         XCTAssertEqual(output2, .speed)
         XCTAssertEqual(scale2, 8)
@@ -264,7 +264,7 @@ extension ParticleOperatorTests {
                                            max: Vec3(x: 3, y: 4, z: 0))],
             operators: [.remapValue(output: .speed, transform: .noise, inputScale: 8,
                                     outputMin: Vec3(x: 10, y: 10, z: 10),
-                                    outputMax: Vec3(x: 10, y: 10, z: 10))],
+                                    outputMax: Vec3(x: 10, y: 10, z: 10), input: .none)],
             burst: 8)
         system.update(deltaTime: 1.0 / 60)
         XCTAssertFalse(system.particles.isEmpty)
@@ -285,7 +285,7 @@ extension ParticleOperatorTests {
             operators: [.movement(gravity: Vec3(x: 0, y: 0, z: 0), drag: 0),
                         .remapValue(output: .velocity, transform: .noise, inputScale: 10,
                                     outputMin: Vec3(x: -200, y: -100, z: 0),
-                                    outputMax: Vec3(x: 200, y: -1000, z: 0))],
+                                    outputMax: Vec3(x: 200, y: -1000, z: 0), input: .none)],
             burst: 16)
         system.update(deltaTime: 1.0 / 60)
         let speeds = system.particles.map(\.velocity.y)

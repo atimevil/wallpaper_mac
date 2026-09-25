@@ -156,10 +156,18 @@ public final class ParticleSystem {
                Self.unresolvableControlPoint(point, in: preset) {
                 unimplemented.insert("controlpointattract(제어점 \(point))")
             }
-            // 우리가 안 넣는 출력은 이름과 함께 남긴다.
-            if case .remapValue(let output, _, _, _, _) = op,
-               case .unsupported(let name) = output {
-                unimplemented.insert("remapvalue(\(name))")
+            // 우리가 안 넣는 출력·입력은 이름과 함께 남긴다.
+            if case .remapValue(let output, _, _, _, _, let input) = op {
+                if case .unsupported(let name) = output {
+                    unimplemented.insert("remapvalue(\(name))")
+                }
+                if case .unsupported(let name) = input {
+                    unimplemented.insert("remapvalue(입력 \(name))")
+                }
+                if case .distanceToControlPoint(let point, _, _) = input,
+                   Self.unresolvableControlPoint(point, in: preset) {
+                    unimplemented.insert("remapvalue(제어점 \(point))")
+                }
             }
             if case .maintainDistanceToControlPoint(let point, _) = op,
                Self.unresolvableControlPoint(point, in: preset) {
@@ -188,6 +196,23 @@ public final class ParticleSystem {
                     unimplemented.insert("mapsequencebetweencontrolpoints(arc)")
                 }
             }
+            if case .remapInitialValue(let output, let input, _, _) = initializer {
+                if case .unsupported(let name) = output {
+                    unimplemented.insert("remapinitialvalue(\(name))")
+                }
+                if case .unsupported(let name) = input {
+                    unimplemented.insert("remapinitialvalue(입력 \(name))")
+                }
+                if case .distanceToControlPoint(let point, _, _) = input,
+                   Self.unresolvableControlPoint(point, in: preset) {
+                    unimplemented.insert("remapinitialvalue(제어점 \(point))")
+                }
+            }
+            if case .remapInitialValueMultiplyUnsupported = initializer {
+                // output 필드가 없어 무엇을 곱하는지 실물만으로 알 수 없다
+                // (타입 선언부 주석 참고).
+                unimplemented.insert("remapinitialvalue(multiply)")
+            }
         }
         for emitter in preset.emitters {
             // 이미터가 못 푸는 제어점을 쓰면 뿌리는 자리는 원점으로 물러난다
@@ -203,14 +228,14 @@ public final class ParticleSystem {
         self.hasSizeCurve = preset.operators.contains {
             switch $0 {
             case .sizeChange, .oscillateSize: return true
-            case .remapValue(let output, _, _, _, _): return output == .size
+            case .remapValue(let output, _, _, _, _, _): return output == .size
             default: return false
             }
         }
         self.hasAlphaCurve = preset.operators.contains {
             switch $0 {
             case .alphaFade, .alphaChange, .oscillateAlpha: return true
-            case .remapValue(let output, _, _, _, _): return output == .opacity
+            case .remapValue(let output, _, _, _, _, _): return output == .opacity
             default: return false
             }
         }
@@ -808,6 +833,50 @@ public final class ParticleSystem {
                 x: particle.position.x + field.x * distance,
                 y: particle.position.y + field.y * distance,
                 z: particle.position.z + field.z * distance)
+
+        case .remapInitialValue(let output, let input, let outputMin, let outputMax):
+            // remapValue와 같은 식이지만 태어날 때 한 번만 돈다 — transform이
+            // 없다(실물이 한 번도 안 쓴다, 타입 선언부 주석 참고).
+            let t: Double
+            switch input {
+            case .none, .particleSystemTime:
+                // 실물 remapinitialvalue는 이 둘을 안 쓴다 — 값을 못 정하니
+                // 손대지 않는다.
+                return
+            case .distanceToControlPoint(let controlPoint, let rangeMin, let rangeMax):
+                guard let center = controlPointPosition(controlPoint) else { return }
+                let delta = Vec3(x: particle.position.x - center.x,
+                                 y: particle.position.y - center.y,
+                                 z: particle.position.z - center.z)
+                let distance = Self.length(delta)
+                let span = rangeMax - rangeMin
+                t = span > 1e-9 ? min(max((distance - rangeMin) / span, 0), 1) : 0
+            case .unsupported:
+                return
+            }
+            let value = Vec3(
+                x: outputMin.x + (outputMax.x - outputMin.x) * t,
+                y: outputMin.y + (outputMax.y - outputMin.y) * t,
+                z: outputMin.z + (outputMax.z - outputMin.z) * t)
+            switch output {
+            case .velocity: particle.velocity = value
+            case .opacity: particle.alpha = min(max(value.x, 0), 1)
+            case .size: particle.size = max(0, value.x)
+            case .color: particle.color = value
+            case .speed:
+                let vx = particle.velocity.x, vy = particle.velocity.y, vz = particle.velocity.z
+                let magnitude = (vx * vx + vy * vy + vz * vz).squareRoot()
+                if magnitude > 1e-9 {
+                    let scale = value.x / magnitude
+                    particle.velocity = Vec3(x: vx * scale, y: vy * scale, z: vz * scale)
+                }
+            case .unsupported:
+                break
+            }
+
+        case .remapInitialValueMultiplyUnsupported:
+            // 생성자가 이미 이름과 함께 보고했다.
+            break
         }
     }
 
@@ -1134,21 +1203,41 @@ public final class ParticleSystem {
                 z: particle.velocity.z + tangent.z / tangentLength * speed * dt)
 
         case .remapValue(let output, let transform, let inputScale,
-                         let outputMin, let outputMax):
-            // 0~1 하나를 만들어 범위에 옮긴다. 파티클마다 다른 씨앗을 쓰고
-            // 시간에 따라 천천히 흐르게 한다 — 유리창의 물방울이 저마다 다른
-            // 속도로 흘러내리는 모양이 이것이다.
+                         let outputMin, let outputMax, let input):
+            // 0~1 하나를 만들어 범위에 옮긴다.
             //
-            // **입력을 고르는 부분은 아직 없다.** 실물이 쓰는 둘 다 입력 없이
-            // 잡음만 쓴다. 그리고 `simplexnoise`와 `fbmnoise`는 결이 다르지만
-            // 우리 잡음 하나로 받는다 — 흐르는 모양은 나오지만 같지는 않다.
-            let seed = Self.hash(particle.frameSeed, 41) * 64
+            // `simplexnoise`와 `fbmnoise`는 결이 다르지만 우리 잡음 하나로
+            // 받는다 — 흐르는 모양은 나오지만 같지는 않다.
             let t: Double
-            switch transform {
-            case .sine:
-                t = 0.5 + 0.5 * sin(elapsed * inputScale + seed)
-            case .noise:
-                t = 0.5 + 0.5 * Self.noise(seed, elapsed * inputScale * 0.05, 0)
+            switch input {
+            case .none:
+                // 안 적으면(실물 대다수) 파티클마다 다른 씨앗을 쓰고 시간에
+                // 따라 천천히 흐르게 한다 — 유리창의 물방울이 저마다 다른
+                // 속도로 흘러내리는 모양이 이것이다.
+                let seed = Self.hash(particle.frameSeed, 41) * 64
+                switch transform {
+                case .sine: t = 0.5 + 0.5 * sin(elapsed * inputScale + seed)
+                case .noise: t = 0.5 + 0.5 * Self.noise(seed, elapsed * inputScale * 0.05, 0)
+                }
+            case .particleSystemTime:
+                // 시스템 전체가 같은 시각을 쓴다 — 파티클별 씨앗을 안 섞는다
+                // (실물 thunderbolt.json — 번개 전체가 함께 깜빡인다).
+                switch transform {
+                case .sine: t = 0.5 + 0.5 * sin(elapsed * inputScale)
+                case .noise: t = 0.5 + 0.5 * Self.noise(0, elapsed * inputScale * 0.05, 0)
+                }
+            case .distanceToControlPoint(let controlPoint, let rangeMin, let rangeMax):
+                // 거리를 그대로(잡음 없이) 0~1로 정규화한다 — 타입 선언부
+                // 주석 참고. 제어점을 못 풀면(생성자가 이미 보고했다) 이번
+                // 프레임은 손대지 않는다.
+                guard let center = controlPointPosition(controlPoint) else { return }
+                let delta = Self.subtract(particle.position, center)
+                let distance = Self.length(delta)
+                let span = rangeMax - rangeMin
+                t = span > 1e-9 ? min(max((distance - rangeMin) / span, 0), 1) : 0
+            case .unsupported:
+                // 여기 오면 생성자가 이미 이름과 함께 보고했다.
+                return
             }
             let value = Vec3(
                 x: outputMin.x + (outputMax.x - outputMin.x) * t,

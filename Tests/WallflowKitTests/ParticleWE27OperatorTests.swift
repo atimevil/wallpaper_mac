@@ -359,6 +359,64 @@ final class ParticleWE27OperatorTests: XCTestCase {
         advance(system, seconds: 0.5)
         XCTAssertGreaterThan(system.aliveCount, 0, "판 밖은 충돌하면 안 된다")
     }
+
+    // MARK: remapValue input
+
+    /// 실물 `remapvalue` 창작마당 미리보기 그대로 — 제어점에 가까우면 한 색,
+    /// 멀면(inputrangemax:200) 다른 색이어야 한다. 잡음/사인을 안 거친다.
+    func testRemapValueDistanceToControlPointGivesSpatialGradient() throws {
+        let cp1 = ParticleControlPoint(id: 1, offset: Vec3(x: 0, y: 0, z: 0), flags: 0)
+        let close = self.system(
+            operators: [.remapValue(
+                output: .color, transform: .noise, inputScale: 1,
+                outputMin: Vec3(x: 1, y: 0, z: 0), outputMax: Vec3(x: 0, y: 0, z: 1),
+                input: .distanceToControlPoint(controlPoint: 1, rangeMin: 150, rangeMax: 200))],
+            controlPoints: [cp1], burst: 1, emitterDistance: 0)
+        close.update(deltaTime: Self.step)
+        let closeParticle = try XCTUnwrap(close.particles.first)
+        XCTAssertEqual(closeParticle.color, Vec3(x: 1, y: 0, z: 0), "가까우면(0<150) 아래쪽 범위")
+
+        let far = self.system(
+            operators: [.remapValue(
+                output: .color, transform: .noise, inputScale: 1,
+                outputMin: Vec3(x: 1, y: 0, z: 0), outputMax: Vec3(x: 0, y: 0, z: 1),
+                input: .distanceToControlPoint(controlPoint: 1, rangeMin: 150, rangeMax: 200))],
+            controlPoints: [cp1], burst: 1, emitterDistance: 300)
+        far.update(deltaTime: Self.step)
+        let farParticle = try XCTUnwrap(far.particles.first)
+        XCTAssertEqual(farParticle.color, Vec3(x: 0, y: 0, z: 1), "멀면(300>200) 위쪽 범위")
+    }
+
+    /// 실물 `thunderbolt.json` 그대로 — 시스템 전체가 같은 시각을 써서 모든
+    /// 파티클이 같은 알파를 받아야 한다(파티클마다 다르게 흔들리면 안 된다).
+    func testRemapValueParticleSystemTimeIsSharedAcrossParticles() throws {
+        let system = self.system(
+            operators: [.remapValue(
+                output: .opacity, transform: .sine, inputScale: 6,
+                outputMin: Vec3(x: 0, y: 0, z: 0), outputMax: Vec3(x: 1, y: 1, z: 1),
+                input: .particleSystemTime)],
+            burst: 8, random: SeededRandom(seed: 9))
+        system.update(deltaTime: Self.step)
+        let alphas = Set(system.particles.map { ($0.alpha * 1000).rounded() })
+        XCTAssertEqual(alphas.count, 1, "시스템 시간은 파티클마다 안 갈려야 한다: \(alphas)")
+    }
+
+    /// `remapinitialvalue`는 태어날 때 한 번만 값을 정한다 — 실물 창작마당
+    /// 미리보기 그대로(제어점 1에서 300 거리까지 빨강→파랑).
+    func testRemapInitialValueSetsColorOnceAtSpawn() throws {
+        let cp1 = ParticleControlPoint(id: 1, offset: Vec3(x: 0, y: 0, z: 0), flags: 0)
+        let system = self.system(
+            initializers: [.remapInitialValue(
+                output: .color,
+                input: .distanceToControlPoint(controlPoint: 1, rangeMin: 0, rangeMax: 300),
+                outputMin: Vec3(x: 0, y: 0, z: 1), outputMax: Vec3(x: 1, y: 0, z: 0))],
+            controlPoints: [cp1], burst: 1, emitterDistance: 150)
+        system.update(deltaTime: Self.step)
+        let particle = try XCTUnwrap(system.particles.first)
+        // 150/300 = 0.5 지점이라 중간색이어야 한다.
+        XCTAssertEqual(particle.color.x, 0.5, accuracy: 0.05)
+        XCTAssertEqual(particle.color.z, 0.5, accuracy: 0.05)
+    }
 }
 
 /// `renderer`/`operator`/`initializer` JSON 파싱 — 실물 값 그대로.
@@ -532,20 +590,43 @@ final class ParticleWE27ParsingTests: XCTestCase {
     func testStillUnsupportedNamesAreReported() throws {
         let json = try XCTUnwrap(preset("""
         {"material":"m.json","maxcount":10,
-         "operator":[{"id":1,"name":"collisionmodel"},{"id":2,"name":"collisionbounds"},
-                     {"id":3,"name":"inheritvaluefromevent"}],
-         "initializer":[{"id":4,"name":"inheritcontrolpointvelocity"},
-                        {"id":5,"name":"remapinitialvalue"},
-                        {"id":6,"name":"inheritinitialvaluefromevent"}],
+         "operator":[{"id":1,"name":"collisionmodel"},{"id":2,"name":"collisionbounds"}],
          "emitter":[{"id":7,"name":"layerimage","rate":10}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        for name in ["collisionmodel", "collisionbounds", "inheritvaluefromevent",
-                     "inheritcontrolpointvelocity", "remapinitialvalue",
-                     "inheritinitialvaluefromevent", "layerimage"] {
+        for name in ["collisionmodel", "collisionbounds", "layerimage"] {
             XCTAssertTrue(p.unsupportedNames.contains(name), "\(name)이 빠졌다")
         }
         XCTAssertTrue(p.malformedNames.isEmpty)
+    }
+
+    /// `remapinitialvalue`는 이제 `operation: "remap"`을 구현한다 — 더 이상
+    /// unsupportedNames가 아니다. `operation: "multiply"`(실물
+    /// `thunderbolt_beam_child.json`)는 output 필드가 없어 여전히 안 넣는다.
+    func testRemapInitialValueIsNoLongerUnsupportedButMultiplyStillIs() throws {
+        let remapJSON = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"id":9,"input":"distancetocontrolpoint","inputcontrolpoint0":1,
+                        "inputrangemax":300,"name":"remapinitialvalue","operation":"remap",
+                        "output":"color","outputrangemax":"1 0 0","outputrangemin":"0 0 1"}]}
+        """))
+        let remapPreset = try XCTUnwrap(ParticlePreset.parse(remapJSON))
+        XCTAssertFalse(remapPreset.unsupportedNames.contains("remapinitialvalue"))
+        XCTAssertEqual(remapPreset.initializers, [.remapInitialValue(
+            output: .color, input: .distanceToControlPoint(controlPoint: 1, rangeMin: 0, rangeMax: 300),
+            outputMin: Vec3(x: 0, y: 0, z: 1), outputMax: Vec3(x: 1, y: 0, z: 0))])
+
+        let multiplyJSON = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"id":23,"input":"distancetocontrolpoint","inputcontrolpoint0":1,
+                        "inputrangemax":50,"operation":"multiply","name":"remapinitialvalue"}]}
+        """))
+        let multiplyPreset = try XCTUnwrap(ParticlePreset.parse(multiplyJSON))
+        XCTAssertFalse(multiplyPreset.unsupportedNames.contains("remapinitialvalue"),
+                       "아는 이름이라 malformed/unsupported는 아니다")
+        XCTAssertEqual(multiplyPreset.initializers, [.remapInitialValueMultiplyUnsupported])
+        let system = ParticleSystem(preset: multiplyPreset, random: SeededRandom(seed: 1))
+        XCTAssertEqual(system.unimplementedOperators, ["remapinitialvalue(multiply)"])
     }
 }
 
