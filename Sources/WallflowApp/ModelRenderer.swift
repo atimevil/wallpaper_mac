@@ -74,7 +74,12 @@ final class ModelRenderer {
         clearColor: SIMD4<Float> = SIMD4(0, 0, 0, 1),
         ambient: SIMD3<Float> = SIMD3(repeating: 0.302),
         skylight: SIMD3<Float> = SIMD3(repeating: 1),
-        lights: [(origin: Vec3, angles: Vec3, info: LightInfo)] = []
+        lights: [(origin: Vec3, angles: Vec3, info: LightInfo)] = [],
+        /// 씬의 `general.hdr`. 켜져 있으면 재질 셰이더의 `HDR` 콤보를 켜고
+        /// (`common_pbr_2.h`의 `CombineLighting` `#if HDR` 분기 — 밝기를 곱하고
+        /// 이미시브 오버브라이트를 더한다), 파이프라인 색 포맷을 `rgba16Float`로
+        /// 만들어 그 값이 1을 넘어도 오프스크린에서 안 잘리게 한다.
+        hdr: Bool = false
     ) throws {
         self.ambient = ambient
         self.skylight = skylight
@@ -144,6 +149,10 @@ final class ModelRenderer {
         let directionalLight = lights.first { $0.info.kind == .directional }
         if pointLight != nil { combos["LIGHTS_POINT"] = 1 }
         if directionalLight != nil { combos["LIGHTS_DIRECTIONAL"] = 1 }
+        // `#define HDR 0`은 절대 넣지 않는다 — `common_blending.h`는 `#ifdef HDR`를
+        // 쓰므로, 0을 정의하면 정의 자체가 있다는 뜻이 되어 비HDR 씬의 동작이
+        // 바뀐다. 값을 안 주는 것과 0을 주는 것이 다르다.
+        if hdr { combos["HDR"] = 1 }
         self.pointLight = pointLight
         self.directionalLight = directionalLight
         let defines = combos.sorted { $0.key < $1.key }
@@ -159,7 +168,7 @@ final class ModelRenderer {
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = vertexFunction
         descriptor.fragmentFunction = fragmentFunction
-        descriptor.colorAttachments[0].pixelFormat = MetalCompositor.colorPixelFormat
+        descriptor.colorAttachments[0].pixelFormat = hdr ? .rgba16Float : MetalCompositor.colorPixelFormat
         descriptor.colorAttachments[0].isBlendingEnabled = true
         descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
         descriptor.colorAttachments[0].destinationRGBBlendFactor =
