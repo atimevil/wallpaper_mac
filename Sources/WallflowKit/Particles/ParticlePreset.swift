@@ -175,6 +175,19 @@ public enum ParticleInitializer: Equatable, Sendable {
     /// `remapinitialvalue`의 `operation: "multiply"` — output이 없어 모델링
     /// 안 한다. 이름을 들고 있다가 보고한다.
     case remapInitialValueMultiplyUnsupported
+    /// 제어점의 프레임 간 이동으로 낸 속도를 새로 나는 파티클에 준다(WE 2.7,
+    /// "applies the movement speed and direction of a control point to newly
+    /// spawned particles"). 실물 창작마당 미리보기 — `controlpoint`·`min`·`max`
+    /// (제어점 속도에 곱하는 배율의 난수 범위, `min:0.3, max:1`). 번호를 안
+    /// 적으면 0번(다른 제어점 초기화자들과 같은 관례), 배율을 안 적으면
+    /// 1~1(그대로).
+    case inheritControlPointVelocity(controlPoint: Int, scaleMin: Double, scaleMax: Double)
+    /// 태어날 때 **한 번** 부모 파티클의 색·크기·알파·속도를 그대로 받는다
+    /// (WE 2.7, "copy certain parent particle properties onto their children
+    /// ... color, size or opacity"). 실물 창작마당 미리보기가 필드를 하나도
+    /// 안 적는다 — 무엇 하나를 고르는 필드가 없어 넷 다 옮긴다. 부모가 없으면
+    /// (예: `once` 자식, 부모 파티클 하나에 안 묶인다) 아무것도 안 한다.
+    case inheritInitialValueFromEvent
 }
 public enum ParticleOperator: Equatable, Sendable {
     case movement(gravity: Vec3, drag: Double)
@@ -293,9 +306,18 @@ public enum ParticleOperator: Equatable, Sendable {
     /// `maxLength` 부재 처리와 같은 "안전한 무효과" 기본값)으로 둔다. 씬이
     /// 반지름을 적으면 그 값을 쓴다.
     case collisionSphere(origin: Vec3, radius: Double, behavior: ParticleCollisionBehavior)
-    /// 사각 판과 충돌한다(WE 2.7) — 한쪽 면에서만 막는다(문서: "one side").
-    /// `axis`는 collisionPlane과 같은 이유로 기본 Y.
+    /// 사각 판과 충돌한다(WE 2.7) — 한쪽 면에서만 막는다(문서: "Since the
+    /// collision only occurs from one side, you can use -1 to switch the
+    /// side"). 별도 필드가 아니라 **axis의 부호**로 막는 쪽을 바꾼다 — "-1"은
+    /// axis 성분에 음수를 넣으라는 뜻으로 읽었다(실물에 반대쪽 예가 없어
+    /// 확정할 수는 없지만, 문서가 새 필드 이름을 안 주고 "-1을 쓰라"고만
+    /// 적어 axis 부호 말고 다른 자리가 없다). `axis`는 collisionPlane과 같은
+    /// 이유로 기본 Y.
     case collisionQuad(origin: Vec3, axis: Vec3, size: Vec2, behavior: ParticleCollisionBehavior)
+    /// `follow` 자식이 매 프레임 부모 파티클의 색·크기·알파·속도를 그대로
+    /// 받는다(WE 2.7) — `inheritInitialValueFromEvent`의 매 프레임 판. 실물
+    /// 창작마당 미리보기가 필드를 하나도 안 적는다.
+    case inheritValueFromEvent
 }
 
 /// 충돌 연산자 네 가지가 공유하는 충돌 후 동작(WE 2.7 문서: Bounce/Slide/
@@ -965,7 +987,8 @@ public struct ParticlePreset: Equatable, Sendable {
             "lifetimerandom", "sizerandom", "alpharandom", "velocityrandom",
             "colorrandom", "rotationrandom", "angularvelocityrandom", "turbulentvelocityrandom",
             "mapsequencearoundcontrolpoint", "mapsequencebetweencontrolpoints", "colorlist",
-            "hsvcolorrandom", "positionoffsetrandom", "remapinitialvalue"
+            "hsvcolorrandom", "positionoffsetrandom", "remapinitialvalue",
+            "inheritcontrolpointvelocity", "inheritinitialvaluefromevent"
         ])
         let knownOperatorNames = Set<String>([
             "movement", "angularmovement", "alphafade", "alphachange", "sizechange",
@@ -973,7 +996,7 @@ public struct ParticlePreset: Equatable, Sendable {
             "turbulence", "vortex", "vortex_v2", "remapvalue", "controlpointattract",
             "capvelocity", "maintaindistancebetweencontrolpoints", "maintaindistancetocontrolpoint",
             "reducemovementnearcontrolpoint", "boids", "collisionplane", "collisionsphere",
-            "collisionquad"
+            "collisionquad", "inheritvaluefromevent"
         ])
 
         // Parse maxCount with clamping
@@ -1410,6 +1433,16 @@ public struct ParticlePreset: Equatable, Sendable {
                     rangeMin: inputRangeMin, rangeMax: inputRangeMax),
                 outputMin: range("outputrangemin", 0), outputMax: range("outputrangemax", 1))
 
+        case "inheritcontrolpointvelocity":
+            let controlPoint = getInt(dict["controlpoint"]) ?? 0
+            let scaleMin = getDouble(dict["min"]) ?? 1
+            let scaleMax = getDouble(dict["max"]) ?? 1
+            return .inheritControlPointVelocity(
+                controlPoint: controlPoint, scaleMin: scaleMin, scaleMax: scaleMax)
+
+        case "inheritinitialvaluefromevent":
+            return .inheritInitialValueFromEvent
+
         default:
             return nil
         }
@@ -1657,6 +1690,9 @@ public struct ParticlePreset: Equatable, Sendable {
             let behavior = ParticleCollisionBehavior.parse(
                 dict["collisionbehavior"], bounceFactor: bounceFactor)
             return .collisionQuad(origin: origin, axis: axis, size: size, behavior: behavior)
+
+        case "inheritvaluefromevent":
+            return .inheritValueFromEvent
 
         default:
             return nil

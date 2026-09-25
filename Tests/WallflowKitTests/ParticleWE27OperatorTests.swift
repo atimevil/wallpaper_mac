@@ -360,6 +360,39 @@ final class ParticleWE27OperatorTests: XCTestCase {
         XCTAssertGreaterThan(system.aliveCount, 0, "판 밖은 충돌하면 안 된다")
     }
 
+    /// 문서: "Since the collision only occurs from one side, you can use -1
+    /// to switch the side" — 별도 필드가 아니라 axis 부호로 막는 쪽이
+    /// 갈린다. 같은 판이라도 axis를 반대로 두면 반대쪽에서 오는 파티클을
+    /// 막아야 한다.
+    func testCollisionQuadAxisSignFlipsBlockedSide() throws {
+        // axis (0,1,0): 위에서 떨어지는(음의 y 속도) 파티클을 막아야 한다.
+        let fromAbove = self.system(
+            initializers: [.velocityRandom(min: Vec3(x: 0, y: -1000, z: 0),
+                                           max: Vec3(x: 0, y: -1000, z: 0)),
+                           .lifetimeRandom(min: 100, max: 100)],
+            operators: [.movement(gravity: Vec3(x: 0, y: 0, z: 0), drag: 0),
+                        .collisionQuad(origin: Vec3(x: 0, y: -50, z: 0),
+                                       axis: Vec3(x: 0, y: 1, z: 0),
+                                       size: Vec2(x: 1000, y: 1000), behavior: .delete)],
+            burst: 1, emitterDistance: 0)
+        advance(fromAbove, seconds: 0.5)
+        XCTAssertEqual(fromAbove.aliveCount, 0, "위에서 오면 axis (0,1,0)이 막아야 한다")
+
+        // axis (0,-1,0): 반대로 뒤집으면 같은 판인데도 아래에서 떨어지는
+        // 파티클(위로 솟구치는)을 대신 막아야 한다 — 위에서 오는 건 안 막는다.
+        let flipped = self.system(
+            initializers: [.velocityRandom(min: Vec3(x: 0, y: -1000, z: 0),
+                                           max: Vec3(x: 0, y: -1000, z: 0)),
+                           .lifetimeRandom(min: 100, max: 100)],
+            operators: [.movement(gravity: Vec3(x: 0, y: 0, z: 0), drag: 0),
+                        .collisionQuad(origin: Vec3(x: 0, y: -50, z: 0),
+                                       axis: Vec3(x: 0, y: -1, z: 0),
+                                       size: Vec2(x: 1000, y: 1000), behavior: .delete)],
+            burst: 1, emitterDistance: 0)
+        advance(flipped, seconds: 0.5)
+        XCTAssertGreaterThan(flipped.aliveCount, 0, "axis를 뒤집으면 위에서 오는 건 더는 안 막혀야 한다")
+    }
+
     // MARK: remapValue input
 
     /// 실물 `remapvalue` 창작마당 미리보기 그대로 — 제어점에 가까우면 한 색,
@@ -600,6 +633,38 @@ final class ParticleWE27ParsingTests: XCTestCase {
         XCTAssertTrue(p.malformedNames.isEmpty)
     }
 
+    /// 실물 창작마당 미리보기 그대로 — controlpoint/min/max.
+    func testParsesRealInheritControlPointVelocity() throws {
+        let json = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"controlpoint":1,"id":10,"max":1,"min":0.3,
+                        "name":"inheritcontrolpointvelocity"}]}
+        """))
+        let p = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertFalse(p.unsupportedNames.contains("inheritcontrolpointvelocity"))
+        XCTAssertEqual(p.initializers,
+                       [.inheritControlPointVelocity(controlPoint: 1, scaleMin: 0.3, scaleMax: 1)])
+    }
+
+    /// 실물 창작마당 미리보기 그대로 — 필드가 하나도 없다.
+    func testParsesRealInheritInitialAndFollowValueFromEvent() throws {
+        let initJSON = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "initializer":[{"id":14,"name":"inheritinitialvaluefromevent"}]}
+        """))
+        let initPreset = try XCTUnwrap(ParticlePreset.parse(initJSON))
+        XCTAssertFalse(initPreset.unsupportedNames.contains("inheritinitialvaluefromevent"))
+        XCTAssertEqual(initPreset.initializers, [.inheritInitialValueFromEvent])
+
+        let opJSON = try XCTUnwrap(preset("""
+        {"material":"m.json","maxcount":10,
+         "operator":[{"id":9,"name":"inheritvaluefromevent"}]}
+        """))
+        let opPreset = try XCTUnwrap(ParticlePreset.parse(opJSON))
+        XCTAssertFalse(opPreset.unsupportedNames.contains("inheritvaluefromevent"))
+        XCTAssertEqual(opPreset.operators, [.inheritValueFromEvent])
+    }
+
     /// `remapinitialvalue`는 이제 `operation: "remap"`을 구현한다 — 더 이상
     /// unsupportedNames가 아니다. `operation: "multiply"`(실물
     /// `thunderbolt_beam_child.json`)는 output 필드가 없어 여전히 안 넣는다.
@@ -696,5 +761,19 @@ final class ParticleWE27BundledPresetTests: XCTestCase {
         XCTAssertFalse(preset.unsupportedNames.contains("maintaindistancetocontrolpoint"))
         XCTAssertTrue(preset.malformedNames.isEmpty, "\(preset.malformedNames)")
         assertRunsWithoutBreaking(preset)
+    }
+
+    /// 실물 `thunderbolt_beam_child.json` — remapinitialvalue(remap 판),
+    /// capvelocity, maintainDistanceBetweenControlPoints가 한꺼번에 있다.
+    /// `operation: "multiply"` 버전(다른 remapinitialvalue 하나)은 여전히
+    /// unimplementedOperators로 보고돼야 한다.
+    func testThunderboltBeamChildPresetRunsWithoutBreaking() throws {
+        guard let preset = try loadPreset(
+            "presets/lightning/particles/presets/thunderbolt_beam_child.json")
+        else { throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정") }
+        XCTAssertTrue(preset.malformedNames.isEmpty, "\(preset.malformedNames)")
+        assertRunsWithoutBreaking(preset)
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 7))
+        XCTAssertTrue(system.unimplementedOperators.contains("remapinitialvalue(multiply)"))
     }
 }
