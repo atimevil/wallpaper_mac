@@ -867,13 +867,16 @@ public struct SceneDocument: Sendable {
         if let puppetPath = resolver.json(for: modelPath)?["puppet"] as? String, !puppetPath.isEmpty {
             puppet = PuppetSpec.parse(path: puppetPath, animationLayers: object["animationlayers"])
         }
+        // 합성 레이어(`_rt_FullFrameBuffer`)가 실제로 화면을 받을지. 기본 true.
+        // 실물 음반 커버 씬의 "Bar 3"가 false다 — SceneLayer.copyBackground 문서 참고.
+        let copyBackground = boolValue(object["copybackground"]) ?? true
         return SceneLayer(
             id: id, name: name, visible: visible,
             origin: drawOrigin, size: size,
             content: content, unrunScripts: unrun, effects: effects, alpha: alpha, tint: tint,
             rotation: rotation, displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
                 colorBlendMode: blendMode, brightness: brightness, puppet: puppet,
-                anchorOffset: anchor
+                anchorOffset: anchor, copyBackground: copyBackground
         )
     }
 
