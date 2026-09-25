@@ -11,9 +11,13 @@ import WallflowKit
 ///
 /// 이 클래스는 rAF를 직접 후킹하지 않는다. rAF가 멎는 것은 isHidden의 결과다.
 @MainActor
-final class WebRenderer: WallpaperRenderer {
+final class WebRenderer: NSObject, WallpaperRenderer {
     private let item: WallpaperItem
     private var webView: WKWebView?
+    /// ~30Hz로 `wallpaperRegisterAudioListener` 콜백에 스펙트럼을 밀어 넣는다.
+    /// 감춰진 동안은 멎는다 — 애니메이션과 같은 이유다(뷰가 안 그리는데 계속
+    /// evaluateJavaScript를 부를 이유가 없다).
+    private var audioTimer: Timer?
 
     /// 페이지가 만드는 모든 video/audio 엘리먼트를 강제로 음소거한다.
     /// 새로 추가되는 엘리먼트까지 잡기 위해 MutationObserver를 쓴다.
@@ -88,6 +92,7 @@ final class WebRenderer: WallpaperRenderer {
 
     init(item: WallpaperItem) {
         self.item = item
+        super.init()
     }
 
     func makeView() -> NSView {
@@ -110,11 +115,22 @@ final class WebRenderer: WallpaperRenderer {
         )
         config.userContentController.addUserScript(muteScript)
 
+        // WE 스펙 JS API(wallpaperRegisterAudioListener 등)를 페이지 자신의
+        // 스크립트보다 먼저 만들어 둔다. 없으면 실물 페이지 일부가 그 자리에서
+        // 예외를 내고 멎는다(893418273: window.onload 안에서 조건 없이 호출).
+        let bridgeScript = WKUserScript(
+            source: WebEngineBridge.bootstrapJS,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
+        config.userContentController.addUserScript(bridgeScript)
+
         let view = WKWebView(frame: .zero, configuration: config)
         // drawsBackground는 비공개 프로퍼티라 쓰지 않는다.
         // 배경 윈도우가 이미 불투명 검정이므로 이것으로 충분하다.
         view.underPageBackgroundColor = .black
         view.autoresizingMask = [.width, .height]
+        view.navigationDelegate = self
         webView = view
         return view
     }
@@ -125,6 +141,35 @@ final class WebRenderer: WallpaperRenderer {
         }
         // 배경화면 폴더 전체를 읽기 허용해야 상대 경로 리소스가 로드된다.
         webView?.loadFileURL(item.contentURL, allowingReadAccessTo: item.directory)
+    }
+
+    /// 페이지가 다 뜨면(자기 손으로 wallpaperPropertyListener를 만든 뒤) 실물 WE처럼
+    /// project.json 기본값 + 사용자 조정값을 **한 번** 먹인다. 이게 없으면 스크립트가
+    /// 자기 설정을 초기화하지 않아 캔버스가 비어 있다 — 실물 3개가 이 경로로 죽어 있었다.
+    nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        MainActor.assumeIsolated {
+            let values = SceneRenderer.userPropertyValues(for: item)
+            webView.evaluateJavaScript(WebEngineBridge.applyPropertiesJS(values))
+            startAudioTimer()
+        }
+    }
+
+    /// 오디오 스펙트럼을 30Hz로 페이지에 밀어 넣는다. 듣고 있는 소리가 없으면
+    /// (아무도 캡처를 안 켰으면) 0으로 채워진 배열이 나가 비주얼라이저는 잠잠하게
+    /// 그려진다 — 빈 콜백보다 낫다(콜백 자체가 없다고 여겨 대기 화면에 머무는
+    /// 페이지가 있었다, 893418273).
+    private func startAudioTimer() {
+        guard audioTimer == nil else { return }
+        audioTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) {
+            [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let webView = self.webView, !webView.isHidden else { return }
+                let silence = [Float](repeating: 0, count: 64)
+                let bands = SceneRenderer.audioBands[64] ?? (left: silence, right: silence)
+                webView.evaluateJavaScript(
+                    WebEngineBridge.dispatchAudioJS(left: bands.left, right: bands.right))
+            }
+        }
     }
 
     func apply(_ directive: PlaybackDirective) {
@@ -141,7 +186,15 @@ final class WebRenderer: WallpaperRenderer {
     }
 
     func stop() {
+        audioTimer?.invalidate()
+        audioTimer = nil
         webView?.stopLoading()
+        // 델리게이트를 먼저 떼어낸다 — 안 떼면 이 빈 페이지의 didFinish가 다시
+        // 걸려 applyUserProperties를 빈 문서에 헛되이 부르고 오디오 타이머를
+        // 되살린다.
+        webView?.navigationDelegate = nil
         webView?.loadHTMLString("", baseURL: nil)
     }
 }
+
+extension WebRenderer: WKNavigationDelegate {}
