@@ -787,14 +787,18 @@ final class MetalCompositor {
             case .rgba8888: pixelFormat = .rgba8Unorm
             case .r8: pixelFormat = .r8Unorm
             case .rg88: pixelFormat = .rg8Unorm
-            case .dxt5, .dxt1:
+            case .dxt5, .dxt1, .dxt3:
                 // Apple Silicon은 BC를 직접 지원한다(M1 Max에서 확인). CPU 디코더를
                 // 짤 필요가 없고, 그러면 디코더가 틀릴 위험도 없다. 지원하지 않는
                 // GPU에서는 조용히 이상하게 그리지 말고 실패시킨다.
                 guard device.supportsBCTextureCompression else {
                     throw CompositorError.textureCreationFailed
                 }
-                pixelFormat = format == .dxt1 ? .bc1_rgba : .bc3_rgba
+                switch format {
+                case .dxt1: pixelFormat = .bc1_rgba
+                case .dxt3: pixelFormat = .bc2_rgba
+                default: pixelFormat = .bc3_rgba
+                }
             }
 
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
