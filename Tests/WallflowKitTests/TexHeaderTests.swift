@@ -184,6 +184,27 @@ final class TexHeaderTests: XCTestCase {
         XCTAssertEqual(sheet.gridHeight, 128)
     }
 
+    /// imageCount가 1보다 클 수 있다 — 실물 픽셀 캐릭터 시트(2212279721)가
+    /// 2다. 각 이미지가 자기 mipCount·밉맵을 따로 갖고 나란히 붙는다. 이걸
+    /// 하나로 알고 첫 이미지 뒤를 바로 TEXS로 읽으면 두 번째 이미지의 밉맵
+    /// 데이터를 시트 헤더로 오독해 파싱이 늘 실패한다(→ 시트를 못 찾아
+    /// 격자 전체를 한 장으로 그린다). 두 번째 이미지를 건너뛰고도 첫
+    /// 이미지의 밉맵과 그 뒤의 시트를 정확히 읽어야 한다.
+    func testSkipsAdditionalImagesBeforeReadingSpriteSheet() throws {
+        var tex = buildTex(
+            flags: 4, freeImageFormat: -1, size: (128, 128),
+            mips: [(128, 128, 0, 0, Data(repeating: 5, count: 60))],
+            additionalImages: [[(64, 64, 0, 0, Data(repeating: 9, count: 40))]])
+        tex += spriteSheetV3(frameCount: 4, grid: (64, 64))
+        let header = try TexHeader.parse(tex)
+        // 첫 이미지의 밉맵만 쓴다 — 디코더가 늘 mipmaps.first만 읽는다.
+        XCTAssertEqual(header.mipmaps.count, 1)
+        XCTAssertEqual(header.mipmaps[0].width, 128)
+        let sheet = try XCTUnwrap(header.spriteSheet)
+        XCTAssertEqual(sheet.frameCount, 4)
+        XCTAssertEqual(sheet.gridWidth, 64)
+    }
+
     /// flags & 4가 없으면 뒤에 읽을 수 있는 TEXS 섹션이 있어도 읽지 않는다.
     /// 뒤가 비어 있는 픽스처로는 이것을 증명할 수 없다 — 가드를 지워도
     /// EOF 때문에 nil이 나오기 때문이다.

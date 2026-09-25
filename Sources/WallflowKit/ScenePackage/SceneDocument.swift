@@ -648,9 +648,11 @@ public struct SceneDocument: Sendable {
             // 화면 전체에 거는 후처리 레이어. `fullscreenlayer` 모델을 쓰고
             // origin도 size도 없다 — 화면이 곧 그 크기다.
             if object["origin"] == nil, object["size"] == nil, object["effects"] != nil {
-                guard !effects.isEmpty else {
-                    return unsupported("후처리 레이어인데 걸 이펙트가 없다")
-                }
+                // 이펙트가 비어 있어도(편집기에서 다 꺼 뒀거나) 레이어를 버리지
+                // 않는다 — 후처리는 이펙트가 없으면 화면에 아무 일도 안 하는
+                // 것이 WE에서도 맞는 동작이다(`SceneRenderer.renderPostProcess`가
+                // 그 경우 화면을 그대로 낸다). 여기서 버리면 "그리지 못한
+                // 레이어"로 잘못 보고된다.
                 return SceneLayer(
                     id: id, name: name, visible: visible,
                     origin: Vec3(x: 0, y: 0, z: 0),

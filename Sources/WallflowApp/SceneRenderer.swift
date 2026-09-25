@@ -86,7 +86,14 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 레이어 id → 부모 id. 스크립트가 부모를 숨기면 자식도 숨긴다.
     private var parentOf: [Int: Int] = [:]
     /// 레이어에 걸린 이펙트 체인들. 매 프레임 컴포지터보다 먼저 그린다.
-    private var effectChains: [(chain: EffectChain, source: MTLTexture)] = []
+    /// `layerID`는 이 체인이 속한 레이어의 씬 id다 — 다른 체인이 이 레이어를
+    /// `_rt_imageLayerComposite_<id>_a/_b`로 참조할 때 그리기 순서를 맞추는 데 쓴다.
+    private var effectChains: [(chain: EffectChain, source: MTLTexture, layerID: Int)] = []
+    /// 레이어 id → 그 레이어의 "지금" 그림(이펙트 있으면 그 출력, 없으면 원본).
+    /// `_rt_imageLayerComposite_*` 참조가 이걸로 다른 레이어를 찾는다. 클로저인
+    /// 이유는 이펙트 체인의 결과가 매 프레임 바뀌기 때문이다(체인이 그 자체로
+    /// 최신 텍스처를 들고 있다).
+    private var layerOutputs: [Int: () -> MTLTexture?] = [:]
     /// 이펙트가 쓰는 `g_Time`. 씬을 켠 뒤 흐른 시간이다.
     private var effectStartTime: CFTimeInterval?
     /// 화면 전체 후처리. 입력이 "합성이 끝난 화면"이라 첫 프레임에야 만들 수 있다.
@@ -1009,7 +1016,17 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         effectStartTime = start
         let time = Float(now - start)
         let bands = Self.audioBands
-        for entry in effectChains where entry.chain.isAnimated || isFirstFrame || !bands.isEmpty {
+        // 다른 체인의 결과를 읽는 체인이 있으면 그 체인을 먼저 그려야 한다.
+        // 문서 순서는 그리기 순서(뒤→앞)라 참조 대상이 오히려 나중에 나올 때가
+        // 있다(실물 음반 커버 씬 2938612768 — 커버 이미지가 겉 위젯보다 뒤에 있다).
+        // ponytail: 참조되는 체인을 앞으로 미는 한 단계짜리 partition이다.
+        // A가 B를 읽고 B가 C를 읽는 2단 연쇄까지는 순서를 못 맞춘다 — 실물
+        // 코퍼스의 참조 대상은 전부 이펙트가 없는(즉시 준비되는) 레이어라
+        // 이 정도로 충분하다. 다단 연쇄가 나오면 위상 정렬로 올린다.
+        let referenced = Set(effectChains.flatMap { $0.chain.referencedLayerIDs })
+        let ordered = referenced.isEmpty ? effectChains
+            : effectChains.sorted { referenced.contains($0.layerID) && !referenced.contains($1.layerID) }
+        for entry in ordered where entry.chain.isAnimated || isFirstFrame || !bands.isEmpty {
             entry.chain.audioBands = bands
             entry.chain.render(commandBuffer: commands, source: entry.source, time: time)
         }
@@ -1019,7 +1036,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private func renderComposition(
         _ id: Int, commands: MTLCommandBuffer, frame: MTLTexture
     ) -> MTLTexture? {
-        guard let layer = compositionLayers[id], let resolver = compositionResolver,
+        guard let layer = compositionLayers[id] else { return nil }
+        // 이펙트가 없거나(편집기에서 꺼 뒀거나) 디버그로 이펙트를 껐으면
+        // 걸 것이 없다. 화면을 그대로 낸다 — 상자를 안 그리는 것과 다르게
+        // 틴트·블렌드모드는 호출자가 quad에서 이미 적용한다.
+        guard !layer.effects.isEmpty, Self.effectsEnabled else { return frame }
+        guard let resolver = compositionResolver,
               let device = compositor?.device else { return nil }
         if compositionChains[id] == nil {
             var ignored: [String] = []
@@ -1034,7 +1056,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     }
                     return try compositor.makeTexture(from: $0)
                 },
-                diagnostics: &ignored) else {
+                diagnostics: &ignored,
+                layerTexture: { [weak self] otherID in self?.layerOutputs[otherID]?() }) else {
                 // 한 번 실패하면 매 프레임 다시 시도하지 않는다.
                 compositionLayers[id] = nil
                 FileHandle.standardError.write(Data(
@@ -1062,8 +1085,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private func renderPostProcess(
         _ commands: MTLCommandBuffer, frame: MTLTexture
     ) -> MTLTexture? {
-        guard let layer = postEffectSource, let resolver = postResolver,
-              let device = compositor?.device else { return nil }
+        guard let layer = postEffectSource else { return nil }
+        // 이펙트가 없으면(편집기에서 꺼 뒀거나 원래 없거나) 후처리는 아무 일도
+        // 안 하는 것이 맞다 — 화면을 그대로 낸다. 조용히 넘어간다, 걸지
+        // 못한 게 아니라 애초에 걸 것이 없기 때문이다.
+        guard !layer.effects.isEmpty else { return nil }
+        guard let resolver = postResolver, let device = compositor?.device else { return nil }
         if postEffects == nil {
             var ignored: [String] = []
             postEffects = EffectChain(
@@ -1077,7 +1104,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     }
                     return try compositor.makeTexture(from: $0)
                 },
-                diagnostics: &ignored)
+                diagnostics: &ignored,
+                layerTexture: { [weak self] otherID in self?.layerOutputs[otherID]?() })
             if postEffects != nil { updateAudioNeed() }
             if postEffects == nil {
                 // 한 번 실패하면 매 프레임 다시 시도하지 않는다.
@@ -1372,10 +1400,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             // 합성 레이어는 그 지점까지 그려진 화면이 입력이라, 체인을 여기서
             // 만들 수 없다(화면 텍스처가 아직 없다). 자리만 잡아 두고
             // 첫 프레임에 만든다. 오디오 막대가 이 형태다.
-            guard !layer.effects.isEmpty, Self.effectsEnabled else {
-                degraded.append("\(layer.name): 합성 레이어인데 걸 이펙트가 없다")
-                return
-            }
+            //
+            // 이펙트가 없어도(꺼져 있어도) 드롭하지 않는다 — WE에서 합성
+            // 레이어는 이펙트가 없으면 그 지점까지 그려진 화면을 그대로 내는
+            // 투명한 상자다. 통째로 안 그리면 틴트·블렌드모드까지 같이
+            // 사라진다(`renderComposition`이 이펙트 없을 때 화면을 그대로 낸다).
             compositionLayers[layerList.count] = layer
             layerList.append((quad, .composition(layerList.count)))
 
@@ -1397,8 +1426,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 source: blank, resolver: context.resolver,
                 includes: context.shaderIncludes,
                 makeTexture: { try context.compositor.makeTexture(from: $0) },
-                diagnostics: &degraded) {
-                effectChains.append((chain, blank))
+                diagnostics: &degraded,
+                layerTexture: { [weak self] id in self?.layerOutputs[id]?() }) {
+                effectChains.append((chain, blank, layer.id))
+                layerOutputs[layer.id] = { [weak chain] in chain?.texture }
                 layerList.append((quad, .dynamic { [weak chain] in chain?.texture }))
             } else {
                 layerList.append((quad, .solid(SIMD4(Float(c.x), Float(c.y), Float(c.z), 1))))
@@ -1463,8 +1494,14 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                         source: texture, resolver: context.resolver,
                         includes: context.shaderIncludes,
                         makeTexture: { try context.compositor.makeTexture(from: $0) },
-                        diagnostics: &degraded) {
-                        effectChains.append((chain, texture))
+                        diagnostics: &degraded,
+                        layerTexture: { [weak self] id in self?.layerOutputs[id]?() }) {
+                        effectChains.append((chain, texture, layer.id))
+                        // 다른 레이어가 이 레이어를
+                        // `_rt_imageLayerComposite_<id>_a/_b`로 참조할 수 있다
+                        // (실물 음반 커버 씬 — 커버 썸네일 레이어를 겉 위젯이
+                        // 이렇게 가리킨다). 이펙트가 있으니 그 출력을 내준다.
+                        layerOutputs[layer.id] = { [weak chain] in chain?.texture }
                         appendImage(quad, layer: layer, context: context,
                                     texture: texture, provider: { [weak chain] in chain?.texture })
                     } else {
@@ -1478,6 +1515,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                                 "\(layer.name): 이펙트 \(layer.effects.count)개를 걸지 못해 "
                                     + "원본 그대로 그린다")
                         }
+                        // 이펙트가 없거나 못 걸었으면 원본 그림이 "지금 결과"다.
+                        layerOutputs[layer.id] = { texture }
                         appendImage(quad, layer: layer, context: context,
                                     texture: texture, provider: nil)
                     }

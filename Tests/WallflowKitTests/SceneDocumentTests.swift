@@ -581,6 +581,11 @@ final class SceneDocumentTests: XCTestCase {
     /// origin과 size가 없고 effects만 있으면 후처리 레이어다.
     /// 실물 "Couche de post-traitement"가 이 경우인데, 전에는 "스크립트 탓"이라고
     /// 잘못 보고해 사용자를 엉뚱한 원인으로 보냈다.
+    ///
+    /// 이 테스트의 이펙트 파일(`e.json`)은 일부러 `extras`에 없어 못 읽는다 —
+    /// 그래도 레이어까지 버리면 안 된다. 후처리는 걸 이펙트가 없으면(못
+    /// 읽었어도) 화면에 아무 일도 안 하는 무해한 레이어다. "스크립트 탓"으로도
+    /// "그리지 못한 레이어"로도 잘못 보고하지 않는다.
     func testPostProcessingLayerIsReportedAsSuch() throws {
         let reader = try makeScenePkg(scene: """
         {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
@@ -588,11 +593,8 @@ final class SceneDocumentTests: XCTestCase {
                       "image": "models/x.json", "effects": [{"file": "e.json"}]}]}
         """)
         let doc = try SceneDocument.load(from: reader, assets: nil)
-        guard case .unsupported(let reason) = doc.layers[0].content else {
-            return XCTFail("unsupported여야 한다")
-        }
-        XCTAssertTrue(reason.contains("후처리"), reason)
-        XCTAssertFalse(reason.contains("스크립트"), "스크립트 탓으로 오해시키면 안 된다: \(reason)")
+        XCTAssertEqual(doc.layers[0].content, .postProcess)
+        XCTAssertTrue(doc.layers[0].effects.isEmpty)
     }
 
     /// 머티리얼의 blending을 읽어야 한다. 실물에서 눈·비·먼지·광선은 additive,
@@ -922,17 +924,18 @@ extension SceneDocumentTests {
         XCTAssertEqual(layer.effects.count, 1)
     }
 
-    /// 걸 이펙트가 없는 후처리 레이어는 화면을 그대로 베끼는 일만 한다.
-    /// 그리지 않는 편이 낫다 — 화면 크기 텍스처를 괜히 하나 더 잡는다.
-    func testPostProcessLayerWithoutEffectsIsSkipped() throws {
+    /// 걸 이펙트가 없는 후처리 레이어는 화면을 그대로 낸다 — WE에서도
+    /// 후처리는 이펙트가 없으면 아무 일도 안 하는 것이 정상 동작이다.
+    /// 레이어를 버리면 "그리지 못한 레이어"로 잘못 보고된다
+    /// (`SceneRenderer.renderPostProcess`가 실제로 화면을 그대로 내는 쪽).
+    func testPostProcessLayerWithoutEffectsIsANoOp() throws {
         let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
         {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
          "objects": [{"id": 1, "name": "Post", "image": "models/util/fullscreenlayer.json",
                       "effects": []}]}
         """)).layers.first)
-        guard case .unsupported = layer.content else {
-            return XCTFail("이펙트 없는 후처리는 건너뛴다: \(layer.content)")
-        }
+        XCTAssertEqual(layer.content, .postProcess)
+        XCTAssertTrue(layer.effects.isEmpty)
     }
 
     /// 굴절 파티클은 **법선 지도까지 들고** 나온다.
