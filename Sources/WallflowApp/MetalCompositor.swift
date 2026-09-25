@@ -127,6 +127,21 @@ final class MetalCompositor {
     private let compositionPipeline: MTLRenderPipelineState?
     /// 블룸 한 단계 패스. 목적지를 통째로 덮어 쓴다.
     private let bloomPipeline: MTLRenderPipelineState?
+    /// 화면(드로어블)에 최종 결과를 옮기는 전용 파이프라인. `pipeline`과 같은
+    /// 함수(quad_vertex/quad_fragment)를 쓰지만 포맷은 **항상** 드로어블
+    /// 포맷(`Self.colorPixelFormat`)이다. HDR 씬은 `sceneColorFormat`이
+    /// `rgba16Float`라 `pipeline`(오프스크린용)과 포맷이 갈리므로 둘을 나눈다.
+    /// 비HDR 씬은 둘이 같은 포맷이라 사실상 같은 파이프라인이다.
+    private let presentPipeline: MTLRenderPipelineState
+    /// 이 씬이 `general.hdr`를 켰는지. 오프스크린·모든 씬 파이프라인의 색
+    /// 포맷과, 메시 재질의 `HDR` 콤보를 여기서 정한다.
+    let hdr: Bool
+    /// 레이어를 그리는 오프스크린의 실제 색 포맷. HDR 씬은 `rgba16Float`로
+    /// 그려야 조명값이 1을 넘어도 안 잘리고 블룸까지 살아남는다 — 드로어블은
+    /// 여전히 `bgra8Unorm`이라 최종 그리기(`presentPipeline`)에서만 자동으로
+    /// 잘린다(unorm 쓰기가 0~1로 clamp한다). 비HDR 씬은 드로어블과 같아 예전과
+    /// 동작이 같다.
+    let sceneColorFormat: MTLPixelFormat
     /// 그 그림을 담는 텍스처. 레이어마다 크기가 달라 번호로 들고 있는다.
     private var compositionSources: [Int: MTLTexture] = [:]
     private let solidPipeline: MTLRenderPipelineState
@@ -154,8 +169,10 @@ final class MetalCompositor {
     /// 뒤바뀌고(bgra↔rgba), 파이프라인도 첨부물 포맷이 맞지 않는다.
     static let colorPixelFormat: MTLPixelFormat = .bgra8Unorm
 
-    init(device: MTLDevice) throws {
+    init(device: MTLDevice, hdr: Bool = false) throws {
         self.device = device
+        self.hdr = hdr
+        self.sceneColorFormat = hdr ? .rgba16Float : Self.colorPixelFormat
         // 배치가 어긋나면 컴파일은 통과하고 쿼드만 엉뚱한 자리·UV로 그려진다.
         // ParticleRenderer가 ParticleInstance에 거는 것과 같은 가드다.
         guard MemoryLayout<QuadUniforms>.stride == QuadUniforms.expectedStride else {
@@ -190,7 +207,7 @@ final class MetalCompositor {
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = library.makeFunction(name: "quad_vertex")
         descriptor.fragmentFunction = library.makeFunction(name: "quad_fragment")
-        descriptor.colorAttachments[0].pixelFormat = Self.colorPixelFormat
+        descriptor.colorAttachments[0].pixelFormat = sceneColorFormat
 
         // 씬 머티리얼의 기본 블렌딩이 translucent다.
         descriptor.colorAttachments[0].isBlendingEnabled = true
@@ -209,7 +226,7 @@ final class MetalCompositor {
             let puppetDescriptor = MTLRenderPipelineDescriptor()
             puppetDescriptor.vertexFunction = puppetVertex
             puppetDescriptor.fragmentFunction = descriptor.fragmentFunction
-            puppetDescriptor.colorAttachments[0].pixelFormat = Self.colorPixelFormat
+            puppetDescriptor.colorAttachments[0].pixelFormat = sceneColorFormat
             puppetDescriptor.colorAttachments[0].isBlendingEnabled = true
             puppetDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
             puppetDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
@@ -234,6 +251,17 @@ final class MetalCompositor {
         } catch {
             throw CompositorError.pipelineFailed("\(error)")
         }
+
+        // 화면(드로어블)은 HDR 씬에서도 늘 bgra8Unorm이다 — 같은 함수를 그
+        // 포맷으로 다시 굳힌다. sceneColorFormat이 이미 드로어블과 같으면
+        // (비HDR) 이 파이프라인은 pipeline과 사실상 같다.
+        descriptor.colorAttachments[0].pixelFormat = Self.colorPixelFormat
+        do {
+            presentPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        } catch {
+            throw CompositorError.pipelineFailed("\(error)")
+        }
+        descriptor.colorAttachments[0].pixelFormat = sceneColorFormat
 
         // 원근 쿼드. 프래그먼트는 같고 정점만 세계·카메라 행렬을 곱한다.
         descriptor.vertexFunction = library.makeFunction(name: "quad3d_vertex")
@@ -308,7 +336,8 @@ final class MetalCompositor {
             device: device, library: library, maxCount: maxCount,
             blend: blend, texture: texture, sampler: sampler, layerOrigin: layerOrigin,
             layerScale: layerScale, sheet: sheet, animationMode: animationMode,
-            renderKind: renderKind, normalMap: normalMap, refractAmount: refractAmount)
+            renderKind: renderKind, normalMap: normalMap, refractAmount: refractAmount,
+            colorFormat: sceneColorFormat)
     }
 
     /// 씬의 직교 공간 크기를 정한다.
@@ -406,7 +435,10 @@ final class MetalCompositor {
     /// 합성 레이어가 있으면 화면이 아니라 텍스처에 그려야 한다 — 그 지점까지의
     /// 화면을 셰이더가 읽어야 하는데, 표시용 드로어블은 읽을 수 없다.
     private var needsOffscreen: Bool {
-        if postProcess != nil || bloom != nil { return true }
+        // HDR 씬은 오프스크린이 드로어블과 다른 포맷(rgba16Float)이라, 레이어를
+        // 곧장 드로어블에 그릴 수 없다 — 반드시 오프스크린을 거쳐 present에서
+        // 포맷을 옮겨야 한다.
+        if hdr || postProcess != nil || bloom != nil { return true }
         return layers.contains {
             switch $0.1 {
             case .composition: return true
@@ -450,7 +482,7 @@ final class MetalCompositor {
         var target = compositionSources[id]
         if target == nil || target?.width != bounded.0 || target?.height != bounded.1 {
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: Self.colorPixelFormat,
+                pixelFormat: sceneColorFormat,
                 width: bounded.0, height: bounded.1, mipmapped: false)
             descriptor.usage = [.shaderRead, .renderTarget]
             descriptor.storageMode = .private
@@ -490,8 +522,9 @@ final class MetalCompositor {
            backdropTexture.height == height {
             return backdropTexture
         }
+        // frame()과 같은 포맷이어야 한다 — 아래에서 이 텍스처로 blit 복사한다.
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: Self.colorPixelFormat, width: width, height: height, mipmapped: false)
+            pixelFormat: sceneColorFormat, width: width, height: height, mipmapped: false)
         descriptor.usage = [.shaderRead, .renderTarget]
         descriptor.storageMode = .private
         backdropTexture = device.makeTexture(descriptor: descriptor)
@@ -510,7 +543,7 @@ final class MetalCompositor {
         var target = bloomTexture
         if target == nil || target?.width != source.width || target?.height != source.height {
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: Self.colorPixelFormat,
+                pixelFormat: sceneColorFormat,
                 width: source.width, height: source.height, mipmapped: false)
             descriptor.usage = [.shaderRead, .renderTarget]
             descriptor.storageMode = .private
@@ -548,10 +581,14 @@ final class MetalCompositor {
         if let frameTexture, frameTexture.width == width, frameTexture.height == height {
             return frameTexture
         }
-        // **화면과 같은 포맷이어야 한다.** 다른 포맷에 그린 뒤 raw로 복사하면
-        // 채널 순서가 뒤바뀐다(bgra↔rgba) — 빨강이 파랑 자리로 가서 색이 죽는다.
+        // backdrop()·bloomTexture 등 이 텍스처를 blit로 복사하는 자리와 **같은
+        // 포맷이어야 한다** — 다르면 raw 복사에서 채널 순서가 뒤바뀐다(bgra↔rgba).
+        // 드로어블과의 관계는 다르다: 여기서 드로어블로는 **복사가 아니라
+        // 샘플링해서 그리므로**(present 블록 참고) HDR 씬은 이 텍스처가
+        // rgba16Float(`sceneColorFormat`)이고 드로어블은 여전히 bgra8Unorm이어도
+        // 된다 — Metal이 그리기 중 변환을 맡는다.
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: Self.colorPixelFormat, width: width, height: height, mipmapped: false)
+            pixelFormat: sceneColorFormat, width: width, height: height, mipmapped: false)
         descriptor.usage = [.shaderRead, .renderTarget]
         descriptor.storageMode = .private
         frameTexture = device.makeTexture(descriptor: descriptor)
@@ -778,7 +815,12 @@ final class MetalCompositor {
             present.colorAttachments[0].storeAction = .store
             if let encoder = commands.makeRenderCommandEncoder(descriptor: present) {
                 encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-                encoder.setRenderPipelineState(pipeline)
+                // 드로어블은 늘 bgra8Unorm이다 — presentPipeline이 그 포맷으로
+                // 그린다. HDR 씬은 여기서 1을 넘는 값이 unorm 쓰기로 자동 clamp된다
+                // (필름룩 리매핑이 아니라 그냥 하드웨어의 0~1 클램프다) — 그 앞
+                // 블룸 패스가 이미 float로 번짐값을 더했으므로 결과는
+                // "clamp(base) + blur(overbright)"다.
+                encoder.setRenderPipelineState(presentPipeline)
                 // 화면을 꽉 채우는 쿼드. 시차는 이미 반영돼 있으므로 0이다.
                 // offscreen은 이미 화면 맞춤이 걸려 그려진 결과라, 여기서 또 걸면
                 // 두 번 잘린다 — visibleOrigin (0,0)·visibleSize = projection으로

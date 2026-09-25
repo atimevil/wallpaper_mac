@@ -53,9 +53,10 @@ public struct SceneDocument: Sendable {
     /// `general.bloomthreshold`. 이 밝기(0~1) 위인 자리만 퍼뜨린다. 없으면 1
     /// (거의 다 안 퍼짐 — WE 편집기 기본값과 같다).
     public let bloomThreshold: Double
-    /// `general.hdr`. 지금은 저장만 한다 — 완전한 톤매핑은 오프스크린이 8비트라
-    /// 못 하고(`MetalCompositor.colorPixelFormat` 참고), 블룸이 그 대신 밝은
-    /// 자리를 눈에 띄게 한다.
+    /// `general.hdr`. 켜면 `MetalCompositor`가 이 씬을 `rgba16Float` 오프스크린에
+    /// 그려 메시 재질의 밝기(`HDR` 콤보, `common_pbr_2.h`의 `CombineLighting`)가
+    /// 1을 넘어도 블룸까지 안 잘리고 살아남는다. 최종 드로어블은 여전히
+    /// bgra8Unorm이라 화면에 옮길 때 자동으로 0~1로 잘린다.
     public let hdr: Bool
 
     /// 도형(`shape: quad`) 레이어의 기준 한 변. 파일에는 크기가 없다.

@@ -1812,7 +1812,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     sampler: context.compositor.sharedSampler,
                     eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
                         clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight,
-                        lights: context.lights)
+                        lights: context.lights, hdr: context.compositor.hdr)
                 // 판의 크기는 size × scale 세계 단위다(실물 배경 구름 64 × 10).
                 quad.world = Scene3D.world(
                     origin: layer.origin,
@@ -1848,7 +1848,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     sampler: context.compositor.sharedSampler,
                     eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
                         clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight,
-                        lights: context.lights)
+                        lights: context.lights, hdr: context.compositor.hdr)
                 quad.world = Scene3D.world(
                     origin: layer.origin,
                     anglesDegrees: Vec3(x: layer.angles.x, y: layer.angles.y, z: layer.rotation * 180 / .pi),
@@ -1904,7 +1904,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let document = try SceneDocument.load(
             from: reader, assets: assets, userOverrides: overrides, userTextures: userTextures)
 
-        let compositor = try MetalCompositor(device: device)
+        let compositor = try MetalCompositor(device: device, hdr: document.hdr)
         compositor.setProjection(width: document.orthoWidth, height: document.orthoHeight)
         // 첫 draw 전에도 커서 계산 등이 drawable 크기를 물어볼 수 있어 미리 준다.
         // draw(in:)이 매 프레임 다시 재므로 창 크기가 달라져도 스스로 맞는다.
