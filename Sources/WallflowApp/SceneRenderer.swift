@@ -57,6 +57,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 값을 그리게 된다.
     private var scriptInFlight = false
     private var lastScriptTick: CFTimeInterval?
+    /// 글자 굽기 전용 큐. 메인에서 CoreText와 텍스처 업로드를 직접 하면 매초
+    /// 여러 레이어가 바뀌는 씬(Pixels 등)에서 프레임이 56~211ms까지 늘어진다
+    /// (`sample`로 확인한 값). `scriptQueue`와 굳이 큐를 나누는 이유: 스크립트가
+    /// 폭주해도(창작마당 코드라 무한 루프가 있을 수 있다) 글자 굽기는 영향받지
+    /// 않아야 한다. 직렬이라 굽기 자체도 한 번에 하나씩만 돈다.
+    private let textRasterQueue = DispatchQueue(label: "wallflow.textraster", qos: .userInteractive)
     /// 레이어 id → 마지막으로 화면에 반영한 스크립트 상태. 같으면 손대지 않는다.
     private var appliedStates: [Int: SceneScriptHost.LayerState] = [:]
     /// 레이어 id → 그 레이어의 쿼드·파티클·글자·소리가 어디 있는지.
@@ -253,9 +259,20 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var measuredScale = false
         /// 컴포지터 레이어 목록에서의 자리. 글자 폭이 바뀌면 그 자리의 쿼드를 고쳐야 한다.
         var layerIndex = 0
+        /// 이 레이어의 백그라운드 굽기 요청 조율기. 늦게 끝난 결과를 버리는 것과
+        /// (예: 굽는 도중 빈 문자열로 바뀐 경우) 굽기 속도보다 빠르게 바뀌는
+        /// 글자가 큐를 무한정 늘리지 않게 막는 것, 둘 다 `TextBakeCoalescer`(Kit,
+        /// 순수 상태 기계 — 단위 테스트가 있다)가 판정한다.
+        var bake = TextBakeCoalescer()
+        /// 원근 씬에서 이 글자 판의 세계 자리·각도. 직교 씬이면 쓰지 않는다.
+        /// 스크립트가 매 틱 갱신해 둔다 — 굽기가 백그라운드에서 도는 동안에도
+        /// 레이어가 움직일 수 있어서, 끝난 시점엔 굽기 시작 시점이 아니라 이
+        /// 최신 값으로 자리를 잡아야 텍스트가 옛 자리로 튀지 않는다.
+        var worldOrigin: Vec3
+        var worldAngles: Vec3
 
         init(text: TextLayer, fontData: Data?, pointSize: Double, origin: SIMD2<Float>,
-             box: SIMD2<Float>) {
+             box: SIMD2<Float>, worldOrigin: Vec3, worldAngles: Vec3) {
             self.align = text.horizontalAlign
             self.verticalAlign = text.verticalAlign
             self.boxCenter = origin
@@ -266,6 +283,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             self.box = box
             self.origin = origin
             self.value = text.value
+            self.worldOrigin = worldOrigin
+            self.worldAngles = worldAngles
         }
     }
 
@@ -397,26 +416,20 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         return SIMD2(nx * ortho.x, ny * ortho.y)
     }
 
-    /// 글자를 굽고 텍스처와 쿼드 크기를 갱신한다.
+    /// 글자를 굽고 텍스처와 쿼드 크기를 갱신한다. **동기**로 메인에서 굽는다 —
+    /// 레이어를 처음 세울 때 한 번만 부르는 경로라(`addLayer`), 매초 여러 번
+    /// 도는 스크립트 틱과 달리 여기서 메인이 잠깐 CoreText를 도는 것은 문제가
+    /// 되지 않는다. 틱마다 바뀌는 글자는 `rasterizeAsync`를 쓴다.
     /// 직교 공간과 픽셀이 1:1이라 구운 이미지 크기를 그대로 쿼드 크기로 쓴다.
     private func rasterize(_ state: TextState, compositor: MetalCompositor) {
-        // 씬이 정한 줄바꿈 폭은 씬 단위다. 우리는 고정 크기로 구우므로 비율로 옮긴다.
-        // pointsize는 크기 결정이 아니라 이 비율에만 쓴다 — 씬의 편집기 값이라
-        // 그대로 크기로 쓰면 실제 렌더와 어긋난다.
-        let wrap = state.text.wrapping
-        let wrapWidth = wrap.maxWidth > 0 && wrap.pointSize > 0
-            ? wrap.maxWidth * state.pointSize / wrap.pointSize : 0
+        let wrapWidth = Self.wrapWidth(for: state)
         guard let image = try? TextRasterizer.rasterize(
             text: state.value, fontData: state.fontData,
             pointSize: state.pointSize, color: state.text.color,
-            wrapWidth: wrapWidth, maxRows: wrap.maxRows, usesEllipsis: wrap.usesEllipsis,
+            wrapWidth: wrapWidth, maxRows: state.text.wrapping.maxRows,
+            usesEllipsis: state.text.wrapping.usesEllipsis,
             shadow: state.text.shadow,
-            // 그림자 오프셋도 씬 단위라 줄바꿈 폭과 같은 비율로 옮긴다.
-            shadowScale: wrap.pointSize > 0 ? state.pointSize / wrap.pointSize : 1,
-            // `padding`은 "글자 도형 둘레의 여백"이다(문서). 우리는 고정 256pt로
-            // 굽고 그 raster 공간의 픽셀 여백으로 그대로 쓴다 — 씬마다 편집기
-            // pointsize가 달라도(9~98) 여백은 항상 같은 비율로 보여야 하고,
-            // 실물 값(32 안팎)이 딱 그 정도 raster 여백에 맞는 크기다.
+            shadowScale: Self.shadowScale(for: state),
             extraPadding: state.text.padding,
             horizontalAlign: state.align, blockAlign: state.text.blockAlign)
         else {
@@ -426,18 +439,143 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             return
         }
         state.texture = try? compositor.makeTexture(from: .image(image))
+        applyRasterizedSize(state, pixelWidth: image.width, pixelHeight: image.height,
+                            wrapWidth: wrapWidth)
+    }
+
+    /// 값이 바뀐 글자를 백그라운드 큐에서 굽는다. 직렬 큐라 한 번에 하나씩만
+    /// 돌고, 끝난 결과는 메인 액터에서만 반영한다 — Metal 텍스처는 메인 격리다.
+    ///
+    /// 메인에서 직접 CoreText를 굽고 `MTKTextureLoader`로 올리면(예전 방식) 매초
+    /// 여러 레이어가 바뀌는 씬(Pixels 등)에서 프레임이 56~211ms까지 늘어진다
+    /// (`sample`로 확인한 값). 굽기 자체를 큐로 미루고 픽셀만 받아 온다.
+    private func rasterizeAsync(_ state: TextState) {
+        let isEmpty = state.value.isEmpty || state.value.allSatisfy(\.isWhitespace)
+        // 판정은 전부 `TextBakeCoalescer`가 한다 — 여기서는 그 결정을 따를 뿐이다.
+        // (1) 빈 글자는 굽지 않고 바로 지운다. (2) 이미 굽는 중이면 새로 큐에
+        // 넣지 않는다 — 시계처럼 굽기 속도보다 빠르게 바뀌는 글자가 큐를
+        // 무한정 늘리는 것을 막는다. `dirty`는 엣지 트리거라(`state.value`가
+        // 이미 새 값으로 바뀐 뒤 불린다) 건너뛴 요청은 다시 오지 않으므로,
+        // 그냥 무시하는 대신 굽기가 끝나는 시점에 다시 구우라고 표시해 둔다.
+        switch state.bake.start(isEmpty: isEmpty) {
+        case .clear:
+            state.texture = nil
+            state.size = .zero
+            refreshLayers()
+            return
+        case .wait:
+            return
+        case .bake(let token):
+            startBackgroundBake(state, token: token)
+        }
+    }
+
+    /// 실제로 CoreText를 돌려 굽는다. `rasterizeAsync`가 `TextBakeCoalescer`로부터
+    /// "지금 구워라"를 받았을 때만, 그리고 `finish(token:)`가 `.rebake`를 돌려줘
+    /// 다시 구울 때도 이 경로로 온다.
+    private func startBackgroundBake(_ state: TextState, token: UInt64) {
+        let wrapWidth = Self.wrapWidth(for: state)
+        // CoreText 작업은 메인 밖(다른 스레드)에서 돈다. `TextState`는
+        // `@MainActor`라 그 안의 값을 배경 큐에서 직접 읽으면 안 되므로, 필요한
+        // 값을 전부 여기서(메인 액터) 미리 꺼내 Sendable 값 타입으로 넘긴다 —
+        // String·Data?·Double·Vec3·TextShadow?·Vec2·TextAlignment·Bool 전부
+        // Sendable이다.
+        let value = state.value
+        let fontData = state.fontData
+        let pointSize = state.pointSize
+        let color = state.text.color
+        let maxRows = state.text.wrapping.maxRows
+        let usesEllipsis = state.text.wrapping.usesEllipsis
+        let shadow = state.text.shadow
+        let shadowScale = Self.shadowScale(for: state)
+        let padding = state.text.padding
+        let align = state.align
+        let blockAlign = state.text.blockAlign
+        textRasterQueue.async { [weak self, weak state] in
+            // `TextPixelBuffer`는 Sendable(Data 기반 값 타입)이라 이 경계를
+            // 넘을 수 있다 — CGImage였다면(Swift 6에서 Sendable이 아니다) 여기서
+            // 컴파일이 막혔을 것이다.
+            let buffer = try? TextRasterizer.rasterizePixels(
+                text: value, fontData: fontData, pointSize: pointSize, color: color,
+                wrapWidth: wrapWidth, maxRows: maxRows, usesEllipsis: usesEllipsis,
+                shadow: shadow, shadowScale: shadowScale, extraPadding: padding,
+                horizontalAlign: align, blockAlign: blockAlign)
+            Task { @MainActor in
+                guard let self, let state else { return }
+                switch state.bake.finish(token: token) {
+                case .rebake:
+                    // 굽는 동안 값이 또 바뀌었다 — 지금 든 결과는 버리고 최신
+                    // 값을 다시 읽어 한 번 더 굽는다. `rasterizeAsync`가 최신
+                    // `state.value`를 다시 읽으므로 여기서 값을 따로 넘기지 않는다.
+                    self.rasterizeAsync(state)
+                case .stale:
+                    break
+                case .apply:
+                    self.applyRasterResult(buffer, to: state, wrapWidth: wrapWidth)
+                }
+            }
+        }
+    }
+
+    /// 백그라운드에서 구운 픽셀을 메인에서 텍스처에 올리고 판 크기를 다시 잰다.
+    ///
+    /// 텍스처는 **매번 새로 만든다.** 기존 텍스처를 `replace`로 덮으면, 그것을
+    /// 읽는 이전 프레임의 커맨드 버퍼가 GPU에서 아직 도는 중일 수 있다 — Metal은
+    /// 그 진행 상황을 알려주지 않으므로(진행 중 추적이 없다), 우리가 덮어쓰면
+    /// 화면이 찢어지거나 프레임이 섞여 보일 수 있다. 새로 만들면 이전 텍스처는
+    /// 그것을 쓰던 커맨드 버퍼가 끝날 때까지 Metal이 알아서 붙잡아 둔다.
+    private func applyRasterResult(_ buffer: TextPixelBuffer?, to state: TextState, wrapWidth: Double) {
+        if let buffer, let compositor {
+            state.texture = try? compositor.makeTexture(from: buffer)
+            applyRasterizedSize(state, pixelWidth: buffer.width, pixelHeight: buffer.height,
+                                wrapWidth: wrapWidth)
+        } else {
+            state.texture = nil
+            state.size = .zero
+        }
+        // 레이어 목록에 새 크기·자리를 반영해야 다음 프레임에 보인다.
+        refreshLayers()
+    }
+
+    /// 씬이 정한 줄바꿈 폭(씬 단위)을 고정 256pt 래스터 공간의 비율로 옮긴다.
+    /// pointsize는 크기 결정이 아니라 이 비율에만 쓴다 — 씬의 편집기 값이라
+    /// 그대로 크기로 쓰면 실제 렌더와 어긋난다.
+    private static func wrapWidth(for state: TextState) -> Double {
+        let wrap = state.text.wrapping
+        return wrap.maxWidth > 0 && wrap.pointSize > 0
+            ? wrap.maxWidth * state.pointSize / wrap.pointSize : 0
+    }
+
+    /// 그림자 오프셋도 씬 단위라 줄바꿈 폭과 같은 비율로 옮긴다.
+    private static func shadowScale(for state: TextState) -> Double {
+        let wrap = state.text.wrapping
+        return wrap.pointSize > 0 ? state.pointSize / wrap.pointSize : 1
+    }
+
+    /// 구운 픽셀 크기로 판 크기·자리를 잡는다.
+    ///
+    /// 동기 경로(레이어를 처음 세울 때)와 비동기 경로(스크립트 틱)가 굽는
+    /// 방식만 다르고 이 계산은 완전히 같다 — 여기서 공유해 둘이 갈라지지 않게 한다.
+    private func applyRasterizedSize(
+        _ state: TextState, pixelWidth: Int, pixelHeight: Int, wrapWidth: Double
+    ) {
+        // `padding`은 "글자 도형 둘레의 여백"이다(문서). 우리는 고정 256pt로
+        // 굽고 그 raster 공간의 픽셀 여백으로 그대로 쓴다 — 씬마다 편집기
+        // pointsize가 달라도(9~98) 여백은 항상 같은 비율로 보여야 하고,
+        // 실물 값(32 안팎)이 딱 그 정도 raster 여백에 맞는 크기다.
+        //
         // 상자는 **편집기에 저장된 글자**의 크기다. 실행 중 글자를 거기 맞추면
         // `Date`(4자)로 저장된 상자에 `07 SEP 2026`(11자)을 우겨넣게 되어 글자가
         // 쪼그라든다. 저장된 글자에서 배율을 한 번 얻어 두고 그 배율로 그린다 —
         // 글자 크기가 고정되고 긴 글자는 상자를 넘어간다. 실물이 그렇다.
         measureTextScale(state, wrapWidth: wrapWidth)
         if let unitsPerPixel = state.unitsPerPixel {
-            state.size = SIMD2(Float(Double(image.width) * unitsPerPixel),
-                               Float(Double(image.height) * unitsPerPixel))
+            state.size = SIMD2(Float(Double(pixelWidth) * unitsPerPixel),
+                               Float(Double(pixelHeight) * unitsPerPixel))
         } else {
             // 저장된 글자를 못 재면 예전처럼 상자에 맞춘다.
             let fitted = TextRasterizer.fit(
-                imageWidth: image.width, imageHeight: image.height,
+                imageWidth: pixelWidth, imageHeight: pixelHeight,
                 boxWidth: Double(state.box.x), boxHeight: Double(state.box.y))
             state.size = SIMD2(Float(fitted.width), Float(fitted.height))
         }
@@ -621,8 +759,15 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             }
             changed = true
         }
-        if let ti = target.textIndex, ti < texts.count, let compositor {
+        // `compositor`는 여기서 다시 안 묶는다 — `apply(_:)`가 이미 최상단에서
+        // `guard let compositor`로 확인했다(이 함수는 그 뒤에서만 불린다).
+        if let ti = target.textIndex, ti < texts.count {
             let text = texts[ti]
+            // 원근 씬에서 굽기가 끝난 뒤(백그라운드라 몇 틱 걸릴 수 있다)에도
+            // 최신 자리로 놓으려면 dirty 여부와 무관하게 매 틱 갱신해 둔다 —
+            // 텍스트 내용은 그대로여도 레이어 자체가 움직일 수 있다.
+            text.worldOrigin = world.origin
+            text.worldAngles = world.anglesDegrees
             var dirty = false
             if let value = state.text, value != text.value {
                 text.value = value
@@ -644,19 +789,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 }
             }
             if dirty {
-                rasterize(text, compositor: compositor)
-                // 글자 폭이 바뀌면 상자 안 자리도 바뀐다.
-                if let index = target.indices.first, index < layerList.count {
-                    if context.isPerspective {
-                        layerList[index].0.world = Scene3D.world(
-                            origin: world.origin, anglesDegrees: world.anglesDegrees,
-                            scale: Vec3(x: 1, y: 1, z: 1),
-                            size: Vec2(x: Double(text.size.x), y: Double(text.size.y)))
-                    } else {
-                        layerList[index].0.origin = text.origin
-                        layerList[index].0.size = text.size
-                    }
-                }
+                // 굽기는 백그라운드에서 끝난다 — 여기서는 아직 `text.size`/`origin`이
+                // 새 값이 아니다. 레이어 목록 갱신은 `applyRasterResult`가
+                // `refreshLayers()`로 결과가 오는 대로 따로 한다(이 함수보다 늦게).
+                rasterizeAsync(text)
                 changed = true
             }
         }
@@ -969,24 +1105,36 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         return includes
     }
 
-    /// 표시 스크립트를 다시 돌려 알파를 갱신한다.
+    /// 글자 상태(`texts`)를 레이어 목록(`layerList`)에 다시 반영한다.
     ///
-    /// 렌더 스레드에서 돈다. 글자 스크립트와 달리 결과가 한 실수뿐이라 굽는 비용이
-    /// 없고, 1초에 한 번이라 무한 루프 위험도 그만큼 낮다. 대신 결과가 바뀐 것이
-    /// 하나도 없으면 레이어 목록을 다시 올리지 않는다.
-    ///
-    /// - Parameter elapsed: 지난 호출 이후 실제로 흐른 시간(초).
-    ///   스크립트의 타이머가 이 값으로 흐른다.
     /// 글자 폭은 글자 수에 따라 바뀐다. 쿼드를 그대로 두면 "9:59"와 "10:00"이
-    /// 같은 상자에 늘어나 붙는다. 바뀐 크기를 레이어 목록에 반영해 다시 준다.
-    /// 1초에 한 번 남짓이라 비용이 문제되지 않는다.
+    /// 같은 상자에 늘어나 붙는다. 백그라운드에서 구운 결과가 메인으로 돌아올
+    /// 때마다(`applyRasterResult`) 불러 바뀐 크기·자리를 반영한다.
+    ///
+    /// ponytail: 글자 레이어 하나가 끝날 때마다 전체 `texts`를 다시 훑는다
+    /// (O(글자 레이어 수)). 실물 씬은 많아야 수십 개라 무시할 만하지만, 글자
+    /// 레이어가 수백 개인 씬이 나오면 `state.layerIndex` 하나만 갱신하도록 좁혀야 한다.
     private func refreshLayers() {
         guard let compositor else { return }
+        // 원근 씬은 자리·크기가 `.world`(4x4 행렬) 하나로 들어간다 — `.origin`/
+        // `.size`는 원근 파이프라인이 아예 읽지 않는다(MetalCompositor.draw 참고).
+        // 씬 전체가 원근이냐 직교냐는 레이어마다 다르지 않으므로 한 번만 본다.
+        let isPerspective = buildContext?.isPerspective ?? false
         for state in texts where state.layerIndex < layerList.count {
-            // 자리와 크기만 갈아 끼운다. 통째로 새로 만들면 시차·섞는 방식처럼
-            // 여기 안 적은 값이 조용히 기본값으로 되돌아간다.
-            layerList[state.layerIndex].0.origin = state.origin
-            layerList[state.layerIndex].0.size = state.size
+            guard isPerspective else {
+                // 자리와 크기만 갈아 끼운다. 통째로 새로 만들면 시차·섞는 방식처럼
+                // 여기 안 적은 값이 조용히 기본값으로 되돌아간다.
+                layerList[state.layerIndex].0.origin = state.origin
+                layerList[state.layerIndex].0.size = state.size
+                continue
+            }
+            // `worldOrigin`/`worldAngles`는 스크립트가 매 틱 갱신해 둔 최신 값이다
+            // (굽기가 도는 동안에도 레이어가 움직일 수 있어서, 굽기 시작 시점이
+            // 아니라 끝난 시점의 최신 자리를 써야 한다).
+            layerList[state.layerIndex].0.world = Scene3D.world(
+                origin: state.worldOrigin, anglesDegrees: state.worldAngles,
+                scale: Vec3(x: 1, y: 1, z: 1),
+                size: Vec2(x: Double(state.size.x), y: Double(state.size.y)))
         }
         compositor.setLayers(layerList)
     }
@@ -1364,7 +1512,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             let state = TextState(
                 text: text, fontData: fontData, pointSize: pointSize,
                 origin: SIMD2(Float(layer.origin.x), Float(layer.origin.y)),
-                box: SIMD2(Float(layer.size.x), Float(layer.size.y)))
+                box: SIMD2(Float(layer.size.x), Float(layer.size.y)),
+                worldOrigin: layer.origin, worldAngles: layer.angles)
             texts.append(state)
             rasterize(state, compositor: context.compositor)
             state.layerIndex = layerList.count

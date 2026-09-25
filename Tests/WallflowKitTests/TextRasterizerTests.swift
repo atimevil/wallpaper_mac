@@ -383,3 +383,82 @@ extension TextRasterizerTests {
                        "가운데 정렬인데 줄마다 중심이 다르다 — 줄 단위 정렬이 안 됐다")
     }
 }
+
+/// Sendable 픽셀 버퍼 API. `CGImage`는 Swift 6에서 Sendable이 아니라 백그라운드
+/// 큐에서 구운 결과를 메인 액터로 못 넘긴다 — 글자 갱신을 메인 밖으로 옮기려면
+/// 이 API가 있어야 한다(Task 4).
+extension TextRasterizerTests {
+    func testPixelBufferSizeMatchesCGImage() throws {
+        let image = try TextRasterizer.rasterize(
+            text: "12:34", fontData: nil, pointSize: 64, color: white)
+        let buffer = try TextRasterizer.rasterizePixels(
+            text: "12:34", fontData: nil, pointSize: 64, color: white,
+            wrapWidth: 0, maxRows: 0, usesEllipsis: false)
+        XCTAssertEqual(buffer.width, image.width)
+        XCTAssertEqual(buffer.height, image.height)
+    }
+
+    /// 바이트 수는 "한 줄 바이트 수 × 높이"와 정확히 같아야 한다. Metal의
+    /// `replace(region:...)`가 그만큼만 읽으므로, 더 많거나 적으면 텍스처가
+    /// 깨지거나 크래시한다.
+    func testPixelBufferByteCountMatchesBytesPerRow() throws {
+        let buffer = try TextRasterizer.rasterizePixels(
+            text: "8", fontData: nil, pointSize: 96, color: white,
+            wrapWidth: 0, maxRows: 0, usesEllipsis: false)
+        XCTAssertGreaterThan(buffer.width, 0)
+        XCTAssertGreaterThan(buffer.height, 0)
+        XCTAssertGreaterThanOrEqual(buffer.bytesPerRow, buffer.width * 4)
+        XCTAssertEqual(buffer.data.count, buffer.bytesPerRow * buffer.height)
+    }
+
+    /// 프리멀티플라이드다 — 알파가 0인 픽셀은 RGB도 0이어야 한다. 아니면
+    /// 투명한 가장자리에 색이 배어 나와 합성 결과가 지저분해진다.
+    func testPixelBufferIsPremultiplied() throws {
+        let buffer = try TextRasterizer.rasterizePixels(
+            text: "8", fontData: nil, pointSize: 96, color: Vec3(x: 1, y: 0, z: 0),
+            wrapWidth: 0, maxRows: 0, usesEllipsis: false)
+        let bytes = buffer.data
+        var checkedTransparent = false
+        for i in stride(from: 0, to: bytes.count - 3, by: 4) where bytes[i + 3] == 0 {
+            checkedTransparent = true
+            XCTAssertEqual(bytes[i], 0, "알파 0인데 B가 0이 아니다")
+            XCTAssertEqual(bytes[i + 1], 0, "알파 0인데 G가 0이 아니다")
+            XCTAssertEqual(bytes[i + 2], 0, "알파 0인데 R이 0이 아니다")
+        }
+        XCTAssertTrue(checkedTransparent, "완전히 투명한 픽셀이 없다 — 여백이 있어야 한다")
+    }
+
+    /// 채널 순서는 B,G,R,A여야 한다 — `MTLPixelFormat.bgra8Unorm`과 같은
+    /// 배치라야 Metal 텍스처에 채널이 뒤바뀌지 않고 올라간다.
+    func testPixelBufferChannelOrderIsBGRA() throws {
+        let buffer = try TextRasterizer.rasterizePixels(
+            text: "8", fontData: nil, pointSize: 96, color: Vec3(x: 1, y: 0, z: 0),
+            wrapWidth: 0, maxRows: 0, usesEllipsis: false)
+        let bytes = buffer.data
+        var sawOpaqueRed = false
+        for i in stride(from: 0, to: bytes.count - 3, by: 4) where bytes[i + 3] > 200 {
+            // 빨강이 불투명하게 칠해진 자리는 B가 낮고 R이 높아야 한다(BGRA).
+            if bytes[i] < 60, bytes[i + 2] > 200 { sawOpaqueRed = true; break }
+        }
+        XCTAssertTrue(sawOpaqueRed, "BGRA 순서가 아니다 — 채널이 뒤바뀌었다")
+    }
+
+    func testPixelBufferEmptyTextThrows() {
+        XCTAssertThrowsError(try TextRasterizer.rasterizePixels(
+            text: "", fontData: nil, pointSize: 32, color: white,
+            wrapWidth: 0, maxRows: 0, usesEllipsis: false))
+    }
+
+    /// CGImage API와 같은 인자를 받아야 한다 — 줄바꿈 폭도 그대로 통한다.
+    func testPixelBufferWrapsAtMaxWidth() throws {
+        let long = "이것은 아주 긴 곡 제목이고 한 줄에 들어가지 않는다"
+        let single = try TextRasterizer.rasterizePixels(
+            text: long, fontData: nil, pointSize: 40, color: white,
+            wrapWidth: 0, maxRows: 0, usesEllipsis: false)
+        let wrapped = try TextRasterizer.rasterizePixels(
+            text: long, fontData: nil, pointSize: 40, color: white,
+            wrapWidth: 200, maxRows: 0, usesEllipsis: false)
+        XCTAssertLessThan(wrapped.width, single.width, "접히지 않았다")
+        XCTAssertGreaterThan(wrapped.height, single.height, "여러 줄이 되어야 한다")
+    }
+}
