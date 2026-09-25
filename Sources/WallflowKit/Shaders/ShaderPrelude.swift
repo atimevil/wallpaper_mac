@@ -20,9 +20,21 @@ public enum ShaderPrelude {
     #define ivec3 int3
     #define ivec4 int4
     #define uvec2 uint2
+    #define uvec3 uint3
+    // 정점의 `a_BlendIndices`(본 스키닝)가 `uvec4`다.
+    #define uvec4 uint4
     #define mat2 float2x2
     #define mat3 float3x3
     #define mat4 float4x4
+    // 정사각이 아닌 행렬. GLSL의 `matCxR`은 C열 R행이고 MSL의 `floatCxR`도
+    // 같은 순서라 그대로 옮긴다 — 본 행렬 `mat4x3 g_Bones`(4열 3행, 동차 좌표
+    // vec4를 vec3로 보내는 3x4 아핀 변환)가 이 자리에서 떨어졌었다.
+    #define mat2x3 float2x3
+    #define mat2x4 float2x4
+    #define mat3x2 float3x2
+    #define mat3x4 float3x4
+    #define mat4x2 float4x2
+    #define mat4x3 float4x3
     """
 
     /// WE 호환 헬퍼와 `shaders/common.h`(37줄)의 함수들.
@@ -56,6 +68,10 @@ public enum ShaderPrelude {
     inline float3x3 wfCast3x3(float3x3 m) { return m; }
     inline float3x3 wfCast3x3(float4x4 m) {
         return float3x3(m[0].xyz, m[1].xyz, m[2].xyz);
+    }
+    // 본 행렬(`mat4x3`, 4열 3행)에서 회전·크기 3x3만 뜯는다. 마지막 열은 이동이다.
+    inline float3x3 wfCast3x3(float4x3 m) {
+        return float3x3(m[0], m[1], m[2]);
     }
 
     // 받는 쪽 타입에 맞춘다. 번역기가 `TYPE x = EXPR;`의 EXPR을 이걸로 감싼다.
@@ -99,6 +115,10 @@ public enum ShaderPrelude {
     inline float4 mul(float4 v, float4x4 m) { return v * m; }
     inline float3 mul(float3x3 m, float3 v) { return m * v; }
     inline float4 mul(float4x4 m, float4 v) { return m * v; }
+    // 본 행렬(4열 3행)로 동차 좌표를 옮긴다. `v * m`(행벡터 관례)는 성분 수가
+    // 안 맞아 못 쓰지만, `m * v`(열이 4개, v도 4성분)는 그대로 표준 행렬곱이라
+    // 결과가 같다 — 각 열에 v의 성분을 가중해 더한 값이 두 관례 모두에서 같다.
+    inline float3 mul(float4 v, float4x3 m) { return m * v; }
 
     // `shaders/common.h`(37줄). 이 파일은 `#include`로 208곳에서 쓰이지만
     // 여기 이미 있으므로 번역기가 그 include를 건너뛴다 — 둘 다 펼치면
@@ -110,6 +130,20 @@ public enum ShaderPrelude {
     #define M_PI_2 6.28318530718
     #define SQRT_2 1.41421356237
     #define SQRT_3 1.73205080756
+
+    // `#require LightingV1`가 걸린 실물 7개(`generic4`·`chroma4`·`fur4`·`foliage4`·
+    // `genericparticle`·`genericimage4`·`genericropeparticle`)가 `PerformLighting_V1`을
+    // 부른다. 이건 셰이더 파일 어디에도 정의가 없다 — WE 엔진이 씬의 빛 레이어
+    // 개수에 맞춰 이 함수 몸통을 그때그때 만들어 링크하는 자리다. 이 저장소는
+    // 아직 빛 레이어를 구현하지 않아(`ModelRenderer`가 항상 빛 넷을 0으로 채운다)
+    // 직접광이 없는 게 지금 상태와 맞다 — 0을 돌려주면 환경광(`v_LightAmbientColor`
+    // 등)만으로 그려진다. 빛 레이어를 구현하면 이 자리를 실제 광원 루프로 바꾼다.
+    inline float3 PerformLighting_V1(
+        float3 worldPos, float3 albedo, float3 normal, float3 viewVector,
+        float3 specularTint, float3 f0, float roughness, float metallic
+    ) {
+        return float3(0.0);
+    }
 
     inline float3 hsv2rgb(float3 c) {
         float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
@@ -189,7 +223,7 @@ public enum ShaderPrelude {
     // 진단용: 샘플의 알파를 회색조로 그린다. 자홍이 나오던 자리가 검으면
     // 그 자리는 투명한 곳이고, 문제는 투명 영역의 RGB가 보이는 것이다.
     #define texSample2D(tex, uv) \
-        float4(float3(tex.sample(tex##Sampler, (uv)).a), 1.0)
+        float4(float3(tex.sample(tex##Sampler, wfTo2(uv)).a), 1.0)
     #elif defined(WF_SHOW_UV)
     // 진단용: 샘플링 좌표를 색으로 그린다. 0~1이면 빨강-초록 그라데이션이 나온다.
     #define texSample2D(tex, uv) float4(saturate((uv).x), saturate((uv).y), 0.0, 1.0)
@@ -198,10 +232,13 @@ public enum ShaderPrelude {
     // 좌표가 문제다. 여기서도 자홍이면 텍스처 자체를 잘못 읽고 있는 것이다.
     #define texSample2D(tex, uv) tex.sample(tex##Sampler, float2(0.5, 0.5))
     #else
-    #define texSample2D(tex, uv) tex.sample(tex##Sampler, (uv))
+    // 실물 `v_TexCoord`가 `vec4`로 선언되고 좌표는 `.xy`에만 채워지는 셰이더가
+    // 있다(clipping_mask). GLSL/HLSL은 함수 인자에서 폭이 넓은 쪽을 암묵적으로
+    // 잘라 받지만 `sample()`은 `float2`만 받는다 — `wfTo2`로 그 잘림을 흉내 낸다.
+    #define texSample2D(tex, uv) tex.sample(tex##Sampler, wfTo2(uv))
     #endif
-    #define texSample2DLod(tex, uv, lod) tex.sample(tex##Sampler, (uv), level(lod))
-    #define texSample2DCompare(tex, uv, z) tex.sample(tex##Sampler, (uv))
+    #define texSample2DLod(tex, uv, lod) tex.sample(tex##Sampler, wfTo2(uv), level(lod))
+    #define texSample2DCompare(tex, uv, z) tex.sample(tex##Sampler, wfTo2(uv))
     """
 
     /// 번역기가 셰이더 앞에 붙이는 전체 조각.

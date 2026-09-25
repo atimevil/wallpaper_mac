@@ -102,7 +102,8 @@ public enum GLSLTranslator {
         let combos = comboDefaults(in: expanded)
         let annotations = uniformAnnotations(in: expanded)
         let stripped = strippingComments(expanded)
-        let modulo = rewritingModulo(stripped)
+        let definesFixed = strippingStrayDefineSemicolons(stripped)
+        let modulo = rewritingModulo(definesFixed)
         let renamed = rewritingReservedIdentifiers(modulo)
         let arrays = rewritingArrayConstructors(renamed)
         let truncated = rewritingTruncation(arrays)
@@ -266,6 +267,33 @@ public enum GLSLTranslator {
         return out
     }
 
+    /// `#define mask 1.0;`처럼 몸통에 군더더기 `;`가 붙은 한 줄짜리 매크로가
+    /// 실물에 있다(crt_screen). `float opacity = wfTo1(u_alpha * mask);`로
+    /// 감싸고 나면 그 `;`가 펼쳐지면서 감싼 괄호 **안에서** 문장이 끝나 버려
+    /// 통째로 떨어진다. 함수형 매크로(`#define F(x) ...`)는 건드리지 않는다 —
+    /// 괄호 안의 `;`는 do/while 관용구처럼 의도한 것일 수 있다.
+    static func strippingStrayDefineSemicolons(_ source: String) -> String {
+        var out: [String] = []
+        for rawLine in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            let line = String(rawLine)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("#define"), trimmed.hasSuffix(";") else {
+                out.append(line); continue
+            }
+            let afterDefine = trimmed.dropFirst("#define".count)
+                .drop { $0 == " " || $0 == "\t" }
+            // 매크로 이름 바로 뒤가 `(`면 함수형 매크로다 — 손대지 않는다.
+            let name = afterDefine.prefix { $0.isLetter || $0.isNumber || $0 == "_" }
+            guard afterDefine.dropFirst(name.count).first != "(" else {
+                out.append(line); continue
+            }
+            var fixed = line
+            fixed.removeLast()
+            out.append(fixed)
+        }
+        return out.joined(separator: "\n")
+    }
+
     /// WE의 셰이더 컴파일러는 HLSL식 **암묵적 벡터 절단**을 허용한다.
     /// 실물이 이렇게 쓴다:
     /// ```glsl
@@ -292,12 +320,16 @@ public enum GLSLTranslator {
                   let width = widths[words[1]], !words[2].contains("[") else { continue }
             varyingWidth[words[2]] = width
         }
+        // varying·uniform과, 폭을 알아낼 수 있는 `#define` 상수까지. 식 안쪽에서
+        // 폭이 다른 전역 둘이 바로 섞이는 자리(HLSL 암묵적 절단, pixelate·
+        // clipping_mask 이펙트)를 고치는 데 쓴다.
+        let identifierWidth = declaredIdentifierWidths(in: source)
 
         var out: [String] = []
         for rawLine in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
             let line = String(rawLine)
-            guard let rewritten = wrappedInitializer(line, widths: widths,
-                                                     varyingWidth: varyingWidth)
+            guard let rewritten = wrappedInitializer(
+                line, widths: widths, varyingWidth: varyingWidth, identifierWidth: identifierWidth)
             else { out.append(line); continue }
             out.append(rewritten)
         }
@@ -307,7 +339,8 @@ public enum GLSLTranslator {
     /// 한 줄이 `TYPE NAME = EXPR;`이거나 `VARYING = EXPR;`이면 EXPR을 감싼다.
     /// 아니면 nil.
     private static func wrappedInitializer(
-        _ line: String, widths: [String: Int], varyingWidth: [String: Int]
+        _ line: String, widths: [String: Int], varyingWidth: [String: Int],
+        identifierWidth: [String: Int]
     ) -> String? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         // 한 문장만 다룬다. `;`가 둘이면 for 머리이거나 두 문장이다.
@@ -343,8 +376,12 @@ public enum GLSLTranslator {
         default:
             return nil
         }
+        // 식 안쪽에서 폭이 다른 전역끼리 바로 섞이는 자리를 먼저 고친다. 바깥
+        // `wfTo\(width)(...)`는 받는 쪽(LHS) 하나만 보므로, `v_TexCoord - texScaleCenter`
+        // 처럼 안쪽 뺄셈 자체가 이미 Metal에서 타입 불일치인 경우를 못 잡는다.
+        let (fixedRhs, _) = rewriteWithWidth(rhs, widths: identifierWidth)
         let indent = line.prefix { $0 == " " || $0 == "\t" }
-        return "\(indent)\(lhs) = wfTo\(width)(\(rhs));"
+        return "\(indent)\(lhs) = wfTo\(width)(\(fixedRhs));"
     }
 
     /// 괄호 밖에 `,`나 `=`가 있는지. `float a = 1, b = 2;`나 `a = b = c;`는
@@ -478,6 +515,198 @@ public enum GLSLTranslator {
             out.append(contentsOf: "wfMod(\(String(left)), \(right))")
         }
         return String(out)
+    }
+
+    /// `round(v_PixelCoord) * v_PixelSize`처럼 폭이 다른 varying/uniform 둘을
+    /// 연산자 하나로 바로 묶는 실물이 있다(pixelate 이펙트, `vec2 * vec4`).
+    /// HLSL은 이런 이항 연산에서도 넓은 쪽을 조용히 잘라 좁은 쪽에 맞춘다.
+    /// C++/Metal은 크기가 다른 벡터끼리 연산자를 아예 허용하지 않는다.
+    ///
+    /// `rewritingTruncation`의 감싸기는 **받는 쪽**(선언·대입의 왼쪽)만 본다 — 식
+    /// 안쪽에서 벌어지는 이 불일치는 못 잡는다. 여기서는 연산자 바로 양옆(피연산자
+    /// 하나씩, `%` 재작성과 같은 방식으로 괄호까지 통째로 집는다)의 폭을 실제로
+    /// 비교해서, 다를 때만 넓은 쪽을 좁힌다 — `length(a - b)`처럼 폭이 같은
+    /// 자리는 건드리지 않으므로 그 결과(스칼라)를 다시 잘못 좁히지 않는다.
+    /// `varying`·`uniform` 선언과, 폭을 알아낼 수 있는 `#define` 상수의 이름 → 폭(1~4).
+    /// 배열·행렬·샘플러는 뺀다.
+    ///
+    /// 실물 clipping_mask 이펙트가 `#define texScaleCenter (u_texScaleCenter * 2.0 - 1.0)`
+    /// 처럼 uniform을 그대로 감싼 매크로를 만들고, 그 매크로를 `v_TexCoord`(vec4)와
+    /// 바로 섞어 쓴다. `#define`은 위에서 아래로 먼저 온 것부터 펼쳐지므로,
+    /// 한 줄씩 내려가며 지금까지 안 이름으로 다음 매크로의 폭을 잰다.
+    static func declaredIdentifierWidths(in source: String) -> [String: Int] {
+        let typeWidths = ["float": 1, "vec2": 2, "vec3": 3, "vec4": 4]
+        var out: [String: Int] = [:]
+        for line in source.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("#define") {
+                let afterDefine = trimmed.dropFirst("#define".count)
+                    .drop { $0 == " " || $0 == "\t" }
+                let name = String(afterDefine.prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+                let rest = afterDefine.dropFirst(name.count)
+                // 함수형 매크로(`NAME(args) ...`)는 인자마다 폭이 다를 수 있어 건너뛴다.
+                guard !name.isEmpty, rest.first != "(" else { continue }
+                if let width = rewriteWithWidth(String(rest), widths: out).width { out[name] = width }
+                continue
+            }
+            let words = trimmed.replacingOccurrences(of: ";", with: " ")
+                .split(whereSeparator: \.isWhitespace).map(String.init)
+            guard words.count >= 3, ["varying", "uniform"].contains(words[0]),
+                  let width = typeWidths[words[1]], !words[2].contains("[") else { continue }
+            out[words[2]] = width
+        }
+        return out
+    }
+
+    /// 폭이 다른 전역 둘이 식 안에서 바로 섞이는 자리(HLSL 암묵적 절단)를 찾아
+    /// 넓은 쪽을 `wfToN`으로 좁힌다.
+    ///
+    /// `rewritingTruncation`의 감싸기는 **받는 쪽**(선언·대입의 왼쪽)만 본다 —
+    /// `v_TexCoord*2.0-1.0-texScaleCenter`처럼 실제 불일치가 여러 항을 지나서야
+    /// 나타나면(clipping_mask 이펙트, vec4 - vec2) 못 잡는다. 연산자 하나만
+    /// 보는 게 아니라 `+`/`-`(낮은 우선순위)부터 `*`/`/`까지 실제 계산 순서를 따라
+    /// 왼쪽 결합으로 접으면서 HLSL의 규칙(스칼라는 투명, 벡터끼리 폭이 다르면
+    /// 좁은 쪽에 맞춘다)을 그대로 재현한다. 폭을 모르는 자리는 손대지 않는다
+    /// (nil을 그대로 전파) — 확신 없는 곳을 고치면 오히려 새 버그가 된다
+    /// (`length(a - b)`의 `a - b`처럼 폭이 같은 자리를 잘못 좁히면 그렇게 된다).
+    static func rewriteWithWidth(
+        _ expression: String, widths: [String: Int]
+    ) -> (text: String, width: Int?) {
+        let trimmed = expression.trimmingCharacters(in: .whitespaces)
+        if let segments = splitTopLevel(trimmed, operators: Set("+-")) {
+            return foldChain(segments, widths: widths)
+        }
+        if let segments = splitTopLevel(trimmed, operators: Set("*/")) {
+            return foldChain(segments, widths: widths)
+        }
+        if trimmed.hasPrefix("("), trimmed.hasSuffix(")"), isSingleParenGroup(trimmed) {
+            let inner = String(trimmed.dropFirst().dropLast())
+            let (text, width) = rewriteWithWidth(inner, widths: widths)
+            return ("(\(text))", width)
+        }
+        if trimmed.hasSuffix(")"), let open = trimmed.firstIndex(of: "(") {
+            let name = String(trimmed[..<open])
+            let argsText = String(
+                trimmed[trimmed.index(after: open)..<trimmed.index(before: trimmed.endIndex)])
+            let argSegments = splitTopLevel(argsText, operators: Set(","))
+                ?? [(text: argsText, op: "")]
+            let rewrittenArgs = argSegments.map { rewriteWithWidth($0.text, widths: widths) }
+            let text = "\(name)(\(rewrittenArgs.map(\.text).joined(separator: ", ")))"
+            let elementwiseUnary: Set<String> = [
+                "round", "floor", "ceil", "fract", "frac", "abs", "sign",
+                "normalize", "saturate", "trunc",
+            ]
+            if rewrittenArgs.count == 1, elementwiseUnary.contains(name) {
+                return (text, rewrittenArgs[0].width)
+            }
+            if ["vec2", "vec3", "vec4"].contains(name) {
+                return (text, name == "vec2" ? 2 : name == "vec3" ? 3 : 4)
+            }
+            return (text, nil)
+        }
+        // 숫자 리터럴은 스칼라다 — 벡터 어느 폭과 섞여도 걸리지 않는다(폭 0으로 표시).
+        if !trimmed.isEmpty, trimmed.allSatisfy({ $0.isNumber || $0 == "." }) {
+            return (trimmed, 0)
+        }
+        if let width = widths[trimmed] { return (trimmed, width) }
+        return (trimmed, nil)
+    }
+
+    /// `A op1 B op2 C ...`를 왼쪽 결합으로 접는다. 폭이 다른 이웃(스칼라 제외)이
+    /// 만나면 넓은 쪽을 `wfToN`으로 좁힌다.
+    private static func foldChain(
+        _ segments: [(text: String, op: String)], widths: [String: Int]
+    ) -> (text: String, width: Int?) {
+        var text = ""
+        var width: Int?
+        for (index, segment) in segments.enumerated() {
+            let (termText, termWidth) = rewriteWithWidth(segment.text, widths: widths)
+            if index == 0 {
+                text = termText
+                width = termWidth
+                continue
+            }
+            let combined = combineWidths(width, termWidth)
+            let left = narrowed(text, from: width, to: combined)
+            let right = narrowed(termText, from: termWidth, to: combined)
+            text = "\(left)\(segment.op)\(right)"
+            width = combined
+        }
+        return (text, width)
+    }
+
+    /// 스칼라(0)는 아무 폭과도 섞인다. 둘 다 벡터인데 폭이 다르면 HLSL처럼
+    /// 좁은 쪽으로 — 이 자리가 바로 `wfToN`으로 감싸야 하는 자리다.
+    private static func combineWidths(_ left: Int?, _ right: Int?) -> Int? {
+        guard let left, let right else { return nil }
+        if left == 0 { return right }
+        if right == 0 { return left }
+        return min(left, right)
+    }
+
+    private static func narrowed(_ text: String, from width: Int?, to target: Int?) -> String {
+        guard let width, let target, target > 0, width > target else { return text }
+        return "wfTo\(target)(\(text))"
+    }
+
+    /// `expression`을 괄호 깊이 0인 자리에서만 `operators`로 나눈다. `+`/`-`는
+    /// 단항(맨 앞이거나 다른 연산자·여는 괄호 바로 뒤)이면 나누지 않는다.
+    /// 나눌 자리가 없으면 nil — "이 우선순위의 사슬이 아니다"라는 뜻이다.
+    private static func splitTopLevel(
+        _ expression: String, operators: Set<Character>
+    ) -> [(text: String, op: String)]? {
+        let characters = Array(expression)
+        func isOperandEnd(_ c: Character) -> Bool {
+            c.isLetter || c.isNumber || c == "_" || c == ")" || c == "]" || c == "."
+        }
+        var depth = 0
+        var segments: [(String, String)] = []
+        var start = 0
+        var pendingOp = ""
+        var index = 0
+        while index < characters.count {
+            let c = characters[index]
+            if c == "(" || c == "[" {
+                depth += 1
+            } else if c == ")" || c == "]" {
+                depth -= 1
+            } else if depth == 0, operators.contains(c) {
+                let isSign = c == "+" || c == "-"
+                var precededByOperand = false
+                if isSign {
+                    var j = index - 1
+                    while j >= 0, characters[j] == " " { j -= 1 }
+                    precededByOperand = j >= 0 && isOperandEnd(characters[j])
+                }
+                if !isSign || precededByOperand {
+                    let text = String(characters[start..<index]).trimmingCharacters(in: .whitespaces)
+                    guard !text.isEmpty else { return nil }
+                    segments.append((text, pendingOp))
+                    pendingOp = String(c)
+                    start = index + 1
+                }
+            }
+            index += 1
+        }
+        guard !segments.isEmpty else { return nil }
+        let lastText = String(characters[start...]).trimmingCharacters(in: .whitespaces)
+        guard !lastText.isEmpty else { return nil }
+        segments.append((lastText, pendingOp))
+        return segments
+    }
+
+    /// `trimmed`가 통째로 괄호 한 겹인지. `(a)+(b)`처럼 두 조각이면 아니다.
+    private static func isSingleParenGroup(_ trimmed: String) -> Bool {
+        var depth = 0
+        let characters = Array(trimmed)
+        for (index, character) in characters.enumerated() {
+            if character == "(" { depth += 1 }
+            else if character == ")" {
+                depth -= 1
+                if depth == 0 { return index == characters.count - 1 }
+            }
+        }
+        return false
     }
 
     /// 지금 쓰고 있는 줄이 전처리기 지시자인지. `#if A % B` 같은 것은 건드리지 않는다.
