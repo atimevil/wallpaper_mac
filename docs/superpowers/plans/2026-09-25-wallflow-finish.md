@@ -17,8 +17,9 @@
 - [ ] T3 인스턴스 스크립트: `layer.instance` 왕복, `instanceoverride.<키>` 속성 스크립트(모듈 import 포함), 한 틱 안의 `stop(); play()` 재시작
 - [ ] T4 `count` = 방출량, `rate` = 시뮬레이션 속도 (게이트 통과 — 아래 기록)
 - [ ] T5 `starttime` 프리웜
-- [ ] T6 검증: 전체 테스트, 앱 재빌드·재실행, 라이브러리 촬영 대조, 배경화면 복원
-- [ ] T7 기록·릴리스: README, v0.1.1 DMG·태그·GitHub 릴리스, 메모리
+- [ ] T6 프레임: 전원 연결 60 / 배터리·저전력 30 기본, WE식 배터리 규칙(전원과 같게/30/15/멈춤), 메뉴바에서 바로 전환
+- [ ] T7 검증: 전체 테스트, 앱 재빌드·재실행, 라이브러리 촬영 대조, 배경화면 복원
+- [ ] T8 기록·릴리스: README, v0.1.1 DMG·태그·GitHub 릴리스, 메모리
 - [x] `backup/before-scrub` 로컬 브랜치 삭제 (2026-09-25, 사용자 승인)
 
 공식 정의(IParticleSystemInstance — 전부 배율, 1이면 그대로):
@@ -48,12 +49,12 @@
 - 기준선(2026-09-25): 566 테스트, 실패 0, 건너뜀 6. 빌드 경고 0.
 - 커밋 메시지는 저장소 관례(한국어 "…한다" 문장). `Co-Authored-By`·`Claude-Session` 줄을 **넣지 않는다**.
 - 주석은 주변처럼 한국어로 "왜"를 쓴다. 파일·스크립트에서 온 배율은 유한하고 0~100일 때만 받는다(`ParticleOverride.parse`의 규칙).
-- 서브에이전트는 `git worktree add .worktrees/<task> -b <task>`에서 일하고 앱을 띄우거나 화면을 찍지 않는다(T6만 한다).
+- 서브에이전트는 `git worktree add .worktrees/<task> -b <task>`에서 일하고 앱을 띄우거나 화면을 찍지 않는다(T7만 한다).
 - 기존 테스트가 새 동작 때문에 깨지면 그 테스트가 무엇을 지키려 했는지 먼저 읽고, 지키려던 것이 여전히 맞으면 코드를, 옛 해석에 기댄 것이면 테스트를 고친다. 고친 이유를 커밋 메시지에 쓴다.
 
 ## Review Focus
 
-1. **PS2 시계 파티클이 검게 사라짐** — `particles/particles2.json`은 가산 혼합이고 colorrandom이 없다. T2가 정적 `colorn "0 0 0"`을 스폰 색에 곱하면 T3 전까지 안 보인다. T2·T3은 같은 빌드로 나간다(앱 재빌드는 T6에서만). T3 `testInstanceColorScriptUsesUserProperties`와 T6 촬영이 막는다.
+1. **PS2 시계 파티클이 검게 사라짐** — `particles/particles2.json`은 가산 혼합이고 colorrandom이 없다. T2가 정적 `colorn "0 0 0"`을 스폰 색에 곱하면 T3 전까지 안 보인다. T2·T3은 같은 빌드로 나간다(앱 재빌드는 T7에서만). T3 `testInstanceColorScriptUsesUserProperties`와 T7 촬영이 막는다.
 2. **예산이 씬 배율을 지움** — `scaledToBudget`이 지금은 `applying(ParticleOverride)`를 거친다. `instance`를 저장하게 되면 예산이 씬 배율을 덮어쓴다. T2가 예산을 자기 경로로 떼고 `testBudgetKeepsSceneInstance`로 막는다.
 3. **스크립트가 NaN·음수·거대한 값을 씀** — `layer.instance.rate = NaN` 등. 파일과 같은 규칙으로 버린다. T3 `testApplyFiltersScriptValues`.
 4. **큰 `rate`·긴 프리웜** — rate 100 × 0.1초, starttime 수천 초. 곱한 뒤 `maxTimeStep`으로 죄고 프리웜은 상한을 둔다. T4 `testHugeRateIsClamped`, T5 `testPrewarmIsCapped`.
@@ -1086,7 +1087,263 @@ git commit -m "파티클 프리셋의 starttime만큼 미리 돌려 두고 보�
 
 ---
 
-### Task 6: 실물 검증 (메인 세션만)
+### Task 6: 프레임 — 전원 연결·배터리 규칙, 메뉴바 전환
+
+WE는 성능 탭에서 상황마다 재생 규칙(계속 재생·일시정지·정지)을 고르고 FPS 제한을 하나 둔다([공식 도움말](https://help.wallpaperengine.io/en/performance/game.html) — "Other application fullscreen", "Display asleep" → "Stop (free memory)"). 그 틀을 따르되, 사용자 결정(2026-09-25)대로 배터리·저전력일 때는 멈춤 말고 프레임만 낮추는 쪽을 기본으로 둔다. 기존 "배터리·저전력이면 프레임을 낮춤" 켬/끔 스위치를 이 규칙으로 바꾼다. 발열 감쇠(15)는 그대로 사용자가 끌 수 없다.
+
+**Files:**
+- Modify: `Sources/WallflowKit/PowerPolicy.swift`
+- Modify: `Sources/WallflowApp/PowerPreferencesStore.swift`
+- Modify: `Sources/WallflowApp/SettingsWindowController.swift` — 배터리 체크박스 → 팝업, `reloadPower()`
+- Modify: `Sources/WallflowApp/MenuBarController.swift` — "프레임" 하위 메뉴, `onPowerChanged`
+- Modify: `Sources/WallflowApp/AppCoordinator.swift:58-66` — 메뉴바의 `onPowerChanged` 연결
+- Test: `Tests/WallflowKitTests/PowerPolicyTests.swift`, `Tests/WallflowKitTests/UserPropertyTests.swift`
+
+**Interfaces:**
+- Produces: `PowerPreferences.batteryFPS: Int`(기본 30) · `PowerPreferences.allowedBatteryFPS = [60, 30, 15, 0]`(0 = 멈춤, 60 = 전원과 같게) · `PowerPreferences.defaultBatteryFPS = 30` · `PowerPolicy.normalFPS = 60` · `PowerPreferencesStore.batteryChoices: [(String, Int)]` · `SettingsWindowController.reloadPower()` · `reduceOnBattery` 삭제
+
+- [ ] **Step 1: 실패하는 테스트를 쓴다**
+
+`PowerPolicyTests`에서 기본값이 바뀐 셋을 고친다: `testFullPowerIsThirtyFPS` → 이름 `testFullPowerIsSixtyFPS`, 기대 `.playing(fps: 60)`. `testJustUnderIdleThresholdKeepsPlaying` 기대 60. `testBatteryHalvesFrameRate`·`testLowPowerModeHalvesFrameRate` → 이름 `testBatteryDefaultsToThirty`·`testLowPowerModeDefaultsToThirty`, 기대 `.playing(fps: 30)`. 발열 둘(`testThermalPressureHalvesFrameRate`, `testMultipleReductionsStillFifteen`)은 15 그대로. 새로:
+
+```swift
+    /// WE의 배터리 재생 규칙처럼 멈출 수도 있다.
+    func testBatteryCanPause() {
+        var prefs = PowerPreferences()
+        prefs.batteryFPS = 0
+        var s = PowerSignals.active
+        s.isOnBattery = true
+        XCTAssertEqual(PowerPolicy.directive(for: s, preferences: prefs), .paused)
+    }
+
+    /// 배터리 규칙이 전원 연결 시보다 높아지지는 않는다 — 60은 "전원과 같게"다.
+    func testBatteryNeverExceedsPluggedIn() {
+        var prefs = PowerPreferences()
+        prefs.targetFPS = 30
+        prefs.batteryFPS = 60
+        var s = PowerSignals.active
+        s.isOnBattery = true
+        XCTAssertEqual(PowerPolicy.directive(for: s, preferences: prefs), .playing(fps: 30))
+    }
+
+    /// 허용되지 않은 배터리 값은 기본값으로 돌아간다.
+    func testUnknownBatteryFPSFallsBackToDefault() {
+        var prefs = PowerPreferences()
+        prefs.batteryFPS = 7
+        var s = PowerSignals.active
+        s.isLowPowerMode = true
+        XCTAssertEqual(PowerPolicy.directive(for: s, preferences: prefs), .playing(fps: 30))
+    }
+```
+
+`UserPropertyTests`: `.active` 기본 기대 30 → 60(182행), `prefs.reduceOnBattery = false` 두 곳 → `prefs.batteryFPS = 60`, `testUnknownFPSFallsBackToNormal` 기대 30 → 60(주석 "30으로" → "기본값으로").
+
+- [ ] **Step 2: 실패를 확인한다**
+
+Run: `swift test --filter "PowerPolicyTests|UserPropertyTests"`
+Expected: 컴파일 실패 — `batteryFPS`가 없다
+
+- [ ] **Step 3: 정책** (`PowerPolicy.swift`)
+
+```swift
+/// 사용자가 고르는 재생 규칙. 실물 Wallpaper Engine의 "성능" 설정에 해당한다 —
+/// 상황마다 재생 규칙을 고르고(가려짐·전체화면·입력 없음·배터리) 프레임 제한을 둔다.
+///
+/// 기본값: 가려지면 정지, 전체화면이면 정지, 15분 입력 없으면 정지,
+/// 전원 연결 60fps, 배터리·저전력 30fps(2026-09-25 사용자 결정).
+public struct PowerPreferences: Equatable, Sendable {
+    public var pauseWhenOccluded: Bool
+    public var pauseInFullscreen: Bool
+    /// 0이면 입력이 없어도 정지하지 않는다.
+    public var idlePauseSeconds: TimeInterval
+    /// 전원에 연결돼 있을 때의 프레임.
+    public var targetFPS: Int
+    /// 배터리·저전력일 때의 프레임. 0이면 멈춘다(WE 배터리 규칙의 "일시정지").
+    /// 전원 연결 시보다 높아지지는 않는다 — 60은 "전원과 같게"다.
+    public var batteryFPS: Int
+
+    public init(
+        pauseWhenOccluded: Bool = true, pauseInFullscreen: Bool = true,
+        idlePauseSeconds: TimeInterval = PowerPolicy.idlePauseSeconds,
+        targetFPS: Int = PowerPolicy.normalFPS,
+        batteryFPS: Int = PowerPreferences.defaultBatteryFPS
+    ) {
+        self.pauseWhenOccluded = pauseWhenOccluded
+        self.pauseInFullscreen = pauseInFullscreen
+        self.idlePauseSeconds = idlePauseSeconds
+        self.targetFPS = targetFPS
+        self.batteryFPS = batteryFPS
+    }
+
+    public static let standard = PowerPreferences()
+    /// 고를 수 있는 프레임. 배경화면에 60이 필요한 경우는 드물고 그 위는 낭비다.
+    public static let allowedFPS = [15, 30, 60]
+    /// 배터리·저전력 규칙. 0은 멈춤, 60은 전원과 같게.
+    public static let allowedBatteryFPS = [60, 30, 15, 0]
+    public static let defaultBatteryFPS = 30
+}
+```
+
+`PowerPolicy.normalFPS = 60`. `directive`의 정지 판정 뒤를:
+
+```swift
+        var fps = PowerPreferences.allowedFPS.contains(preferences.targetFPS)
+            ? preferences.targetFPS : normalFPS
+        // 배터리·저전력 규칙. 멈출 수도, 프레임만 낮출 수도 있다.
+        if signals.isOnBattery || signals.isLowPowerMode {
+            let battery = PowerPreferences.allowedBatteryFPS.contains(preferences.batteryFPS)
+                ? preferences.batteryFPS : PowerPreferences.defaultBatteryFPS
+            if battery == 0 { return .paused }
+            fps = Swift.min(fps, battery)
+        }
+        // 발열은 사용자가 끌 수 없다. 기계를 지키는 쪽이 우선이다.
+        if signals.isThermallyPressured { fps = Swift.min(fps, reducedFPS) }
+        return .playing(fps: fps)
+```
+
+- [ ] **Step 4: 저장소** (`PowerPreferencesStore.swift`)
+
+`batteryKey` → 두 키로:
+
+```swift
+    static let batteryFPSKey = "wallflow.power.batteryFPS"
+    /// 예전 켬/끔 스위치. 끈 사람은 "전원과 같게"로 옮긴다.
+    static let legacyBatteryKey = "wallflow.power.reduceOnBattery"
+
+    /// 배터리 규칙의 이름. 설정 창과 메뉴바가 같이 쓴다.
+    static let batteryChoices: [(String, Int)] = [
+        ("전원과 같게", 60), ("30", 30), ("15", 15), ("멈춤", 0),
+    ]
+```
+
+`load()`의 배터리 부분:
+
+```swift
+        if let fps = defaults.object(forKey: batteryFPSKey) as? Int,
+           PowerPreferences.allowedBatteryFPS.contains(fps) {
+            prefs.batteryFPS = fps
+        } else if defaults.object(forKey: legacyBatteryKey) != nil,
+                  !defaults.bool(forKey: legacyBatteryKey) {
+            prefs.batteryFPS = 60
+        }
+```
+
+`save()`의 배터리 부분:
+
+```swift
+        defaults.set(prefs.batteryFPS, forKey: batteryFPSKey)
+        defaults.removeObject(forKey: legacyBatteryKey)
+```
+
+- [ ] **Step 5: 설정 창** (`SettingsWindowController.swift`)
+
+`batteryBox` 체크박스를 지우고 `fpsPopup`과 같은 모양의 `batteryPopup`(`NSPopUpButton`)을 둔다. 프레임 줄의 라벨은 `"프레임(전원 연결):"`, 그 아래 줄:
+
+```swift
+        let batteryRow = NSStackView()
+        batteryRow.orientation = .horizontal
+        batteryRow.addArrangedSubview(NSTextField(labelWithString: "배터리·저전력일 때:"))
+        for (label, fps) in PowerPreferencesStore.batteryChoices {
+            batteryPopup.addItem(withTitle: label)
+            batteryPopup.lastItem?.tag = fps
+        }
+        batteryPopup.selectItem(withTag: prefs.batteryFPS)
+        batteryPopup.target = self
+        batteryPopup.action = #selector(powerChanged)
+        batteryRow.addArrangedSubview(batteryPopup)
+        stack.addArrangedSubview(batteryRow)
+```
+
+`powerChanged()`에서 `prefs.reduceOnBattery = …` → `prefs.batteryFPS = batteryPopup.selectedTag()`. 그리고:
+
+```swift
+    /// 메뉴바에서 바꾼 값을 다시 읽는다. 창이 열린 채로 메뉴에서 바꾸면 여기 남은
+    /// 옛 값이 다음 `powerChanged()`에서 메뉴의 선택을 덮어쓴다.
+    func reloadPower() {
+        let prefs = PowerPreferencesStore.load()
+        occludedBox?.state = prefs.pauseWhenOccluded ? .on : .off
+        fullscreenBox?.state = prefs.pauseInFullscreen ? .on : .off
+        idlePopup.selectItem(withTag: Int(prefs.idlePauseSeconds))
+        fpsPopup.selectItem(withTag: prefs.targetFPS)
+        batteryPopup.selectItem(withTag: prefs.batteryFPS)
+    }
+```
+
+- [ ] **Step 6: 메뉴바** (`MenuBarController.swift`, `AppCoordinator.swift`)
+
+`MenuBarController`에 `onPowerChanged: () -> Void`를 다른 콜백처럼 더한다. "소리에 반응하기" 뒤에:
+
+```swift
+        // 프레임. 전원 연결 시와 배터리·저전력일 때를 따로 고른다(WE 성능 설정의
+        // 배터리 규칙처럼). 설정 창까지 열지 않고 바로 바꾸는 자리다.
+        let power = PowerPreferencesStore.load()
+        let fpsItem = NSMenuItem(title: "프레임", action: nil, keyEquivalent: "")
+        let fpsMenu = NSMenu()
+        fpsMenu.addItem(NSMenuItem.sectionHeader(title: "전원 연결"))
+        for fps in PowerPreferences.allowedFPS {
+            let entry = NSMenuItem(title: "\(fps)", action: #selector(setFPS), keyEquivalent: "")
+            entry.target = self
+            entry.tag = fps
+            entry.state = power.targetFPS == fps ? .on : .off
+            fpsMenu.addItem(entry)
+        }
+        fpsMenu.addItem(.separator())
+        fpsMenu.addItem(NSMenuItem.sectionHeader(title: "배터리·저전력"))
+        for (label, fps) in PowerPreferencesStore.batteryChoices {
+            let entry = NSMenuItem(title: label, action: #selector(setBatteryFPS), keyEquivalent: "")
+            entry.target = self
+            entry.tag = fps
+            entry.state = power.batteryFPS == fps ? .on : .off
+            fpsMenu.addItem(entry)
+        }
+        fpsItem.submenu = fpsMenu
+        menu.addItem(fpsItem)
+```
+
+```swift
+    @objc private func setFPS(_ sender: NSMenuItem) {
+        var prefs = PowerPreferencesStore.load()
+        prefs.targetFPS = sender.tag
+        PowerPreferencesStore.save(prefs)
+        rebuildMenu()
+        onPowerChanged()
+    }
+
+    @objc private func setBatteryFPS(_ sender: NSMenuItem) {
+        var prefs = PowerPreferencesStore.load()
+        prefs.batteryFPS = sender.tag
+        PowerPreferencesStore.save(prefs)
+        rebuildMenu()
+        onPowerChanged()
+    }
+```
+
+`AppCoordinator`의 `MenuBarController(…)` 호출에:
+
+```swift
+            onPowerChanged: { [weak self] in
+                self?.settings?.reloadPower()
+                self?.power?.poll()
+            },
+```
+
+`NSMenuItem.sectionHeader(title:)`는 macOS 14부터다(패키지 최소가 14라 쓸 수 있다).
+
+- [ ] **Step 7: 통과를 확인한다**
+
+Run: 전체 테스트(환경변수 포함), `swift build`(앱 타깃 포함)
+Expected: 전부 통과, 실패 0, 새 경고 0
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add Sources Tests
+git commit -m "프레임을 전원 연결 60, 배터리·저전력 30으로 나누고 메뉴바에서 바로 고르게 한다"
+```
+
+---
+
+### Task 7: 실물 검증 (메인 세션만)
 
 - [ ] **Step 1:** 전체 테스트(환경변수 포함) — 실패 0. `swift build -c release 2>&1 | grep -c warning` → 0
 - [ ] **Step 2:** 지금 배경화면을 적어 둔다: `defaults read dev.timevil.wallflow wallflow.lastSelectedID`
@@ -1099,6 +1356,7 @@ git commit -m "파티클 프리셋의 starttime만큼 미리 돌려 두고 보�
   - Skyrim(3795217986): 반딧불이 보인다(감쇠 NaN 수정), 안개가 느리다, 빛줄기가 켜자마자 있다(프리웜)
   - one piece 4K(3793241848): 불꽃이 보인다(감쇠 NaN 수정)
   - Hiyuki(3714517753): 벚꽃이 드문드문(count 0.05) 그대로
+  - 메뉴바 "프레임": 전원 연결 60·배터리 30에 체크가 있고, 30↔60을 바꾸면 바로 적용되며 설정 창(열려 있으면)도 따라 바뀐다
   - 나머지: 전과 달라진 게 없다
 - [ ] **Step 6:** 적어 둔 배경화면으로 되돌리고 앱을 다시 띄운다
 
@@ -1106,7 +1364,7 @@ git commit -m "파티클 프리셋의 starttime만큼 미리 돌려 두고 보�
 
 ---
 
-### Task 7: 기록·릴리스
+### Task 8: 기록·릴리스
 
 - [ ] **Step 1:** README에 지원 범위·제한 목록이 있으면 파티클 인스턴스 배율·`layer.instance`·프리웜 문구를 갱신한다(없으면 건드리지 않는다)
 - [ ] **Step 2:** `Scripts/version.sh`의 버전을 0.1.1로 올리고 커밋: `git commit -m "0.1.1로 올린다"`
@@ -1121,7 +1379,7 @@ git commit -m "파티클 프리셋의 starttime만큼 미리 돌려 두고 보�
 | 항목 | 결정 |
 |---|---|
 | 실행 방식 | Sonnet 서브에이전트, 작업마다 워크트리, 병합·실물 검증은 메인 세션 |
-| 기본 목표 FPS | "30과 60 둘 다 지원" — 설정 창이 이미 15/30/60을 고르게 한다. 확인 중 |
+| 프레임 | 전원 연결 60 / 배터리·저전력 30 자동 + 메뉴바에서 바로 전환, WE 성능 설정(배터리 재생 규칙)을 참고 — T6 |
 | Developer ID 서명 | 안 함 (자체 서명 유지) |
 | `backup/before-scrub` | 지움 (완료) |
 | v0.1.1 릴리스 | 함 |
@@ -1129,5 +1387,5 @@ git commit -m "파티클 프리셋의 starttime만큼 미리 돌려 두고 보�
 ## 게이트 기록 (T4)
 
 - 외부 구현 조사(2026-09-25): catsout/wallpaper-scene-renderer가 문서와 같다(count → 방출률 `newEm.rate *= count`, rate → 하위 시스템 시계 `particleTime = frameTime * m_rate`). Almamu/linux-wallpaperengine은 반대(count → maxCount, rate → 방출률). 문서 + catsout 쪽을 따른다.
-- 적대적 검토(2026-09-25, 기술·회귀 두 갈래): 문서 해석에 반대하는 근거 없음. 영향이 큰 씬(Gilded Shore 소용돌이, Universal Reflex 3 별)은 T6에서 눈으로 확인한다.
+- 적대적 검토(2026-09-25, 기술·회귀 두 갈래): 문서 해석에 반대하는 근거 없음. 영향이 큰 씬(Gilded Shore 소용돌이, Universal Reflex 3 별)은 T7에서 눈으로 확인한다.
 - 판정: 진행.
