@@ -1971,7 +1971,15 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
         // 숨은 레이어도 스크립트가 있으면 세운다 — 스크립트가 나중에 보이게 할 수 있고,
         // 실물 원근 씬은 카메라·프리즘 로직을 숨은 레이어에 둔다. 알파 0으로 시작한다.
-        for layer in document.layers where layer.visible || !layer.scripts.isEmpty {
+        //
+        // `_rt_imageLayerComposite_<id>`로 다른 레이어의 이펙트가 참조하는
+        // 레이어도 세운다 — 실물 음반 커버 씬은 기본 커버 소스 레이어들을
+        // `visible: false`로 화면 밖에 숨겨 두고 텍스처만 꿔 준다. 안 세우면
+        // `layerOutputs`에 등록되지 않아 참조하는 쪽이 흰 placeholder를
+        // 받는다(배경 전체가 하얗게 뜨던 원인).
+        let referencedByEffects = EffectDefinition.referencedLayerIDs(in: document.layers)
+        for layer in document.layers
+        where layer.visible || !layer.scripts.isEmpty || referencedByEffects.contains(layer.id) {
             addLayer(layer, context: context)
         }
         animatedLayers = Dictionary(
