@@ -41,43 +41,22 @@ final class ParticleOverrideTests: XCTestCase {
             preset(maxCount: 8000).applying(o).maxCount, ParticlePreset.maxAllowedCount)
     }
 
-    func testRateSizeSpeedLifetimeMultiply() throws {
+    /// 배율은 프리셋에 굽지 않고 `instance`로 들고 간다. 초기화자는 그대로다.
+    func testApplyingStoresInstanceAndKeepsInitializers() {
         var o = ParticleOverride()
         o.rate = 0.5; o.size = 2; o.speed = 3; o.lifetime = 0.5
         let p = preset().applying(o)
+        XCTAssertEqual(p.instance, o)
+        XCTAssertEqual(p.initializers, preset().initializers)
         guard case .sphereRandom(let rate, _, _, let lo, let hi, _) = p.emitters[0] else {
             return XCTFail("sphererandom이어야 한다")
         }
         XCTAssertEqual(rate, 10, accuracy: 0.001)
-        // **뿌리는 범위는 배율을 따르지 않는다.** 공식 문서가 못박고 있다 —
-        // "All factors are multiplied with the initializers and operators of your
-        // particle system"(IParticleSystemInstance). 이미터는 그 목록에 없다.
-        //
-        // 한동안 크기 배율을 범위에까지 곱했는데, 그러면 비가 화면 일부에만 내린다
-        // (실물에서 반경 1024가 0.65배로 줄어 가로 3분의 2에만 왔다).
+        // **뿌리는 범위는 배율을 따르지 않는다.** 한동안 크기 배율을 범위에까지
+        // 곱했는데, 그러면 비가 화면 일부에만 내린다(실물에서 반경 1024가 0.65배로
+        // 줄어 가로 3분의 2에만 왔다).
         XCTAssertEqual(lo, 10, accuracy: 0.001)
         XCTAssertEqual(hi, 100, accuracy: 0.001)
-        guard case .lifetimeRandom(let la, let lb) = p.initializers[0],
-              case .sizeRandom(let sa, let sb) = p.initializers[1],
-              case .velocityRandom(let va, _) = p.initializers[2] else {
-            return XCTFail("초기화자 순서가 유지되어야 한다")
-        }
-        XCTAssertEqual(la, 2.5, accuracy: 0.001)
-        XCTAssertEqual(lb, 5, accuracy: 0.001)
-        XCTAssertEqual(sa, 40, accuracy: 0.001)
-        XCTAssertEqual(sb, 100, accuracy: 0.001)
-        XCTAssertEqual(va.x, -300, accuracy: 0.001)
-    }
-
-    /// colorn이 있으면 프리셋의 색 범위를 버리고 그 색으로 고정한다.
-    func testColorOverrideReplacesRange() throws {
-        var o = ParticleOverride()
-        o.color = Vec3(x: 0.2, y: 0.4, z: 0.6)
-        guard case .colorRandom(let a, let b) = preset().applying(o).initializers[3] else {
-            return XCTFail("colorrandom이어야 한다")
-        }
-        XCTAssertEqual(a, Vec3(x: 0.2, y: 0.4, z: 0.6))
-        XCTAssertEqual(b, Vec3(x: 0.2, y: 0.4, z: 0.6))
     }
 
     /// 아무것도 안 바꾸면 프리셋을 그대로 쓴다.
@@ -91,12 +70,13 @@ final class ParticleOverrideTests: XCTestCase {
         let o = ParticleOverride.parse([
             "id": 49, "count": 0.46, "rate": 0.75, "size": 1.17, "speed": 1.66,
             "lifetime": 0.9, "alpha": ["user": "newproperty3", "value": 0.84],
-            "colorn": "1.00000 0.70980 0.00784",
+            "colorn": "1.00000 0.70980 0.00784", "brightness": 10.0,
         ])
         XCTAssertEqual(o.count, 0.46, accuracy: 0.001)
         XCTAssertEqual(o.speed, 1.66, accuracy: 0.001)
         XCTAssertEqual(o.alpha, 0.84, accuracy: 0.001, "스크립트 객체의 value를 써야 한다")
         XCTAssertEqual(o.color?.y ?? 0, 0.7098, accuracy: 0.001)
+        XCTAssertEqual(o.brightness, 10, accuracy: 0.001)
     }
 
     /// 파일에서 온 값이라 이상한 배율은 버리고 1로 둔다.

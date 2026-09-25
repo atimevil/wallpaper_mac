@@ -39,6 +39,9 @@ public final class ParticleSystem {
 
     private let preset: ParticlePreset
     private let random: RandomSource
+    /// 씬 배율(`instanceoverride`). 스크립트가 `layer.instance`로 바꾼다 —
+    /// 스폰 결과는 **새로 나는** 파티클부터, 힘은 바로 먹는다.
+    public var instance: ParticleOverride
 
     /// Fixed-size particle buffer. Dead slots are reused.
     private var particleBuffer: [Particle]
@@ -96,6 +99,7 @@ public final class ParticleSystem {
     public init(preset: ParticlePreset, random: RandomSource) {
         self.preset = preset
         self.random = random
+        self.instance = preset.instance
         self.children = preset.children
         self.childInstances = Array(repeating: [], count: preset.children.count)
 
@@ -460,6 +464,22 @@ public final class ParticleSystem {
             applyInitializer(initializer, index: index, to: &particle)
         }
 
+        // 씬 배율은 초기화자가 끝난 **결과**에 곱한다. 초기화자에 곱하면 그 초기화자가
+        // 없는 프리셋(기본 크기·수명·흰색)에는 안 먹는다 — 실물 PS2 시계 파티클은
+        // colorrandom이 없어 colorn이 통째로 버려졌다. 속도는 이미터 속력(불꽃)까지
+        // 포함한 최종 속도다. 색은 틴트(곱)에 밝기를 얹는다.
+        let o = instance
+        particle.size *= o.size
+        particle.alpha *= o.alpha
+        particle.lifetime *= o.lifetime
+        particle.velocity = Vec3(x: particle.velocity.x * o.speed,
+                                 y: particle.velocity.y * o.speed,
+                                 z: particle.velocity.z * o.speed)
+        let tint = o.color ?? Vec3(x: 1, y: 1, z: 1)
+        particle.color = Vec3(x: particle.color.x * tint.x * o.brightness,
+                              y: particle.color.y * tint.y * o.brightness,
+                              z: particle.color.z * tint.z * o.brightness)
+
         // 초기화자가 끝난 값이 기준값이다.
         particle.baseSize = particle.size
         particle.baseAlpha = particle.alpha
@@ -619,16 +639,20 @@ public final class ParticleSystem {
     private func applyOperator(_ op: ParticleOperator, to particle: inout Particle, dt: Double) {
         switch op {
         case .movement(let gravity, let drag):
-            // Apply gravity
+            // 중력은 힘이다. 초기 속도와 함께 speed 배율을 받아야 궤적이 같은
+            // 모양으로 늘어난다(문서: "initial velocity and forces").
+            let force = instance.speed
             particle.velocity = Vec3(
-                x: particle.velocity.x + gravity.x * dt,
-                y: particle.velocity.y + gravity.y * dt,
-                z: particle.velocity.z + gravity.z * dt
+                x: particle.velocity.x + gravity.x * force * dt,
+                y: particle.velocity.y + gravity.y * force * dt,
+                z: particle.velocity.z + gravity.z * force * dt
             )
 
-            // Apply drag (velocity damping)
+            // drag는 초당 감쇠 계수다 — dv/dt = −drag·v. 실물 프리셋의 3분의 1이 1을
+            // 넘는다(반딧불 2.5, 불꽃 3.5~4). `pow(1 − drag, dt)`는 그때 밑이 음수라
+            // NaN이 되어 파티클이 첫 프레임 뒤 사라졌다.
             if drag > 0 {
-                let dampFactor = pow(1 - drag, dt)
+                let dampFactor = exp(-drag * dt)
                 particle.velocity = Vec3(
                     x: particle.velocity.x * dampFactor,
                     y: particle.velocity.y * dampFactor,
@@ -749,7 +773,8 @@ public final class ParticleSystem {
 
         case .turbulence(let mask, let scale, let speedMin, let speedMax,
                          let timeScale, let phaseMin, let phaseMax):
-            let speed = speedMin + Self.hash(particle.frameSeed, 31) * (speedMax - speedMin)
+            let speed = (speedMin + Self.hash(particle.frameSeed, 31) * (speedMax - speedMin))
+                * instance.speed
             guard speed != 0 else { return }
             let phase = phaseMin + Self.hash(particle.frameSeed, 32) * (phaseMax - phaseMin)
             // 자리와 시간으로 잡음 마당을 읽는다. 같은 자리면 같은 값이 나와야
@@ -789,7 +814,7 @@ public final class ParticleSystem {
             let span = distanceOuter - distanceInner
             let ratio = span > 1e-9
                 ? min(max((radius - distanceInner) / span, 0), 1) : 1.0
-            let speed = speedInner + (speedOuter - speedInner) * ratio
+            let speed = (speedInner + (speedOuter - speedInner) * ratio) * instance.speed
             // 접선 = 축 × 반지름 방향.
             let tangent = Vec3(
                 x: unit.y * radial.z - unit.z * radial.y,
@@ -826,7 +851,9 @@ public final class ParticleSystem {
                 z: outputMin.z + (outputMax.z - outputMin.z) * t)
             switch output {
             case .velocity:
-                particle.velocity = value
+                // 속도를 정하는 연산자도 speed 배율을 받는다(실물 rain_screen).
+                particle.velocity = Vec3(x: value.x * instance.speed, y: value.y * instance.speed,
+                                         z: value.z * instance.speed)
             case .opacity:
                 particle.alpha = min(max(particle.baseAlpha * value.x, 0), 1)
             case .size:
@@ -839,7 +866,7 @@ public final class ParticleSystem {
                 let vx = particle.velocity.x, vy = particle.velocity.y, vz = particle.velocity.z
                 let magnitude = (vx * vx + vy * vy + vz * vz).squareRoot()
                 if magnitude > 1e-9 {
-                    let scale = value.x / magnitude
+                    let scale = value.x * instance.speed / magnitude
                     particle.velocity = Vec3(x: vx * scale, y: vy * scale, z: vz * scale)
                 }
             case .unsupported:
@@ -865,7 +892,7 @@ public final class ParticleSystem {
             // 가까울수록 세게 당긴다. 문턱에서 0이 되게 두어야 파티클이 문턱을
             // 넘나들 때 속도가 튀지 않는다. 음수 scale이면 밀어낸다(커서 피하기).
             let falloff = threshold > 0 ? (1 - distance / threshold) : 1
-            let strength = scale * falloff * dt
+            let strength = scale * falloff * dt * instance.speed
             particle.velocity = Vec3(
                 x: particle.velocity.x + delta.x / distance * strength,
                 y: particle.velocity.y + delta.y / distance * strength,

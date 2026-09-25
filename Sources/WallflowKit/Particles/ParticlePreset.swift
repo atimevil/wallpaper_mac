@@ -92,38 +92,6 @@ public enum ParticleInitializer: Equatable, Sendable {
     case mapSequenceAroundControlPoint(controlPoint: Int, count: Double,
                                        boundsStart: Double, boundsEnd: Double,
                                        mirror: Bool, speedMin: Vec3, speedMax: Vec3)
-
-    /// 씬의 조정값을 얹는다. 크기·속도·수명·투명도는 배율이고 색은 갈아끼운다.
-    func scaled(size: Double, speed: Double, lifetime: Double, alpha: Double,
-                color: Vec3?) -> ParticleInitializer {
-        func mul(_ v: Vec3, _ k: Double) -> Vec3 { Vec3(x: v.x * k, y: v.y * k, z: v.z * k) }
-        switch self {
-        case .lifetimeRandom(let a, let b):
-            return .lifetimeRandom(min: a * lifetime, max: b * lifetime)
-        case .sizeRandom(let a, let b):
-            return .sizeRandom(min: a * size, max: b * size)
-        case .alphaRandom(let a, let b):
-            return .alphaRandom(min: a * alpha, max: b * alpha)
-        case .velocityRandom(let a, let b):
-            return .velocityRandom(min: mul(a, speed), max: mul(b, speed))
-        case .colorRandom(let a, let b):
-            // 씬이 색을 지정하면 프리셋의 범위를 버리고 그 색으로 고정한다.
-            guard let color else { return .colorRandom(min: a, max: b) }
-            return .colorRandom(min: color, max: color)
-        case .turbulentVelocityRandom(let offset, let scale, let lo, let hi):
-            return .turbulentVelocityRandom(offset: offset, scale: scale,
-                                            speedMin: lo * speed, speedMax: hi * speed)
-        case .rotationRandom, .angularVelocityRandom:
-            return self
-        case .mapSequenceAroundControlPoint(let point, let count, let start, let end,
-                                            let mirror, let lo, let hi):
-            // speedmin/speedmax는 속도이므로 `velocityrandom`과 같이 배율을 받는다.
-            // count/bounds/제어점 번호는 자리를 고르는 값이지 속도가 아니라 그대로 둔다.
-            return .mapSequenceAroundControlPoint(
-                controlPoint: point, count: count, boundsStart: start, boundsEnd: end,
-                mirror: mirror, speedMin: mul(lo, speed), speedMax: mul(hi, speed))
-        }
-    }
 }
 public enum ParticleOperator: Equatable, Sendable {
     case movement(gravity: Vec3, drag: Double)
@@ -242,11 +210,14 @@ public enum ParticleRemapTransform: Equatable, Sendable {
     }
 }
 
-/// 씬이 프리셋 위에 얹는 조정값.
+/// 씬이 프리셋 위에 얹는 조정값(`instanceoverride`).
 ///
-/// 창작마당 씬은 프리셋을 그대로 쓰지 않고 `instanceoverride`로 개수·속도·크기를
-/// 배로 조절한다. 무시하면 씬이 의도한 것과 전혀 다른 밀도로 뿌린다 — 실물
-/// Hiyuki의 벚꽃은 `count`가 0.05라 프리셋 200장 중 10장만 원한다.
+/// 공식 문서 IParticleSystemInstance: 전부 배율이고 1이면 그대로다 — alpha "opacity",
+/// size "size", count "emission rate", speed "initial velocity and forces", lifetime
+/// "lifetime", rate "simulation rate", colorn "Modifies the color assigned to particles".
+/// 무시하면 씬이 의도한 것과 전혀 다른 밀도로 뿌린다 — 실물 Hiyuki의 벚꽃은
+/// `count`가 0.05다. `brightness`는 문서 표에 없지만 WE 자체 번개 미리보기(5)와
+/// 실물 6곳(3, 10)이 쓴다 — 색에 곱한다.
 public struct ParticleOverride: Equatable, Sendable {
     /// 전부 배율이다. 1이면 프리셋 그대로.
     public var count: Double = 1
@@ -255,7 +226,8 @@ public struct ParticleOverride: Equatable, Sendable {
     public var speed: Double = 1
     public var lifetime: Double = 1
     public var alpha: Double = 1
-    /// 색은 배율이 아니라 통째로 갈아끼운다. 0~1이다.
+    public var brightness: Double = 1
+    /// 색도 곱한다(틴트). 0~1이다. 프리셋의 색 변화는 남는다.
     public var color: Vec3?
 
     public init() {}
@@ -263,7 +235,7 @@ public struct ParticleOverride: Equatable, Sendable {
     /// 아무것도 바꾸지 않는지. 그러면 프리셋을 그대로 쓴다.
     public var isIdentity: Bool {
         count == 1 && rate == 1 && size == 1 && speed == 1
-            && lifetime == 1 && alpha == 1 && color == nil
+            && lifetime == 1 && alpha == 1 && brightness == 1 && color == nil
     }
 
     /// `instanceoverride` 객체에서 읽는다. 배율은 파일에서 오므로 이상한 값은 버린다.
@@ -284,6 +256,7 @@ public struct ParticleOverride: Equatable, Sendable {
         result.speed = factor("speed") ?? 1
         result.lifetime = factor("lifetime") ?? 1
         result.alpha = factor("alpha") ?? 1
+        result.brightness = factor("brightness") ?? 1
         if let text = ((json["colorn"] as? [String: Any])?["value"] ?? json["colorn"]) as? String,
            let parsed = Vec3.parse(text) {
             // colorn은 이미 0~1이다. 파티클 프리셋의 색(0~255)과 다르다.
@@ -452,6 +425,9 @@ public struct ParticlePreset: Equatable, Sendable {
     public let childReferences: [ParticleChildReference]
     /// 실제로 읽어 붙인 자식들. 참조 해석기가 있는 곳에서 채운다.
     public let children: [ParticleChild]
+    /// 씬의 `instanceoverride`. 초기화자에 굽지 않는다 — `ParticleSystem`이 스폰
+    /// 결과와 힘에 곱한다. 초기화자가 없는 프리셋에도 먹어야 하기 때문이다.
+    public let instance: ParticleOverride
 
     /// public struct의 memberwise 이니셜라이저는 internal이라 테스트 타깃에서
     /// 쓸 수 없다. Task 3의 시뮬레이션 테스트가 프리셋을 직접 만들어야 하므로
@@ -463,8 +439,10 @@ public struct ParticlePreset: Equatable, Sendable {
         malformedNames: [String] = [], animationMode: ParticleAnimationMode = .sequence,
         childReferences: [ParticleChildReference] = [],
         children: [ParticleChild] = [],
-        controlPoints: [ParticleControlPoint] = []
+        controlPoints: [ParticleControlPoint] = [],
+        instance: ParticleOverride = ParticleOverride()
     ) {
+        self.instance = instance
         self.controlPoints = controlPoints
         self.maxCount = maxCount
         self.startTime = startTime
@@ -493,17 +471,13 @@ public struct ParticlePreset: Equatable, Sendable {
             startTime: startTime,
             materialPath: materialPath,
             emitters: emitters.map { $0.scaled(rate: override.rate) },
-            initializers: initializers.map {
-                $0.scaled(size: override.size, speed: override.speed,
-                          lifetime: override.lifetime, alpha: override.alpha,
-                          color: override.color)
-            },
+            initializers: initializers,
             operators: operators,
             unsupportedNames: unsupportedNames,
             malformedNames: malformedNames,
             animationMode: animationMode,
             childReferences: childReferences,
-            children: children, controlPoints: controlPoints)
+            children: children, controlPoints: controlPoints, instance: override)
     }
 
     /// 읽어 온 자식들을 붙인 사본.
@@ -513,7 +487,7 @@ public struct ParticlePreset: Equatable, Sendable {
             emitters: emitters, initializers: initializers, operators: operators,
             unsupportedNames: unsupportedNames, malformedNames: malformedNames,
             animationMode: animationMode, childReferences: childReferences,
-            children: children, controlPoints: controlPoints)
+            children: children, controlPoints: controlPoints, instance: instance)
     }
 
     /// 총량 예산에 맞추기 위한 축소 배율. 줄일 필요가 없으면 1이다.
@@ -526,12 +500,17 @@ public struct ParticlePreset: Equatable, Sendable {
     ///
     /// 개수만 줄이면 방출이 빈 슬롯을 기다리며 몰려, 밀도 대신 수명이 짧아 보인다.
     /// 둘을 같이 줄여야 "덜 많다"로 보이고 씬이 의도한 모양이 남는다.
+    /// 씬 배율(`instance`)은 그대로 둔다 — 예산은 씬의 뜻이 아니다.
     public func scaledToBudget(_ factor: Double) -> ParticlePreset {
         guard factor < 1, factor > 0 else { return self }
-        var budget = ParticleOverride()
-        budget.count = factor
-        budget.rate = factor
-        return applying(budget)
+        return ParticlePreset(
+            maxCount: Swift.max(1, Int((Double(maxCount) * factor).rounded())),
+            startTime: startTime, materialPath: materialPath,
+            emitters: emitters.map { $0.scaled(rate: factor) },
+            initializers: initializers, operators: operators,
+            unsupportedNames: unsupportedNames, malformedNames: malformedNames,
+            animationMode: animationMode, childReferences: childReferences,
+            children: children, controlPoints: controlPoints, instance: instance)
     }
 
     public static func parse(_ json: [String: Any]) -> ParticlePreset? {
