@@ -122,6 +122,13 @@ public enum ParticleInitializer: Equatable, Sendable {
     /// control points"). `mapSequenceAroundControlPoint`의 직선 판 — 같은
     /// `nextSequenceSlot` 카운터를 쓴다.
     ///
+    /// **통째로 자리를 갈아 끼우지 않는다.** 실물 `dna.json`이 이 초기화자
+    /// **앞에** `mapSequenceAroundControlPoint`를 둔다 — 원 위의 자리(나선의
+    /// 반지름)를 이미 잡아 둔 다음, 이 초기화자가 그 원의 중심을 두 제어점
+    /// 사이로 옮긴다. 자리를 통째로 선 위로 옮기면 원이 사라져 나선이 직선이
+    /// 된다. `ParticleSystem`이 "지금 자리 − 시스템 원점"을 오프셋으로 보고
+    /// 지키면서 기준점만 옮긴다.
+    ///
     /// `count`가 안 적히면(실물 `thunderbolt.json`·창작마당 편집기 미리보기
     /// 둘 다 생략) 프리셋의 `maxCount` 전체를 쓴다 — 편집기 미리보기가 정확히
     /// `maxcount`(100)개를 선 전체에 고르게 깐다(`ParticleSystem`에서 해석).
@@ -230,8 +237,12 @@ public enum ParticleOperator: Equatable, Sendable {
     /// `thunderbolt_child_spawner.json`이 `0.2, 0.2`) 그 지점에서 바로 켠다.
     case capVelocity(maxSpeed: Double, blendInStart: Double, blendInEnd: Double)
     /// `mapSequenceBetweenControlPoints`가 태어날 때 고른 두 제어점 사이의
-    /// 자리(0~1)를 매 프레임 다시 지킨다(WE 2.7, "keeps the relative distance
-    /// between a particle and two control points constant"). 실물(창작마당
+    /// 자리(0~1)를, **선을 따라 벗어난 만큼만** 매 프레임 되돌린다(WE 2.7,
+    /// "keeps the relative distance between a particle and two control points
+    /// constant"). 통째로 그 자리에 박으면 안 된다 — 실물 `thunderbolt.json`이
+    /// 이 연산자를 `turbulence`·`positionOffsetRandom`과 같이 쓴다. 그 잡음이
+    /// 주는 **수직** 어긋남(번개가 지그재그로 흔들리는 모양)까지 지우면
+    /// 지그재그가 사라져 이 연산자와 잡음이 서로 모순된다. 실물(창작마당
     /// 미리보기·`thunderbolt.json`·`thunderbolt_beam_child.json`) 전부 필드가
     /// 없다 — 짝인 초기화자가 고른 제어점·자리를 그대로 쓴다는 뜻으로 읽었다.
     /// 그 초기화자가 없으면(파티클에 저장된 자리가 없으면) 아무것도 안 한다.

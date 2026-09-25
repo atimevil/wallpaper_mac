@@ -24,11 +24,12 @@ final class ParticleWE27OperatorTests: XCTestCase {
         controlPoints: [ParticleControlPoint] = [],
         burst: Int = 1,
         maxCount: Int = 64,
+        emitterDistance: Double = 10,
         random: RandomSource = SeededRandom(seed: 3)
     ) -> ParticleSystem {
         let emitter = ParticleEmitter.sphereRandom(
             rate: 0, origin: Vec3(x: 0, y: 0, z: 0), directions: Vec3(x: 1, y: 1, z: 0),
-            distanceMin: 10, distanceMax: 10,
+            distanceMin: emitterDistance, distanceMax: emitterDistance,
             burst: ParticleEmitterBurst(count: burst, speedMin: 0, speedMax: 0))
         let preset = ParticlePreset(
             maxCount: maxCount, startTime: 0, materialPath: "m.json", emitters: [emitter],
@@ -52,7 +53,7 @@ final class ParticleWE27OperatorTests: XCTestCase {
         let system = self.system(
             initializers: [.mapSequenceBetweenControlPoints(
                 controlPointStart: 1, controlPointEnd: 2, count: 4, hasArc: false)],
-            controlPoints: [cp1, cp2], burst: 1)
+            controlPoints: [cp1, cp2], burst: 1, emitterDistance: 0)
         system.update(deltaTime: Self.step)
         let particle = try XCTUnwrap(system.particles.first)
         XCTAssertEqual(particle.position.x, -400, accuracy: 1)
@@ -66,7 +67,7 @@ final class ParticleWE27OperatorTests: XCTestCase {
         let system = self.system(
             initializers: [.mapSequenceBetweenControlPoints(
                 controlPointStart: 0, controlPointEnd: 1, count: 0, hasArc: false)],
-            controlPoints: [cp1, cp2], burst: 4, maxCount: 4)
+            controlPoints: [cp1, cp2], burst: 4, maxCount: 4, emitterDistance: 0)
         system.update(deltaTime: Self.step)
         let xs = system.particles.map(\.position.x).sorted()
         // maxCount=4로 나눠 0, 25, 50, 75에 온다(75는 100이 아니다 — repeat
@@ -94,6 +95,54 @@ final class ParticleWE27OperatorTests: XCTestCase {
         let particle = try XCTUnwrap(system.particles.first)
         // count=1이면 슬롯 0의 fraction은 0/1=0 → 항상 시작 제어점(0,0,0) 위다.
         XCTAssertEqual(particle.position.x, 0, accuracy: 1)
+    }
+
+    /// 실물 `dna.json`은 이 초기화자 **앞에** `mapSequenceAroundControlPoint`를
+    /// 둔다 — 원(나선의 반지름) 위에 자리를 잡은 다음, 이 초기화자가 그 원의
+    /// 중심을 두 제어점 사이로 옮긴다. 통째로 자리를 갈아 끼우면 원이
+    /// 사라져 나선이 직선이 된다 — 세 파티클이 일직선에 놓이면 안 된다.
+    func testMapSequenceBetweenControlPointsPreservesAroundControlPointOffset() throws {
+        let cp1 = ParticleControlPoint(id: 1, offset: Vec3(x: -400, y: -400, z: 0), flags: 0)
+        let system = self.system(
+            initializers: [
+                .mapSequenceAroundControlPoint(
+                    controlPoint: 0, count: 8, boundsStart: 0, boundsEnd: 1,
+                    mirror: false, speedMin: Vec3(x: 0, y: 0, z: 0), speedMax: Vec3(x: 0, y: 0, z: 0)),
+                .mapSequenceBetweenControlPoints(
+                    controlPointStart: 0, controlPointEnd: 1, count: 8, hasArc: false),
+            ],
+            controlPoints: [cp1], burst: 8, emitterDistance: 50)
+        system.update(deltaTime: Self.step)
+        let positions = system.particles.map(\.position)
+        XCTAssertEqual(positions.count, 8)
+        // 아무 세 점이나 잡아 일직선인지 본다(외적 크기가 0에 가까우면 일직선).
+        let a = positions[0], b = positions[1], c = positions[2]
+        let ab = Vec3(x: b.x - a.x, y: b.y - a.y, z: 0)
+        let ac = Vec3(x: c.x - a.x, y: c.y - a.y, z: 0)
+        let cross = abs(ab.x * ac.y - ab.y * ac.x)
+        XCTAssertGreaterThan(cross, 1, "원 위의 자리가 남아 있어야 한다 — 직선이면 안 된다")
+    }
+
+    /// 실물 `thunderbolt.json`은 `maintainDistanceBetweenControlPoints`를
+    /// `turbulence`·`positionOffsetRandom`과 같이 쓴다 — 지그재그(번개 모양)를
+    /// 유지해야 하고, 선 위로 완전히 눌러 붙이면(예전의 통째로 자리를 박는
+    /// 버그) 안 된다.
+    func testMaintainDistanceBetweenControlPointsKeepsPerpendicularJitter() throws {
+        let cp0 = ParticleControlPoint(id: 0, offset: Vec3(x: 0, y: 0, z: 0), flags: 0)
+        let cp1 = ParticleControlPoint(id: 1, offset: Vec3(x: 0, y: -450, z: 0), flags: 0)
+        let system = self.system(
+            initializers: [.positionOffsetRandom(distance: 100, scale: 0, timeScale: 5),
+                           .mapSequenceBetweenControlPoints(
+                            controlPointStart: 0, controlPointEnd: 1, count: 8, hasArc: false)],
+            operators: [.movement(gravity: Vec3(x: 0, y: 0, z: 0), drag: 2),
+                        .turbulence(mask: Vec3(x: 1, y: 1, z: 1), scale: 0.01,
+                                   speedMin: 1000, speedMax: 1000, timeScale: 10000,
+                                   phaseMin: 0, phaseMax: 0),
+                        .maintainDistanceBetweenControlPoints],
+            controlPoints: [cp0, cp1], burst: 8, maxCount: 8, emitterDistance: 0)
+        for _ in 0..<30 { system.update(deltaTime: Self.step) }
+        let maxAbsX = system.particles.map { abs($0.position.x) }.max() ?? 0
+        XCTAssertGreaterThan(maxAbsX, 1, "잡음이 준 수직(X) 어긋남이 남아 있어야 한다")
     }
 
     // MARK: positionOffsetRandom
@@ -497,5 +546,74 @@ final class ParticleWE27ParsingTests: XCTestCase {
             XCTAssertTrue(p.unsupportedNames.contains(name), "\(name)이 빠졌다")
         }
         XCTAssertTrue(p.malformedNames.isEmpty)
+    }
+}
+
+/// 창작자가 그대로 복사해 쓰는 실물 번들 프리셋 3개를 파일에서 읽어 굴린다 —
+/// "실물처럼 파싱만 된다"가 아니라 "실제로 시뮬레이션이 안 깨진다"까지 본다.
+final class ParticleWE27BundledPresetTests: XCTestCase {
+    private func loadPreset(_ relativePath: String) throws -> ParticlePreset? {
+        guard let assetsPath = ProcessInfo.processInfo.environment["WALLFLOW_TEST_ASSETS"] else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: assetsPath).appendingPathComponent(relativePath)
+        let data = try Data(contentsOf: url)
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return ParticlePreset.parse(json)
+    }
+
+    private func assertRunsWithoutBreaking(_ preset: ParticlePreset, file: StaticString = #filePath,
+                                           line: UInt = #line) {
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 7))
+        for _ in 0..<60 { system.update(deltaTime: 1.0 / 60.0) }
+        for particle in system.particles {
+            XCTAssertTrue(particle.position.x.isFinite && particle.position.y.isFinite
+                && particle.position.z.isFinite, "위치가 발산했다", file: file, line: line)
+            XCTAssertTrue(particle.alpha.isFinite && particle.size.isFinite,
+                          file: file, line: line)
+        }
+    }
+
+    /// 실물 `thunderbolt.json` — positionOffsetRandom·mapSequenceBetweenControlPoints·
+    /// capVelocity·maintainDistanceBetweenControlPoints·reduceMovementNearControlPoint를
+    /// 한꺼번에 쓰는 가장 무거운 조합.
+    func testThunderboltPresetRunsWithoutBreaking() throws {
+        guard let preset = try loadPreset("presets/lightning/particles/presets/thunderbolt.json")
+        else { throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정") }
+        for name in ["positionoffsetrandom", "mapsequencebetweencontrolpoints", "capvelocity",
+                     "maintaindistancebetweencontrolpoints", "reducemovementnearcontrolpoint",
+                     "alphachange"] {
+            XCTAssertFalse(preset.unsupportedNames.contains(name), "\(name)이 아직 unsupported다")
+        }
+        XCTAssertTrue(preset.malformedNames.isEmpty, "\(preset.malformedNames)")
+        assertRunsWithoutBreaking(preset)
+    }
+
+    /// 실물 `dna.json` — mapSequenceAroundControlPoint 뒤에
+    /// mapSequenceBetweenControlPoints를 두는 조합.
+    func testDNAPresetRunsWithoutBreaking() throws {
+        guard let preset = try loadPreset("presets/abstract/particles/presets/dna.json")
+        else { throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정") }
+        XCTAssertFalse(preset.unsupportedNames.contains("mapsequencebetweencontrolpoints"))
+        XCTAssertTrue(preset.malformedNames.isEmpty, "\(preset.malformedNames)")
+        assertRunsWithoutBreaking(preset)
+    }
+
+    /// 실물 `dripping_water.json` — boids.
+    func testDrippingWaterPresetRunsWithoutBreaking() throws {
+        guard let preset = try loadPreset("presets/water/particles/presets/dripping_water.json")
+        else { throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정") }
+        XCTAssertFalse(preset.unsupportedNames.contains("boids"))
+        XCTAssertTrue(preset.malformedNames.isEmpty, "\(preset.malformedNames)")
+        assertRunsWithoutBreaking(preset)
+    }
+
+    /// 실물 `magic_vortex_orb.json` — maintainDistanceToControlPoint.
+    func testMagicVortexOrbPresetRunsWithoutBreaking() throws {
+        guard let preset = try loadPreset("presets/magic/particles/presets/magic_vortex_orb.json")
+        else { throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정") }
+        XCTAssertFalse(preset.unsupportedNames.contains("maintaindistancetocontrolpoint"))
+        XCTAssertTrue(preset.malformedNames.isEmpty, "\(preset.malformedNames)")
+        assertRunsWithoutBreaking(preset)
     }
 }

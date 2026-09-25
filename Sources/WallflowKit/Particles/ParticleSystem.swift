@@ -757,12 +757,22 @@ public final class ParticleSystem {
             let slot = Self.nextSequenceSlot(&sequenceCounters[index, default: 0], count: count,
                                              mirror: false)
             let fraction = count > 0 ? slot / count : 0
-            particle.position = Vec3(
+            // 통째로 갈아 끼우면 안 된다 — 실물 dna.json은 이 초기화자 **앞에**
+            // mapSequenceAroundControlPoint가 원 위의 자리를 이미 잡아 둔다.
+            // 그 결과를 지우면 나선(DNA)이 직선이 된다. 대신 지금 자리에서
+            // 시스템 원점만큼의 "오프셋"(원 위의 자리 등)을 지키고, 그 오프셋의
+            // 기준점만 선 위의 자리로 옮긴다.
+            let offset = Vec3(x: particle.position.x - originOffset.x,
+                              y: particle.position.y - originOffset.y,
+                              z: particle.position.z - originOffset.z)
+            let target = Vec3(
                 x: start.x + (end.x - start.x) * fraction,
                 y: start.y + (end.y - start.y) * fraction,
                 z: start.z + (end.z - start.z) * fraction)
-            // maintainDistanceBetweenControlPoints가 매 프레임 다시 이 자리로
-            // 당길 수 있게 저장해 둔다.
+            particle.position = Vec3(
+                x: target.x + offset.x, y: target.y + offset.y, z: target.z + offset.z)
+            // maintainDistanceBetweenControlPoints가 매 프레임 이 자리를 다시
+            // 지킬 수 있게 저장해 둔다.
             particle.sequenceFraction = fraction
             particle.sequenceControlPointStart = cpStart
             particle.sequenceControlPointEnd = cpEnd
@@ -1212,15 +1222,31 @@ public final class ParticleSystem {
             particle.velocity = Self.scale(particle.velocity, scale)
 
         case .maintainDistanceBetweenControlPoints:
-            // 짝인 초기화자(mapSequenceBetweenControlPoints)가 저장해 둔 자리를
-            // 매 프레임 다시 지킨다 — 제어점이 움직이면 그 자리를 따라간다.
+            // "선 방향으로 벗어난 만큼만" 되돌린다 — 통째로 목표 자리에 박으면
+            // 안 된다. 실물 thunderbolt.json은 이 연산자와 turbulence(속도
+            // 1000)·positionOffsetRandom을 같이 쓴다 — 그 잡음이 준 **수직**
+            // 어긋남(번개가 지그재그로 흔들리는 모양)은 남기고, 선을 따라
+            // 미끄러진 성분만 원래 자리로 되돌린다. 그래서 "제어점 사이의
+            // 상대 거리"를 유지한다는 문서 문구가 성립한다 — 지그재그를
+            // 지우면 지그재그가 있던 이유(잡음)와 이 연산자가 서로 모순된다.
             guard let fraction = particle.sequenceFraction else { return }
             let start = controlPointPosition(particle.sequenceControlPointStart) ?? originOffset
             let end = controlPointPosition(particle.sequenceControlPointEnd) ?? originOffset
-            particle.position = Vec3(
+            let segment = Self.subtract(end, start)
+            let segmentLength = Self.length(segment)
+            let target = Vec3(
                 x: start.x + (end.x - start.x) * fraction,
                 y: start.y + (end.y - start.y) * fraction,
                 z: start.z + (end.z - start.z) * fraction)
+            guard segmentLength > 1e-9 else {
+                // 두 제어점이 같은 자리면 "선 방향"이 없다 — 통째로 그 점에 둔다.
+                particle.position = target
+                return
+            }
+            let direction = Self.scale(segment, 1 / segmentLength)
+            let deviation = Self.subtract(particle.position, target)
+            let alongDeviation = Self.dot(deviation, direction)
+            particle.position = Self.subtract(particle.position, Self.scale(direction, alongDeviation))
 
         case .maintainDistanceToControlPoint(let controlPoint, let variableStrength):
             // "태어났을 때의 거리"를 목표로 삼는다 — 필드에 목표 거리가 없어
