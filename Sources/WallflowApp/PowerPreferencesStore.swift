@@ -7,8 +7,15 @@ enum PowerPreferencesStore {
     static let occludedKey = "wallflow.power.pauseWhenOccluded"
     static let fullscreenKey = "wallflow.power.pauseInFullscreen"
     static let idleKey = "wallflow.power.idlePauseSeconds"
-    static let batteryKey = "wallflow.power.reduceOnBattery"
+    static let batteryFPSKey = "wallflow.power.batteryFPS"
+    /// 예전 켬/끔 스위치. 끈 사람은 "전원과 같게"로 옮긴다.
+    static let legacyBatteryKey = "wallflow.power.reduceOnBattery"
     static let fpsKey = "wallflow.power.targetFPS"
+
+    /// 배터리 규칙의 이름. 설정 창과 메뉴바가 같이 쓴다.
+    static let batteryChoices: [(String, Int)] = [
+        ("전원과 같게", 60), ("30", 30), ("15", 15), ("멈춤", 0),
+    ]
 
     static func load() -> PowerPreferences {
         let defaults = UserDefaults.standard
@@ -24,8 +31,12 @@ enum PowerPreferencesStore {
         if let idle = defaults.object(forKey: idleKey) as? Double, idle.isFinite, idle >= 0 {
             prefs.idlePauseSeconds = idle
         }
-        if defaults.object(forKey: batteryKey) != nil {
-            prefs.reduceOnBattery = defaults.bool(forKey: batteryKey)
+        if let fps = defaults.object(forKey: batteryFPSKey) as? Int,
+           PowerPreferences.allowedBatteryFPS.contains(fps) {
+            prefs.batteryFPS = fps
+        } else if defaults.object(forKey: legacyBatteryKey) != nil,
+                  !defaults.bool(forKey: legacyBatteryKey) {
+            prefs.batteryFPS = 60
         }
         if let fps = defaults.object(forKey: fpsKey) as? Int,
            PowerPreferences.allowedFPS.contains(fps) {
@@ -39,7 +50,8 @@ enum PowerPreferencesStore {
         defaults.set(prefs.pauseWhenOccluded, forKey: occludedKey)
         defaults.set(prefs.pauseInFullscreen, forKey: fullscreenKey)
         defaults.set(prefs.idlePauseSeconds, forKey: idleKey)
-        defaults.set(prefs.reduceOnBattery, forKey: batteryKey)
+        defaults.set(prefs.batteryFPS, forKey: batteryFPSKey)
+        defaults.removeObject(forKey: legacyBatteryKey)
         defaults.set(prefs.targetFPS, forKey: fpsKey)
     }
 }

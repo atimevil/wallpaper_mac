@@ -62,6 +62,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             onToggleSound: { [weak self] _ in self?.displays.applySoundSetting() },
             onToggleAudio: { [weak self] enabled in self?.setAudioCapture(enabled) },
             onOpenSettings: { [weak self] in self?.showSettings() },
+            onPowerChanged: { [weak self] in
+                self?.settings?.reloadPower()
+                self?.power?.poll()
+            },
             onQuit: { NSApp.terminate(nil) }
         )
         refreshLibrary()
@@ -127,7 +131,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 currentItem: { [weak self] in self?.displays.currentItem },
                 onPropertiesChanged: { [weak self] in self?.displays.reloadCurrent() },
                 // 규칙이 바뀌면 다음 5초를 기다리지 않고 바로 다시 판정한다.
-                onPowerChanged: { [weak self] in self?.power?.poll() },
+                // 메뉴바의 "프레임" 체크 표시도 여기서 바꾼 값을 따라가야 한다.
+                onPowerChanged: { [weak self] in
+                    self?.power?.poll()
+                    self?.menuBar?.refreshStates()
+                },
                 onSoundChanged: { [weak self] in
                     self?.displays.applySoundSetting()
                     self?.menuBar?.refreshStates()

@@ -11,6 +11,7 @@ final class MenuBarController {
     private let onToggleSound: (Bool) -> Void
     private let onToggleAudio: (Bool) -> Void
     private let onOpenSettings: () -> Void
+    private let onPowerChanged: () -> Void
     private let onQuit: () -> Void
     private var items: [WallpaperItem] = []
 
@@ -21,11 +22,13 @@ final class MenuBarController {
         onToggleSound: @escaping (Bool) -> Void,
         onToggleAudio: @escaping (Bool) -> Void,
         onOpenSettings: @escaping () -> Void,
+        onPowerChanged: @escaping () -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.onToggleSound = onToggleSound
         self.onToggleAudio = onToggleAudio
         self.onOpenSettings = onOpenSettings
+        self.onPowerChanged = onPowerChanged
         self.onSelect = onSelect
         self.onRefresh = onRefresh
         self.onBrowseWorkshop = onBrowseWorkshop
@@ -120,6 +123,31 @@ final class MenuBarController {
         audio.state = AudioSpectrum.isEnabled ? .on : .off
         menu.addItem(audio)
 
+        // 프레임. 전원 연결 시와 배터리·저전력일 때를 따로 고른다(WE 성능 설정의
+        // 배터리 규칙처럼). 설정 창까지 열지 않고 바로 바꾸는 자리다.
+        let power = PowerPreferencesStore.load()
+        let fpsItem = NSMenuItem(title: "프레임", action: nil, keyEquivalent: "")
+        let fpsMenu = NSMenu()
+        fpsMenu.addItem(NSMenuItem.sectionHeader(title: "전원 연결"))
+        for fps in PowerPreferences.allowedFPS {
+            let entry = NSMenuItem(title: "\(fps)", action: #selector(setFPS), keyEquivalent: "")
+            entry.target = self
+            entry.tag = fps
+            entry.state = power.targetFPS == fps ? .on : .off
+            fpsMenu.addItem(entry)
+        }
+        fpsMenu.addItem(.separator())
+        fpsMenu.addItem(NSMenuItem.sectionHeader(title: "배터리·저전력"))
+        for (label, fps) in PowerPreferencesStore.batteryChoices {
+            let entry = NSMenuItem(title: label, action: #selector(setBatteryFPS), keyEquivalent: "")
+            entry.target = self
+            entry.tag = fps
+            entry.state = power.batteryFPS == fps ? .on : .off
+            fpsMenu.addItem(entry)
+        }
+        fpsItem.submenu = fpsMenu
+        menu.addItem(fpsItem)
+
         let settings = NSMenuItem(
             title: "설정…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
@@ -198,6 +226,22 @@ final class MenuBarController {
         rebuildMenu()
         // 소리 설정을 다시 적용하는 경로가 이것뿐이다. 켬/끔과 같은 길을 쓴다.
         onToggleSound(UserDefaults.standard.bool(forKey: Self.soundKey))
+    }
+
+    @objc private func setFPS(_ sender: NSMenuItem) {
+        var prefs = PowerPreferencesStore.load()
+        prefs.targetFPS = sender.tag
+        PowerPreferencesStore.save(prefs)
+        rebuildMenu()
+        onPowerChanged()
+    }
+
+    @objc private func setBatteryFPS(_ sender: NSMenuItem) {
+        var prefs = PowerPreferencesStore.load()
+        prefs.batteryFPS = sender.tag
+        PowerPreferencesStore.save(prefs)
+        rebuildMenu()
+        onPowerChanged()
     }
 
     @objc private func browseWorkshop() { onBrowseWorkshop() }

@@ -94,6 +94,17 @@ final class SettingsWindowController: NSWindowController {
         applyConditions()
     }
 
+    /// 메뉴바에서 바꾼 값을 다시 읽는다. 창이 열린 채로 메뉴에서 바꾸면 여기 남은
+    /// 옛 값이 다음 `powerChanged()`에서 메뉴의 선택을 덮어쓴다.
+    func reloadPower() {
+        let prefs = PowerPreferencesStore.load()
+        occludedBox?.state = prefs.pauseWhenOccluded ? .on : .off
+        fullscreenBox?.state = prefs.pauseInFullscreen ? .on : .off
+        idlePopup.selectItem(withTag: Int(prefs.idlePauseSeconds))
+        fpsPopup.selectItem(withTag: prefs.targetFPS)
+        batteryPopup.selectItem(withTag: prefs.batteryFPS)
+    }
+
     // MARK: - 화면
 
     private func makeContent() -> NSView {
@@ -133,8 +144,6 @@ final class SettingsWindowController: NSWindowController {
                             #selector(powerChanged))
         fullscreenBox = check("전체화면 앱이 뜨면 멈춤", on: prefs.pauseInFullscreen,
                               #selector(powerChanged))
-        batteryBox = check("배터리·저전력이면 프레임을 낮춤", on: prefs.reduceOnBattery,
-                           #selector(powerChanged))
 
         let idleRow = NSStackView()
         idleRow.orientation = .horizontal
@@ -152,7 +161,7 @@ final class SettingsWindowController: NSWindowController {
 
         let fpsRow = NSStackView()
         fpsRow.orientation = .horizontal
-        fpsRow.addArrangedSubview(NSTextField(labelWithString: "프레임:"))
+        fpsRow.addArrangedSubview(NSTextField(labelWithString: "프레임(전원 연결):"))
         for fps in PowerPreferences.allowedFPS {
             fpsPopup.addItem(withTitle: "\(fps)")
             fpsPopup.lastItem?.tag = fps
@@ -162,6 +171,19 @@ final class SettingsWindowController: NSWindowController {
         fpsPopup.action = #selector(powerChanged)
         fpsRow.addArrangedSubview(fpsPopup)
         stack.addArrangedSubview(fpsRow)
+
+        let batteryRow = NSStackView()
+        batteryRow.orientation = .horizontal
+        batteryRow.addArrangedSubview(NSTextField(labelWithString: "배터리·저전력일 때:"))
+        for (label, fps) in PowerPreferencesStore.batteryChoices {
+            batteryPopup.addItem(withTitle: label)
+            batteryPopup.lastItem?.tag = fps
+        }
+        batteryPopup.selectItem(withTag: prefs.batteryFPS)
+        batteryPopup.target = self
+        batteryPopup.action = #selector(powerChanged)
+        batteryRow.addArrangedSubview(batteryPopup)
+        stack.addArrangedSubview(batteryRow)
 
         heading("소리")
         soundBox = check("씬 소리", on: UserDefaults.standard.bool(forKey: MenuBarController.soundKey),
@@ -330,12 +352,12 @@ final class SettingsWindowController: NSWindowController {
 
     private var occludedBox: NSButton?
     private var fullscreenBox: NSButton?
-    private var batteryBox: NSButton?
     private var soundBox: NSButton?
     private var audioBox: NSButton?
     private var loginBox: NSButton?
     private let idlePopup = NSPopUpButton()
     private let fpsPopup = NSPopUpButton()
+    private let batteryPopup = NSPopUpButton()
     private let volumeSlider = NSSlider()
     static let idleChoices: [(String, TimeInterval)] = [
         ("안 함", 0), ("5분", 300), ("15분", 900), ("30분", 1800), ("1시간", 3600),
@@ -345,7 +367,7 @@ final class SettingsWindowController: NSWindowController {
         var prefs = PowerPreferences()
         prefs.pauseWhenOccluded = occludedBox?.state == .on
         prefs.pauseInFullscreen = fullscreenBox?.state == .on
-        prefs.reduceOnBattery = batteryBox?.state == .on
+        prefs.batteryFPS = batteryPopup.selectedTag()
         prefs.idlePauseSeconds = TimeInterval(idlePopup.selectedTag())
         prefs.targetFPS = fpsPopup.selectedTag()
         PowerPreferencesStore.save(prefs)

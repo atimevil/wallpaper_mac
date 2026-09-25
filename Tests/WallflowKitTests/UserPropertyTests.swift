@@ -173,13 +173,13 @@ final class UserPropertyTests: XCTestCase {
 
     // MARK: 재생 규칙
 
-    /// 기본값은 지금까지의 고정 동작과 같아야 한다. 하나도 안 바꾸면 전과 같다.
+    /// 기본값은 지금의 고정 동작과 같아야 한다. 하나도 안 바꾸면 전원 60·배터리 30이다.
     func testStandardPreferencesMatchOldBehaviour() {
         XCTAssertEqual(PowerPolicy.directive(for: PowerSignals(isOccluded: true)), .paused)
         XCTAssertEqual(PowerPolicy.directive(for: PowerSignals(isFullscreenAppActive: true)), .paused)
         XCTAssertEqual(PowerPolicy.directive(for: PowerSignals(idleSeconds: 900)), .paused)
-        XCTAssertEqual(PowerPolicy.directive(for: PowerSignals(isOnBattery: true)), .playing(fps: 15))
-        XCTAssertEqual(PowerPolicy.directive(for: .active), .playing(fps: 30))
+        XCTAssertEqual(PowerPolicy.directive(for: PowerSignals(isOnBattery: true)), .playing(fps: 30))
+        XCTAssertEqual(PowerPolicy.directive(for: .active), .playing(fps: 60))
     }
 
     func testPreferencesCanKeepPlaying() {
@@ -187,7 +187,7 @@ final class UserPropertyTests: XCTestCase {
         prefs.pauseWhenOccluded = false
         prefs.pauseInFullscreen = false
         prefs.idlePauseSeconds = 0
-        prefs.reduceOnBattery = false
+        prefs.batteryFPS = 60
         prefs.targetFPS = 60
         let busy = PowerSignals(isOccluded: true, isFullscreenAppActive: true,
                                 idleSeconds: 99999, isOnBattery: true)
@@ -197,17 +197,17 @@ final class UserPropertyTests: XCTestCase {
     /// 발열은 사용자가 끌 수 없다. 기계를 지키는 쪽이 우선이다.
     func testThermalPressureAlwaysReduces() {
         var prefs = PowerPreferences()
-        prefs.reduceOnBattery = false
+        prefs.batteryFPS = 60
         prefs.targetFPS = 60
         XCTAssertEqual(
             PowerPolicy.directive(for: PowerSignals(isThermallyPressured: true), preferences: prefs),
             .playing(fps: 15))
     }
 
-    /// 허용된 프레임만 받는다. 파일이 이상한 값을 줘도 30으로 돌아간다.
+    /// 허용된 프레임만 받는다. 파일이 이상한 값을 줘도 기본값으로 돌아간다.
     func testUnknownFPSFallsBackToNormal() {
         var prefs = PowerPreferences()
         prefs.targetFPS = 1000
-        XCTAssertEqual(PowerPolicy.directive(for: .active, preferences: prefs), .playing(fps: 30))
+        XCTAssertEqual(PowerPolicy.directive(for: .active, preferences: prefs), .playing(fps: 60))
     }
 }
