@@ -6,6 +6,9 @@ import WallflowKit
 final class MenuBarController {
     private let statusItem: NSStatusItem
     private let onSelect: (WallpaperItem) -> Void
+    /// webm/mkv 변환 대상의 지금 상태(ffmpeg 없음/변환 중/실패). 그런 항목이
+    /// 아니거나 평소와 다를 게 없으면(캐시 있음/아직 시도 전) nil을 준다.
+    private let conversionState: (WallpaperItem) -> VideoConverter.VideoConversionState?
     private let onRefresh: () -> Void
     private let onBrowseWorkshop: () -> Void
     private let onToggleSound: (Bool) -> Void
@@ -17,6 +20,7 @@ final class MenuBarController {
 
     init(
         onSelect: @escaping (WallpaperItem) -> Void,
+        conversionState: @escaping (WallpaperItem) -> VideoConverter.VideoConversionState?,
         onRefresh: @escaping () -> Void,
         onBrowseWorkshop: @escaping () -> Void,
         onToggleSound: @escaping (Bool) -> Void,
@@ -30,6 +34,7 @@ final class MenuBarController {
         self.onOpenSettings = onOpenSettings
         self.onPowerChanged = onPowerChanged
         self.onSelect = onSelect
+        self.conversionState = conversionState
         self.onRefresh = onRefresh
         self.onBrowseWorkshop = onBrowseWorkshop
         self.onQuit = onQuit
@@ -62,9 +67,18 @@ final class MenuBarController {
                 // 열 수 없는 것은 그렇다고 적는다. 목록에서 빼면 사용자는 자기가
                 // 받은 것이 왜 안 보이는지 알 수 없고, 아무 표시 없이 두면
                 // 골랐을 때 왜 안 바뀌는지 알 수 없다.
-                let label = item.unsupportedReason == nil
+                var label = item.unsupportedReason == nil
                     ? "\(item.title)  (\(item.type.rawValue))"
                     : "\(item.title)  (열 수 없음)"
+                var toolTip = item.unsupportedReason
+
+                // webm/mkv 변환 대상은 .unsupported가 아니라 .video라 위 분기를
+                // 안 탄다 — ffmpeg 없음/변환 중/실패는 여기서 따로 물어 보여준다.
+                if let state = conversionState(item) {
+                    label = "\(item.title)  \(VideoConverter.menuLabelSuffix(for: state))"
+                    toolTip = VideoConverter.menuTooltip(for: state)
+                }
+
                 let menuItem = NSMenuItem(
                     title: label,
                     action: #selector(select(_:)),
@@ -73,10 +87,12 @@ final class MenuBarController {
                 menuItem.target = self
                 menuItem.tag = index
                 // 씬은 M2부터 이미지 레이어를 그린다. 못 그리면 preview로 폴백한다.
+                // 변환 대상은 ffmpeg 없음/변환 중/실패여도 .video라 고를 수는
+                // 있다 — 골라야 변환이 시작되므로 막으면 안 된다.
                 menuItem.isEnabled = (item.type != .unsupported)
                 // 왜 못 여는지는 마우스를 올리면 보인다. 메뉴 이름에 다 적으면
                 // 목록이 읽기 어려워진다.
-                menuItem.toolTip = item.unsupportedReason
+                menuItem.toolTip = toolTip
                 menu.addItem(menuItem)
             }
         }

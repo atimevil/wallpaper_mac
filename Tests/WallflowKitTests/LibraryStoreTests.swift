@@ -110,28 +110,32 @@ final class LibraryStoreTests: XCTestCase {
     }
 
     /// webm/mkv는 macOS AVFoundation이 컨테이너 단계에서부터 못 연다(실측,
-    /// UnsupportedVideoFormat.swift 참고). VideoRenderer가 검은 화면만 남기고
-    /// 조용히 실패하지 않도록, load() 단계에서부터 이유를 달아 목록에 남긴다.
-    func testVideoWithWebmExtensionIsListedWithReason() throws {
+    /// UnsupportedVideoFormat.swift 참고). 예전에는 이 사실만으로 목록에서
+    /// .unsupported로 걸렀지만, ffmpeg가 있으면 붙일 때(DisplayManager) MP4로
+    /// 바꿔 재생할 수 있으므로 이제는 열 수 없는 것으로 버리지 않는다 —
+    /// .video로 남고, "변환이 필요하다"는 사실은 VideoConverter.needsConversion로
+    /// 언제든 다시 판정할 수 있다(따로 저장해 두지 않는다).
+    func testVideoWithWebmExtensionStaysVideoAndNeedsConversion() throws {
         let dir = try makeItem(
             id: "600",
             json: #"{"type":"video","file":"bg.webm","title":"WebM 배경"}"#,
             files: ["bg.webm"])
         let item = try WallpaperItem.load(from: dir)
         XCTAssertEqual(item.title, "WebM 배경")
-        XCTAssertEqual(item.type, .unsupported)
-        XCTAssertNotNil(item.unsupportedReason)
-        XCTAssertTrue(item.unsupportedReason!.contains("WebM"))
+        XCTAssertEqual(item.type, .video)
+        XCTAssertNil(item.unsupportedReason, "열 수 있는 것(변환하면)에는 이유를 달지 않는다")
+        XCTAssertTrue(VideoConverter.needsConversion(item.contentURL))
     }
 
-    func testVideoWithMkvExtensionIsListedWithReason() throws {
+    func testVideoWithMkvExtensionStaysVideoAndNeedsConversion() throws {
         let dir = try makeItem(
             id: "601",
             json: #"{"type":"video","file":"bg.mkv","title":"MKV 배경"}"#,
             files: ["bg.mkv"])
         let item = try WallpaperItem.load(from: dir)
-        XCTAssertEqual(item.type, .unsupported)
-        XCTAssertNotNil(item.unsupportedReason)
+        XCTAssertEqual(item.type, .video)
+        XCTAssertNil(item.unsupportedReason)
+        XCTAssertTrue(VideoConverter.needsConversion(item.contentURL))
     }
 
     /// web 타입에 붙은 .webm 파일은(있을 법하지 않지만) video가 아니므로

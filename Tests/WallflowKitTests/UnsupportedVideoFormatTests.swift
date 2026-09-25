@@ -80,4 +80,18 @@ final class UnsupportedVideoFormatTests: XCTestCase {
             XCTAssertNil(UnsupportedVideoFormat.reason(forFile: url), "확장자 \(ext)는 검사 대상이 아니다")
         }
     }
+
+    /// isKnownUnsupportedContainer는 reason(forFile:)과 달리 파일을 열지 않는다
+    /// (코덱을 안 훑는다) — 존재하지 않는 경로로도 확장자만으로 판정돼야 한다.
+    func testIsKnownUnsupportedContainerChecksExtensionOnlyWithoutReadingFile() {
+        XCTAssertTrue(
+            UnsupportedVideoFormat.isKnownUnsupportedContainer(
+                URL(fileURLWithPath: "/does/not/exist.webm")))
+        XCTAssertTrue(
+            UnsupportedVideoFormat.isKnownUnsupportedContainer(
+                URL(fileURLWithPath: "/does/not/exist.MKV")))
+        XCTAssertFalse(
+            UnsupportedVideoFormat.isKnownUnsupportedContainer(
+                URL(fileURLWithPath: "/does/not/exist.mp4")))
+    }
 }

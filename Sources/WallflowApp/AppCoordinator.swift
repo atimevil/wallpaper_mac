@@ -57,6 +57,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
         menuBar = MenuBarController(
             onSelect: { [weak self] item in self?.select(item) },
+            conversionState: { [weak self] item in self?.displays.conversionState(for: item) },
             onRefresh: { [weak self] in self?.refreshLibrary() },
             onBrowseWorkshop: { [weak self] in self?.showWorkshop() },
             onToggleSound: { [weak self] _ in self?.displays.applySoundSetting() },
@@ -68,6 +69,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             },
             onQuit: { NSApp.terminate(nil) }
         )
+        // 변환이 시작/성공/실패할 때마다 메뉴의 "(변환 중)" 같은 표시를
+        // 다시 그린다 — 안 그러면 골랐을 때 한 번 그린 상태로 굳는다.
+        displays.onConversionStateChanged = { [weak self] in self?.menuBar?.refreshStates() }
         refreshLibrary()
         restoreLastSelection()
     }
