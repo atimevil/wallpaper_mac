@@ -165,4 +165,31 @@ final class EffectDefinitionTests: XCTestCase {
         XCTAssertNil(EffectDefinition.imageLayerCompositeID(for: "_rt_imageLayerComposite_abc_a"))
         XCTAssertNil(EffectDefinition.imageLayerCompositeID(for: "masks/blur_mask"))
     }
+
+    /// 실물 음반 커버 씬(2938612768)처럼, 다른 레이어의 이펙트가 이 레이어를
+    /// `_rt_imageLayerComposite_<id>_a/_b`로 참조하면 — 그 레이어 자신은
+    /// `visible: false`라도(화면 밖에 둔 순수 텍스처 소스) — 목록에 잡혀야
+    /// 렌더러가 "안 보이면 건너뛴다" 최적화의 예외로 세울 수 있다.
+    func testReferencedLayerIDsFindsCrossLayerReferences() {
+        let blend = EffectDefinition(name: "blend", passes: [
+            EffectPass(shaderName: "effects/blend", target: nil, bindings: [],
+                       combos: [:], constants: [:],
+                       textures: [nil, "_rt_imageLayerComposite_1321_a"], blending: "normal"),
+        ])
+        let referencing = SceneLayer(
+            id: 1509, name: "16比9", visible: true,
+            origin: Vec3(x: 0, y: 0, z: 0), size: Vec2(x: 1920, y: 1080),
+            content: .image(texturePath: "materials/16比9.tex"),
+            effects: [LayerEffect(definition: blend, base: "effects/blend")])
+        let source = SceneLayer(
+            id: 1321, name: "默认音频封面azb", visible: false,
+            origin: Vec3(x: -417, y: -572, z: 0), size: Vec2(x: 1000, y: 1000),
+            content: .image(texturePath: "materials/默认音频封面azb.tex"))
+        let unrelated = SceneLayer(
+            id: 42, name: "다른 레이어", visible: false,
+            origin: Vec3(x: 0, y: 0, z: 0), size: Vec2(x: 10, y: 10),
+            content: .image(texturePath: "materials/x.tex"))
+        let ids = EffectDefinition.referencedLayerIDs(in: [referencing, source, unrelated])
+        XCTAssertEqual(ids, [1321])
+    }
 }

@@ -212,4 +212,28 @@ extension EffectDefinition {
         rest = rest.dropLast(2)
         return Int(rest)
     }
+
+    /// 씬의 모든 레이어를 훑어 `_rt_imageLayerComposite_<id>_a/_b`로 참조되는
+    /// 레이어 id를 모은다.
+    ///
+    /// 참조 대상은 자기 자신이 `visible: false`라도 텍스처가 준비돼야 한다 —
+    /// 실물 음반 커버 씬(2938612768)의 기본 커버 소스 레이어들이 전부
+    /// `visible: false`다(화면 밖 좌표에 두고 순전히 텍스처 공급용으로만
+    /// 쓴다). 렌더러가 "안 보이는 레이어는 건너뛴다" 최적화를 쓸 때 이
+    /// 목록에 있는 id는 예외로 둬야 한다 — 안 그러면 참조하는 쪽이 흰
+    /// placeholder로 채워진다(배경 전체가 하얗게 뜨는 원인이었다).
+    public static func referencedLayerIDs(in layers: [SceneLayer]) -> Set<Int> {
+        var ids: Set<Int> = []
+        for layer in layers {
+            for effect in layer.effects {
+                for pass in effect.definition.passes {
+                    for texture in pass.textures {
+                        guard let texture, let id = imageLayerCompositeID(for: texture) else { continue }
+                        ids.insert(id)
+                    }
+                }
+            }
+        }
+        return ids
+    }
 }
