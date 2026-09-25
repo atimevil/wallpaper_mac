@@ -479,6 +479,31 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(texturePath, "materials/particle/chromaticdot.tex")
     }
 
+    /// 실물 DELTARUNE(3793923399)의 `materials/particle/halo_1.json`이 이 모양이다:
+    /// `"textures": [null]`. Wallpaper Engine에서 null 슬롯은 셰이더 주석의 기본값을
+    /// 쓴다(`genericparticle.frag`의 `g_Texture0` 기본값 `util/white`). 파티클을
+    /// 통째로 unsupported로 버리면 안 된다.
+    func testParticleWithNullTextureUsesShaderDefault() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "halo", "origin": "0 0 0",
+                          "particle": "particles/presets/halo.json"}]}
+            """,
+            extras: [
+                "particles/presets/halo.json":
+                    #"{"material":"materials/presets/halo.json","maxcount":10}"#,
+                "materials/presets/halo.json":
+                    #"{"passes":[{"shader":"genericparticle","textures":[null]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard case .particle(_, let texturePath, _, _, _) = doc.layers[0].content else {
+            return XCTFail("null 텍스처도 파티클로 해석되어야 한다: \(doc.layers[0].content)")
+        }
+        XCTAssertEqual(texturePath, "materials/util/white.tex")
+    }
+
     /// 재질이 자기 셰이더를 가지면 텍스처를 붙이는 이미지가 아니다. 실물 원근
     /// 씬의 배경 구름이 `ps2menu`다 — 보통 이미지로 그리면 잡음 텍스처가 그대로
     /// 보인다. 표준 가족(`genericimage4` 등)은 그대로 이미지다.

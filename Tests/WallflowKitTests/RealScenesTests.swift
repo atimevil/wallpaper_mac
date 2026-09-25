@@ -48,7 +48,9 @@ final class RealScenesTests: XCTestCase {
         return AssetsStore(root: url)
     }
 
-    private func scenePkg(_ id: String) throws -> PkgReader? {
+    /// `pkg`: 패키지 파일 이름. 대부분 `scene.pkg`지만 실물 창작마당 씬 중엔
+    /// `gifscene.pkg`인 것도 있다(`SceneDocument.sceneEntryName` 주석 참고).
+    private func scenePkg(_ id: String, pkg: String = "scene.pkg") throws -> PkgReader? {
         if let badPath = badPath {
             XCTFail("WALLFLOW_TEST_SCENES가 설정되었지만 디렉토리가 아니거나 존재하지 않음: \(badPath)")
             return nil
@@ -56,7 +58,7 @@ final class RealScenesTests: XCTestCase {
         guard let root else {
             throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
         }
-        let url = root.appendingPathComponent(id).appendingPathComponent("scene.pkg")
+        let url = root.appendingPathComponent(id).appendingPathComponent(pkg)
         guard FileManager.default.fileExists(atPath: url.path) else {
             // ROOT는 설정되고 유효한데 이 씬만 없다. 여기서 nil을 반환하면 호출부의
             // `guard let ... else { throw XCTSkip(...) }`로 빠져 "환경변수 미설정"으로
@@ -267,6 +269,24 @@ final class RealScenesTests: XCTestCase {
     }
 
 
+
+    /// Task 2(F): DELTARUNE(3793923399)의 `new_particle_system` 레이어.
+    /// 머티리얼 `materials/particle/halo_1.json`이 `"textures": [null]`이라
+    /// 예전엔 통째로 unsupported였다. 이제 셰이더 기본값(흰색)으로 그린다.
+    /// 패키지 이름이 `gifscene.pkg`다(scene.pkg가 아니다).
+    func testDeltaruneParticleWithNullTextureResolves() throws {
+        guard let reader = try scenePkg("3793923399", pkg: "gifscene.pkg") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        guard let layer = doc.layers.first(where: { $0.name == "new_particle_system" }) else {
+            return XCTFail("new_particle_system 레이어가 없다")
+        }
+        guard case .particle(_, let texturePath, _, _, _) = layer.content else {
+            return XCTFail("unsupported면 안 된다: \(layer.content)")
+        }
+        XCTAssertEqual(texturePath, "materials/util/white.tex")
+    }
 
     /// 값 단언이 한 번도 닿지 않던 씬. PNG 텍스처가 많다.
     func testSmallestSceneResolvesLayers() throws {
