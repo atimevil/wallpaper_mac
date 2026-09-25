@@ -628,6 +628,41 @@ final class MetalCompositor {
         commands.commit()
     }
 
+    /// 글자 픽셀 버퍼를 텍스처로 올린다. `MTKTextureLoader`를 거치지 않는다 —
+    /// 굽기가 이미 백그라운드 큐에서 끝나 픽셀을 들고 있으므로, 로더가 다시
+    /// 디코딩할 이미지 파일이 없다.
+    ///
+    /// **매번 새 텍스처를 만든다.** 기존 텍스처를 재사용해 `replace`로 덮으면,
+    /// 그 텍스처를 읽는 커맨드 버퍼가 GPU에서 아직 도는 중일 수 있다 — Metal은
+    /// 진행 중인 GPU 작업을 우리에게 알려주지 않는다(진행 중 추적이 없다). 새로
+    /// 만들면 이전 텍스처는 그걸 쓰던 커맨드 버퍼가 끝날 때까지 Metal이 알아서
+    /// 붙잡아 둔다 — `TextureData.pixels` 쪽처럼 형식이 여러 가지가 아니라
+    /// 항상 `bgra8Unorm` 하나뿐이라 그 공용 처리에 끼워 넣지 않고 따로 둔다.
+    func makeTexture(from buffer: TextPixelBuffer) throws -> MTLTexture {
+        guard buffer.width > 0, buffer.height > 0 else { throw CompositorError.textureCreationFailed }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: buffer.width, height: buffer.height, mipmapped: false)
+        descriptor.usage = .shaderRead
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            throw CompositorError.textureCreationFailed
+        }
+        var replaceFailed = false
+        buffer.data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else {
+                replaceFailed = true
+                return
+            }
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, buffer.width, buffer.height),
+                mipmapLevel: 0,
+                withBytes: base,
+                bytesPerRow: buffer.bytesPerRow
+            )
+        }
+        guard !replaceFailed else { throw CompositorError.textureCreationFailed }
+        return texture
+    }
+
     /// 디코딩된 텍스처를 Metal 텍스처로 올린다.
     func makeTexture(from data: TextureData) throws -> MTLTexture {
         switch data {

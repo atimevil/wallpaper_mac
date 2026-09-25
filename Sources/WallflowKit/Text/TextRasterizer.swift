@@ -12,6 +12,22 @@ public enum TextRasterError: Error, Equatable {
     case contextCreationFailed
 }
 
+/// 구운 글자의 BGRA8 프리멀티플라이드 픽셀 버퍼.
+///
+/// `CGImage`는 Swift 6에서 `Sendable`이 아니다 — 내부가 언제 바뀔지 컴파일러가
+/// 보장할 수 없는 참조 타입이라서다. 굽기를 백그라운드 큐로 옮기고 결과만
+/// 메인 액터로 넘기려면 값 타입이면서 Sendable인 결과가 필요하다.
+///
+/// 채널 순서는 B,G,R,A다 — `MTLPixelFormat.bgra8Unorm`과 같은 배치라, 이 값을
+/// 받는 쪽(App)이 채널을 다시 섞을 필요 없이 `replace(region:...)`로 바로
+/// Metal 텍스처에 올릴 수 있다.
+public struct TextPixelBuffer: Sendable, Equatable {
+    public let data: Data
+    public let width: Int
+    public let height: Int
+    public let bytesPerRow: Int
+}
+
 /// 글자를 비트맵으로 굽는다.
 ///
 /// 폰트는 **시스템에 설치하지 않는다.** `CTFontManagerRegisterFontsForURL`은 사용자
@@ -21,6 +37,16 @@ public enum TextRasterizer {
     /// 한 변의 상한. 스크립트가 만든 글자가 길어질 수 있고, 폭은 글자 수에 비례한다.
     /// 텍스처 한 장의 상한(16384)과 같은 이유의 방어다.
     public static let maxDimension = 8192
+
+    /// `CGImage`를 돌려주는 경로의 바이트 배치. premultipliedLast + 기본(빅엔디언)
+    /// 순서라 메모리상 R,G,B,A다. CGImage가 필요한 나머지 호출부를 위해 그대로 둔다.
+    private static let rgbaBitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+
+    /// 픽셀 버퍼를 돌려주는 경로의 바이트 배치. premultipliedFirst + 리틀엔디언 =
+    /// 메모리상 B,G,R,A(`bgra8Unorm`과 같다). `MTKTextureLoader` 없이
+    /// `replace(region:...)`로 바로 올리려고 처음부터 이 배치로 굽는다.
+    private static let bgraBitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue
+        | CGBitmapInfo.byteOrder32Little.rawValue
 
     /// 글자를 RGBA 비트맵으로 굽는다.
     ///
@@ -41,40 +67,83 @@ public enum TextRasterizer {
         extraPadding: Vec2 = Vec2(x: 0, y: 0),
         horizontalAlign: TextAlignment = .left, blockAlign: Bool = false
     ) throws -> CGImage {
+        let (context, _, _) = try rasterizeToContext(
+            text: text, fontData: fontData, pointSize: pointSize, color: color,
+            wrapWidth: wrapWidth, maxRows: maxRows, usesEllipsis: usesEllipsis,
+            shadow: shadow, shadowScale: shadowScale, extraPadding: extraPadding,
+            horizontalAlign: horizontalAlign, blockAlign: blockAlign,
+            bitmapInfo: rgbaBitmapInfo)
+        guard let image = context.makeImage() else {
+            throw TextRasterError.contextCreationFailed
+        }
+        return image
+    }
+
+    /// 위 `rasterize`와 같은 값을 같은 레이아웃 규칙으로 굽지만, 결과가
+    /// `CGImage`가 아니라 Sendable 픽셀 버퍼다.
+    ///
+    /// 백그라운드 큐에서 굽고 결과만 메인 액터로 넘기는 경로(글자가 자주
+    /// 바뀌는 스크립트 구동 레이어)에서 쓴다 — CGImage는 그 경계를 못 넘는다.
+    public static func rasterizePixels(
+        text: String, fontData: Data?, pointSize: Double, color: Vec3,
+        wrapWidth: Double, maxRows: Int, usesEllipsis: Bool,
+        shadow: TextShadow? = nil, shadowScale: Double = 1,
+        extraPadding: Vec2 = Vec2(x: 0, y: 0),
+        horizontalAlign: TextAlignment = .left, blockAlign: Bool = false
+    ) throws -> TextPixelBuffer {
+        let (context, width, height) = try rasterizeToContext(
+            text: text, fontData: fontData, pointSize: pointSize, color: color,
+            wrapWidth: wrapWidth, maxRows: maxRows, usesEllipsis: usesEllipsis,
+            shadow: shadow, shadowScale: shadowScale, extraPadding: extraPadding,
+            horizontalAlign: horizontalAlign, blockAlign: blockAlign,
+            bitmapInfo: bgraBitmapInfo)
+        return try pixelBuffer(from: context, width: width, height: height)
+    }
+
+    /// 줄바꿈 여부를 갈라 단일 줄/문단 경로로 보낸다.
+    ///
+    /// `CGImage`·픽셀 버퍼 두 공개 API가 이 판단과 CoreText 레이아웃을 그대로
+    /// 공유한다 — 다른 것은 마지막에 컨텍스트를 어떤 바이트 배치로 만드는지뿐이다.
+    private static func rasterizeToContext(
+        text: String, fontData: Data?, pointSize: Double, color: Vec3,
+        wrapWidth: Double, maxRows: Int, usesEllipsis: Bool,
+        shadow: TextShadow?, shadowScale: Double, extraPadding: Vec2,
+        horizontalAlign: TextAlignment, blockAlign: Bool, bitmapInfo: UInt32
+    ) throws -> (context: CGContext, width: Int, height: Int) {
         // 줄바꿈이 있으면 폭 제한이 없어도 여러 줄이다. **실물 시계 위젯의
         // 날짜가 한 글자씩 줄바꿈으로 세로로 쌓는다** — `"0\n7\n\nS\nE\nP"` 꼴이다.
         // 줄바꿈을 무시하면 그게 한 줄로 이어져, 상자에 맞추느라 깨알같이 작아진다.
         let hasHardBreak = text.contains(where: \.isNewline)
         guard wrapWidth > 0, wrapWidth.isFinite else {
             if !hasHardBreak {
-                return try rasterize(text: text, fontData: fontData,
-                                     pointSize: pointSize, color: color,
-                                     shadow: shadow, shadowScale: shadowScale,
-                                     extraPadding: extraPadding)
+                return try rasterizeLineToContext(
+                    text: text, fontData: fontData, pointSize: pointSize, color: color,
+                    shadow: shadow, shadowScale: shadowScale, extraPadding: extraPadding,
+                    bitmapInfo: bitmapInfo)
             }
-            return try rasterizeParagraphs(
+            return try rasterizeParagraphsToContext(
                 text: text, fontData: fontData, pointSize: pointSize, color: color,
                 wrapWidth: 0, maxRows: maxRows, usesEllipsis: usesEllipsis,
                 shadow: shadow, shadowScale: shadowScale, extraPadding: extraPadding,
-                horizontalAlign: horizontalAlign, blockAlign: blockAlign)
+                horizontalAlign: horizontalAlign, blockAlign: blockAlign, bitmapInfo: bitmapInfo)
         }
-        return try rasterizeParagraphs(
+        return try rasterizeParagraphsToContext(
             text: text, fontData: fontData, pointSize: pointSize, color: color,
             wrapWidth: wrapWidth, maxRows: maxRows, usesEllipsis: usesEllipsis,
             shadow: shadow, shadowScale: shadowScale, extraPadding: extraPadding,
-            horizontalAlign: horizontalAlign, blockAlign: blockAlign)
+            horizontalAlign: horizontalAlign, blockAlign: blockAlign, bitmapInfo: bitmapInfo)
     }
 
     /// 줄바꿈으로 먼저 나누고, 각 문단을 폭에 맞춰 다시 접는다.
     ///
     /// 빈 줄도 한 줄만큼 자리를 차지해야 한다 — 실물 날짜가 묶음 사이를 빈 줄로
     /// 띄운다(`"0\n7\n\nS\nE\nP"`). 빈 줄을 버리면 글자가 위로 붙어 버린다.
-    private static func rasterizeParagraphs(
+    private static func rasterizeParagraphsToContext(
         text: String, fontData: Data?, pointSize: Double, color: Vec3,
         wrapWidth: Double, maxRows: Int, usesEllipsis: Bool,
         shadow: TextShadow?, shadowScale: Double, extraPadding: Vec2,
-        horizontalAlign: TextAlignment, blockAlign: Bool
-    ) throws -> CGImage {
+        horizontalAlign: TextAlignment, blockAlign: Bool, bitmapInfo: UInt32
+    ) throws -> (context: CGContext, width: Int, height: Int) {
         guard !text.isEmpty, !text.allSatisfy(\.isWhitespace) else { throw TextRasterError.empty }
         guard pointSize.isFinite, pointSize > 0 else {
             throw TextRasterError.badSize(width: 0, height: 0)
@@ -127,7 +196,7 @@ public enum TextRasterizer {
             data: nil, width: width, height: height,
             bitsPerComponent: 8, bytesPerRow: width * 4,
             space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            bitmapInfo: bitmapInfo
         ) else { throw TextRasterError.contextCreationFailed }
         context.setAllowsAntialiasing(true)
         context.setShouldSmoothFonts(true)
@@ -154,10 +223,7 @@ public enum TextRasterizer {
             context.textPosition = CGPoint(x: lineX, y: baseline)
             CTLineDraw(line, context)
         }
-        guard let image = context.makeImage() else {
-            throw TextRasterError.contextCreationFailed
-        }
-        return image
+        return (context, width, height)
     }
 
     /// 문단 하나를 폭에 맞춰 접어 줄 목록에 붙인다.
@@ -192,6 +258,22 @@ public enum TextRasterizer {
         shadow: TextShadow? = nil, shadowScale: Double = 1,
         extraPadding: Vec2 = Vec2(x: 0, y: 0)
     ) throws -> CGImage {
+        let (context, _, _) = try rasterizeLineToContext(
+            text: text, fontData: fontData, pointSize: pointSize, color: color,
+            shadow: shadow, shadowScale: shadowScale, extraPadding: extraPadding,
+            bitmapInfo: rgbaBitmapInfo)
+        guard let image = context.makeImage() else {
+            throw TextRasterError.contextCreationFailed
+        }
+        return image
+    }
+
+    /// 줄바꿈 없이 한 줄만 굽는다. 문단 경로보다 가벼워, 대다수(줄바꿈 없는)
+    /// 글자가 여길 지난다.
+    private static func rasterizeLineToContext(
+        text: String, fontData: Data?, pointSize: Double, color: Vec3,
+        shadow: TextShadow?, shadowScale: Double, extraPadding: Vec2, bitmapInfo: UInt32
+    ) throws -> (context: CGContext, width: Int, height: Int) {
         guard !text.isEmpty, !text.allSatisfy(\.isWhitespace) else { throw TextRasterError.empty }
         guard pointSize.isFinite, pointSize > 0 else {
             throw TextRasterError.badSize(width: 0, height: 0)
@@ -229,7 +311,7 @@ public enum TextRasterizer {
             data: nil, width: width, height: height,
             bitsPerComponent: 8, bytesPerRow: width * 4,
             space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            bitmapInfo: bitmapInfo
         ) else { throw TextRasterError.contextCreationFailed }
 
         context.setAllowsAntialiasing(true)
@@ -239,10 +321,21 @@ public enum TextRasterizer {
         context.textPosition = CGPoint(x: paddingX, y: descent + paddingY)
         CTLineDraw(line, context)
 
-        guard let image = context.makeImage() else {
-            throw TextRasterError.contextCreationFailed
-        }
-        return image
+        return (context, width, height)
+    }
+
+    /// 그려진 컨텍스트에서 픽셀을 그대로 복사해 Sendable 버퍼로 만든다.
+    ///
+    /// `CGContext.data`는 이 컨텍스트가 살아 있는 동안만 유효한 포인터다.
+    /// `Data(bytes:count:)`로 즉시 복사해야 컨텍스트가 사라진 뒤에도 안전하고,
+    /// 스레드(액터) 경계도 넘을 수 있다.
+    private static func pixelBuffer(
+        from context: CGContext, width: Int, height: Int
+    ) throws -> TextPixelBuffer {
+        guard let base = context.data else { throw TextRasterError.contextCreationFailed }
+        let bytesPerRow = context.bytesPerRow
+        let data = Data(bytes: base, count: bytesPerRow * height)
+        return TextPixelBuffer(data: data, width: width, height: height, bytesPerRow: bytesPerRow)
     }
 
     /// 구운 글자를 씬이 정한 상자에 비율 그대로 맞춘다.
