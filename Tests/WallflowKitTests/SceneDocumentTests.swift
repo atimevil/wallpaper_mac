@@ -23,6 +23,30 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(doc.orthoHeight, 1164)
         XCTAssertEqual(doc.clearColor, Vec3(x: 0.7, y: 0.7, z: 0.7))
         XCTAssertTrue(doc.clearEnabled)
+        // zoom이 없으면 확대 없음(1)이다.
+        XCTAssertEqual(doc.zoom, 1)
+    }
+
+    /// 실물 세로형 씬 3794448602이 실제로 갖고 있는 `general.zoom`.
+    func testParsesGeneralZoom() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 810, "height": 1080}, "zoom": 1.08},
+         "objects": []}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.zoom, 1.08, accuracy: 0.0001)
+    }
+
+    /// 0 이하이거나 NaN이면 확대 없음(1)으로 본다 — 깨진 값이 화면을 밀어내면 안 된다.
+    func testInvalidZoomFallsBackToOne() throws {
+        for badZoom in ["0", "-1.5", "\"nan\""] {
+            let reader = try makeScenePkg(scene: """
+            {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}, "zoom": \(badZoom)},
+             "objects": []}
+            """)
+            let doc = try SceneDocument.load(from: reader)
+            XCTAssertEqual(doc.zoom, 1, "zoom \(badZoom)은 1이어야 한다")
+        }
     }
 
     /// 실물 씬 3714517753의 실제 참조 사슬을 그대로 재현한다.

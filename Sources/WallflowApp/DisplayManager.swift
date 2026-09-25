@@ -156,6 +156,16 @@ final class DisplayManager {
         }
     }
 
+    /// 화면 맞춤 방식을 이 배경화면을 지금 보여주고 있는 모든 렌더러에 즉시
+    /// 적용한다. 같은 배경화면을 여러 화면에 걸었으면 전부에게 간다. 씬이 아닌
+    /// 렌더러(비디오·웹)는 캐스트가 실패해 조용히 건너뛴다 — 애초에 씬만
+    /// 화면 맞춤을 쓴다.
+    func applyCanvasFit(_ mode: CanvasFit.Mode, toWallpaperID id: String) {
+        for (displayID, renderer) in renderers where assignments[displayID]?.id == id {
+            (renderer as? SceneRenderer)?.setCanvasFit(mode)
+        }
+    }
+
     func apply(_ directive: PlaybackDirective) {
         lastDirective = directive
         for renderer in renderers.values {

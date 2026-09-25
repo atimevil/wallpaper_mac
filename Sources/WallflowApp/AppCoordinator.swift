@@ -66,6 +66,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 self?.settings?.reloadPower()
                 self?.power?.poll()
             },
+            currentItem: { [weak self] in self?.displays.currentItem },
+            onSetCanvasFit: { [weak self] item, mode in self?.setCanvasFit(mode, for: item) },
             onQuit: { NSApp.terminate(nil) }
         )
         refreshLibrary()
@@ -153,9 +155,21 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menuBar?.setItems(items)
     }
 
+    /// 메뉴의 "화면 맞춤"이 부른다. 저장하고, 지금 그 배경화면을 보여주는
+    /// 렌더러 전부에 재시작 없이 바로 적용한다.
+    private func setCanvasFit(_ mode: CanvasFit.Mode, for item: WallpaperItem) {
+        CanvasFitPreferencesStore.setMode(mode, for: item.id)
+        displays.applyCanvasFit(mode, toWallpaperID: item.id)
+        menuBar?.refreshStates()
+    }
+
     /// - Parameter remember: 복원 중에는 저장하지 않는다. 저장된 값을 그대로
     ///   다시 쓰는 것이라 의미가 없고, 실패해도 선택을 지우지 않아야 한다.
     private func select(_ item: WallpaperItem, remember: Bool = true) {
+        // displays.currentItem은 toDisplay가 nil이면 assign이 실패해도 이미
+        // 바뀌어 있다 — 메뉴의 "화면 맞춤" 체크 표시·활성 상태가 새 배경화면
+        // 것을 보게 성공·실패 양쪽에서 갱신한다.
+        defer { menuBar?.refreshStates() }
         do {
             try displays.assign(item, toDisplay: nil)
             if remember {

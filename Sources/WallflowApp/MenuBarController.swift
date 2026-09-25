@@ -13,7 +13,15 @@ final class MenuBarController {
     private let onOpenSettings: () -> Void
     private let onPowerChanged: () -> Void
     private let onQuit: () -> Void
+    /// 지금 모든 화면에 걸린 배경화면. "화면 맞춤" 메뉴가 무엇에 적용할지 정한다.
+    private let currentItem: () -> WallpaperItem?
+    private let onSetCanvasFit: (WallpaperItem, CanvasFit.Mode) -> Void
     private var items: [WallpaperItem] = []
+
+    /// "화면 맞춤" 메뉴 항목의 이름과 값. 채우기가 기본이라 맨 앞이다.
+    private static let canvasFitChoices: [(String, CanvasFit.Mode)] = [
+        ("채우기", .cover), ("전체 보기", .contain), ("늘이기", .stretch),
+    ]
 
     init(
         onSelect: @escaping (WallpaperItem) -> Void,
@@ -23,6 +31,8 @@ final class MenuBarController {
         onToggleAudio: @escaping (Bool) -> Void,
         onOpenSettings: @escaping () -> Void,
         onPowerChanged: @escaping () -> Void,
+        currentItem: @escaping () -> WallpaperItem?,
+        onSetCanvasFit: @escaping (WallpaperItem, CanvasFit.Mode) -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.onToggleSound = onToggleSound
@@ -32,6 +42,8 @@ final class MenuBarController {
         self.onSelect = onSelect
         self.onRefresh = onRefresh
         self.onBrowseWorkshop = onBrowseWorkshop
+        self.currentItem = currentItem
+        self.onSetCanvasFit = onSetCanvasFit
         self.onQuit = onQuit
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(
@@ -148,6 +160,26 @@ final class MenuBarController {
         fpsItem.submenu = fpsMenu
         menu.addItem(fpsItem)
 
+        // 화면 맞춤. 지금 걸린 배경화면에만 저장·적용된다. 씬이 아니면(비디오·웹)
+        // 실제로 아무것도 안 바뀌므로 그런 배경화면일 때는 눌러도 소용없다고
+        // 비활성화해 둔다 — item.type을 보는 것만으로 되는 값싼 판정이다.
+        if let current = currentItem() {
+            let fitItem = NSMenuItem(title: "화면 맞춤", action: nil, keyEquivalent: "")
+            let fitMenu = NSMenu()
+            let currentFit = CanvasFitPreferencesStore.mode(for: current.id)
+            for (label, mode) in Self.canvasFitChoices {
+                let entry = NSMenuItem(
+                    title: label, action: #selector(setCanvasFit(_:)), keyEquivalent: "")
+                entry.target = self
+                entry.representedObject = mode
+                entry.state = currentFit == mode ? .on : .off
+                fitMenu.addItem(entry)
+            }
+            fitItem.submenu = fitMenu
+            fitItem.isEnabled = current.type == .scene
+            menu.addItem(fitItem)
+        }
+
         let settings = NSMenuItem(
             title: "설정…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
@@ -242,6 +274,13 @@ final class MenuBarController {
         PowerPreferencesStore.save(prefs)
         rebuildMenu()
         onPowerChanged()
+    }
+
+    @objc private func setCanvasFit(_ sender: NSMenuItem) {
+        guard let mode = sender.representedObject as? CanvasFit.Mode,
+              let item = currentItem() else { return }
+        onSetCanvasFit(item, mode)
+        rebuildMenu()
     }
 
     @objc private func browseWorkshop() { onBrowseWorkshop() }
