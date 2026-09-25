@@ -49,4 +49,30 @@ final class RealParticleRenderKindSceneTests: XCTestCase {
         XCTAssertEqual(maxLength, 1.5)
         XCTAssertEqual(minLength, 1)
     }
+
+    /// PS2 시계 씬의 오브 꼬리(`particles/orbTrail.json`) — `renderer: [{"name":
+    /// "rope", "subdivision": 2}]`, 이미터 `flags: 2`(한 프레임에 하나만).
+    /// `orb.json`이 이걸 `type` 없는(= "once") 자식으로 문다 — T8 전까지는
+    /// `.sprite`로 떨어져 꼬리가 점으로만 나왔다.
+    func testPS2OrbTrailResolvesToRopeWithOnePerFrameEmitter() throws {
+        let reader = try workshopScene("1979606285")
+        let document = try SceneDocument.load(from: reader, assets: try assets())
+
+        var found: ParticlePreset?
+        for layer in document.layers {
+            guard case .particle(let preset, _, _, _, _) = layer.content else { continue }
+            if case .rope = preset.renderKind { found = preset }
+            for child in preset.children where child.reference.name.hasSuffix("orbTrail.json") {
+                found = child.preset
+            }
+        }
+        let orbTrail = try XCTUnwrap(found, "orbTrail 프리셋을 못 찾았다")
+        guard case .rope(let subdivision, let uvScale, let uvScrolling) = orbTrail.renderKind
+        else { return XCTFail("rope여야 한다: \(orbTrail.renderKind)") }
+        XCTAssertEqual(subdivision, 2)
+        XCTAssertEqual(uvScale, 1, "실물이 uvscale을 안 적었다 — 기본값")
+        XCTAssertFalse(uvScrolling)
+        let emitter = try XCTUnwrap(orbTrail.emitters.first)
+        XCTAssertTrue(emitter.onePerFrame, "flags: 2 — 한 프레임에 하나만 뿌려야 한다")
+    }
 }

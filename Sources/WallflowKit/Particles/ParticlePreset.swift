@@ -29,24 +29,36 @@ public struct ParticleEmitterBurst: Equatable, Sendable {
 public enum ParticleEmitter: Equatable, Sendable {
     case sphereRandom(rate: Double, origin: Vec3, directions: Vec3,
                       distanceMin: Double, distanceMax: Double,
-                      burst: ParticleEmitterBurst = .none, controlPoint: Int? = nil)
+                      burst: ParticleEmitterBurst = .none, controlPoint: Int? = nil,
+                      flags: Int = 0)
     case boxRandom(rate: Double, origin: Vec3, directions: Vec3,
                    distanceMin: Vec3, distanceMax: Vec3,
-                   burst: ParticleEmitterBurst = .none, controlPoint: Int? = nil)
+                   burst: ParticleEmitterBurst = .none, controlPoint: Int? = nil,
+                   flags: Int = 0)
 
     /// 시작할 때 한꺼번에 만들 개수와 초기 속력.
     public var burst: ParticleEmitterBurst {
         switch self {
-        case .sphereRandom(_, _, _, _, _, let burst, _): return burst
-        case .boxRandom(_, _, _, _, _, let burst, _): return burst
+        case .sphereRandom(_, _, _, _, _, let burst, _, _): return burst
+        case .boxRandom(_, _, _, _, _, let burst, _, _): return burst
         }
     }
 
     /// 이 이미터가 뿌릴 자리로 쓰는 제어점. 없으면(대부분) 이 시스템의 원점이다.
     public var controlPoint: Int? {
         switch self {
-        case .sphereRandom(_, _, _, _, _, _, let controlPoint): return controlPoint
-        case .boxRandom(_, _, _, _, _, _, let controlPoint): return controlPoint
+        case .sphereRandom(_, _, _, _, _, _, let controlPoint, _): return controlPoint
+        case .boxRandom(_, _, _, _, _, _, let controlPoint, _): return controlPoint
+        }
+    }
+
+    /// 이미터 `flags`. 2번 비트(값 2)가 "한 프레임에 하나만 뿌려라"다 —
+    /// 실물 PS2 오브 꼬리(`orbTrail.json`)의 이미터가 `flags: 2`이고, `rate: 60`인데도
+    /// 로프가 프레임마다 정확히 한 마디씩만 자란다. 다른 비트는 실물에서 못 봤다.
+    public var onePerFrame: Bool {
+        switch self {
+        case .sphereRandom(_, _, _, _, _, _, _, let flags): return flags & 2 != 0
+        case .boxRandom(_, _, _, _, _, _, _, let flags): return flags & 2 != 0
         }
     }
 
@@ -62,14 +74,16 @@ public enum ParticleEmitter: Equatable, Sendable {
     /// 원본 반경 1024가 0.65배로 줄어 가로의 3분의 2에만 비가 왔다.
     func scaled(rate factor: Double) -> ParticleEmitter {
         switch self {
-        case .sphereRandom(let r, let o, let d, let lo, let hi, let burst, let controlPoint):
+        case .sphereRandom(let r, let o, let d, let lo, let hi, let burst, let controlPoint,
+                           let flags):
             return .sphereRandom(rate: r * factor, origin: o, directions: d,
                                  distanceMin: lo, distanceMax: hi, burst: burst,
-                                 controlPoint: controlPoint)
-        case .boxRandom(let r, let o, let d, let lo, let hi, let burst, let controlPoint):
+                                 controlPoint: controlPoint, flags: flags)
+        case .boxRandom(let r, let o, let d, let lo, let hi, let burst, let controlPoint,
+                        let flags):
             return .boxRandom(rate: r * factor, origin: o, directions: d,
                               distanceMin: lo, distanceMax: hi, burst: burst,
-                              controlPoint: controlPoint)
+                              controlPoint: controlPoint, flags: flags)
         }
     }
 }
@@ -358,6 +372,9 @@ public struct ParticleOverride: Equatable, Sendable {
 /// `fadeAlpha`는 실물 프리셋(창작마당 17개 + 번들 Assets) 어디에도 값이 없어
 /// 근거가 없다 — `segments`는 "더 매끄럽게"라는 문서 설명상 최솟값 1(추가
 /// 매끄러움 없음)을, `fadeAlpha`는 다른 uv 토글들과 같은 꺼짐(false)을 썼다.
+/// (T8에서 로프 지오메트리를 그릴 때 창작마당 전체를 다시 훑었다 —
+/// `magic_vortex_0.json`(유일하게 실제로 쓰는 ropetrail)도 `length`만 적고
+/// `segments`는 여전히 안 적는다. 기본값 1은 그대로 남긴다.)
 public enum ParticleRenderKind: Equatable, Sendable {
     case sprite
     /// `g_RenderVar0`(length, maxlength, minlength) 그대로.
@@ -938,13 +955,18 @@ public struct ParticlePreset: Equatable, Sendable {
             return nil
         }
 
+        // `flags`(실물 `orbTrail.json`이 2를 쓴다 — "한 프레임에 하나만 뿌려라").
+        // 깨진 값은 0(아무 비트도 없음)으로 본다 — 못 읽었다고 이미터 전체를
+        // 버릴 이유는 아니다.
+        let flags = getInt(dict["flags"]) ?? 0
+
         switch name {
         case "sphererandom":
             guard let lo = num(dict, "distancemin", 0), let hi = num(dict, "distancemax", 0)
             else { return nil }
             return .sphereRandom(rate: rate, origin: origin, directions: directions,
                                  distanceMin: lo, distanceMax: hi, burst: burst,
-                                 controlPoint: controlPoint)
+                                 controlPoint: controlPoint, flags: flags)
 
         case "boxrandom":
             // 상자는 distancemin~distancemax 사이를 채운다. distancemin이 없으면 0이다 —
@@ -954,7 +976,7 @@ public struct ParticlePreset: Equatable, Sendable {
             else { return nil }
             return .boxRandom(rate: rate, origin: origin, directions: directions,
                               distanceMin: lo, distanceMax: hi, burst: burst,
-                              controlPoint: controlPoint)
+                              controlPoint: controlPoint, flags: flags)
 
         default:
             return nil

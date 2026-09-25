@@ -2001,11 +2001,29 @@ extension SceneRenderer: MTKViewDelegate {
                 var seen: Set<String> = []
                 for group in entry.system.renderableGroups() {
                     guard let target = entry.groups[group.key] else { continue }
+                    // 로프·로프 트레일은 인스턴스를 합치면 안 되므로(다른 오브의
+                    // 꼬리와 이어지는 결함) 여기서 건너뛰고 아래 ropeGroups로 그린다.
+                    switch target.0.renderKind {
+                    case .rope, .ropeTrail: continue
+                    default: break
+                    }
                     seen.insert(group.key)
                     target.0.update(particles: group.particles, textureRatio: target.1)
                 }
+                for group in entry.system.ropeGroups() {
+                    guard let target = entry.groups[group.key] else { continue }
+                    switch target.0.renderKind {
+                    case .rope, .ropeTrail: break
+                    default: continue
+                    }
+                    seen.insert(group.key)
+                    target.0.updateRope(instances: group.instances)
+                }
                 for (key, target) in entry.groups where !seen.contains(key) {
-                    target.0.update(particles: [], textureRatio: target.1)
+                    switch target.0.renderKind {
+                    case .rope, .ropeTrail: target.0.updateRope(instances: [])
+                    default: target.0.update(particles: [], textureRatio: target.1)
+                    }
                 }
             }
         }

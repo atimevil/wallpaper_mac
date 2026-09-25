@@ -22,6 +22,9 @@ public struct Particle: Equatable, Sendable {
     public var baseSize: Double = 1
     public var baseAlpha: Double = 1
     public var baseColor: Vec3 = Vec3(x: 1, y: 1, z: 1)
+    /// 태어난 차례. 슬롯은 재사용돼 버퍼 순서가 스폰 순서가 아니다 — 로프가
+    /// `age` 동률(같은 프레임에 여럿 태어남)을 가를 때만 쓴다.
+    public var spawnSequence: Int = 0
 
     public var isAlive: Bool {
         age < lifetime
@@ -104,6 +107,9 @@ public final class ParticleSystem {
     /// `mapsequencearoundcontrolpoint` 초기화자별로 다음에 쓸 자리 번호.
     /// 초기화자가 배열에 여럿 있어도 서로 안 섞이게 `initializers` 안 위치로 키를 잡는다.
     private var sequenceCounters: [Int: Int] = [:]
+    /// 다음에 태어날 파티클에 매길 순번. 버퍼 슬롯은 재사용되므로 태어난
+    /// 차례를 아는 유일한 길이다 — 로프가 `age` 동률을 가를 때 쓴다.
+    private var nextSpawnSequence: Int = 0
 
     public init(preset: ParticlePreset, random: RandomSource) {
         self.preset = preset
@@ -191,6 +197,50 @@ public final class ParticleSystem {
             }
         }
         return result
+    }
+
+    /// 로프가 이을 순서로 정렬한 살아 있는 파티클. `age` 내림차순, 같으면
+    /// 생성 순번(`spawnSequence`) 오름차순 — 슬롯이 재사용돼 버퍼 순서가
+    /// 스폰 순서가 아니고, 같은 프레임에 여럿 태어나면 나이가 완전히 같다
+    /// (`ageParticles`가 모두에게 같은 dt를 더한다).
+    public var ropeOrderedParticles: [Particle] {
+        particles.sorted { a, b in
+            if a.age != b.age { return a.age > b.age }
+            return a.spawnSequence < b.spawnSequence
+        }
+    }
+
+    /// `renderableGroups`의 로프 판. 같은 정의에서 나온 자식 벌들을 **합치지
+    /// 않고** 벌마다 따로 순서 있는 배열로 돌려준다 — 로프는 다른 인스턴스의
+    /// 파티클과 이어지면 안 된다(오브 하나의 꼬리가 다른 오브 자리로 튄다).
+    public func ropeGroups(
+        prefix: String = "", depth: Int = 0
+    ) -> [(key: String, preset: ParticlePreset, instances: [[Particle]])] {
+        var out: [(key: String, preset: ParticlePreset, instances: [[Particle]])] = [
+            (prefix.isEmpty ? "0" : prefix, preset, [ropeOrderedParticles])
+        ]
+        guard depth < 2 else { return out }
+        for (index, list) in childInstances.enumerated() {
+            guard !list.isEmpty else { continue }
+            let key = (prefix.isEmpty ? "0" : prefix) + ".\(index)"
+            var instances: [[Particle]] = []
+            var nested: [String: (ParticlePreset, [[Particle]])] = [:]
+            for instance in list {
+                for group in instance.system.ropeGroups(prefix: key, depth: depth + 1) {
+                    if group.key == key {
+                        instances.append(contentsOf: group.instances)
+                    } else {
+                        nested[group.key, default: (group.preset, [])].1
+                            .append(contentsOf: group.instances)
+                    }
+                }
+            }
+            out.append((key, children[index].preset, instances))
+            for (key, value) in nested.sorted(by: { $0.key < $1.key }) {
+                out.append((key, value.0, value.1))
+            }
+        }
+        return out
     }
 
     /// 그릴 것들을 프리셋별로 모아 준다. 자식까지 재귀로 훑는다.
@@ -402,6 +452,8 @@ public final class ParticleSystem {
                     continue
                 }
                 particle.age = 0
+                particle.spawnSequence = nextSpawnSequence
+                nextSpawnSequence += 1
                 particleBuffer[slot] = particle
                 numAlive += 1
                 spawnChildren(on: .onSpawn, at: particle.position, slot: slot)
@@ -415,9 +467,9 @@ public final class ParticleSystem {
             // Accumulate emission credit
             let rate: Double
             switch emitter {
-            case .sphereRandom(let r, _, _, _, _, _, _):
+            case .sphereRandom(let r, _, _, _, _, _, _, _):
                 rate = r
-            case .boxRandom(let r, _, _, _, _, _, _):
+            case .boxRandom(let r, _, _, _, _, _, _, _):
                 rate = r
             }
 
@@ -434,7 +486,11 @@ public final class ParticleSystem {
             // Int(Double)은 범위 밖에서 트랩한다. 파일에서 온 rate가 거대할 수 있으므로
             // Double 단계에서 먼저 슬롯 수 이하로 죈다. 그 뒤엔 변환이 안전하다.
             let available = Double(deadSlots.count)
-            let toEmit = Swift.min(emissionCredits[emitterIndex].rounded(.down), available)
+            var toEmit = Swift.min(emissionCredits[emitterIndex].rounded(.down), available)
+            // 로프 트레일 이미터(실물 `orbTrail`)는 `rate: 60`이라도 한 프레임에
+            // 마디 하나씩만 자라야 한다 — 안 그러면 트레일이 프레임마다 여러 개를
+            // 한꺼번에 토해내 같은 자리에 뭉친다.
+            if emitter.onePerFrame { toEmit = Swift.min(toEmit, 1) }
             let emitCount = toEmit > 0 ? Int(toEmit) : 0
 
             for _ in 0..<emitCount {
@@ -442,6 +498,8 @@ public final class ParticleSystem {
                     var particle = emitParticle(from: emitter)
                     if isValidParticle(particle) {
                         particle.age = 0
+                        particle.spawnSequence = nextSpawnSequence
+                        nextSpawnSequence += 1
                         particleBuffer[slotIndex] = particle
                         numAlive += 1
                         spawnChildren(on: .onSpawn, at: particle.position, slot: slotIndex)
@@ -481,7 +539,7 @@ public final class ParticleSystem {
 
         // Apply emitter position and velocity
         switch emitter {
-        case .sphereRandom(_, let origin, let directions, let distanceMin, let distanceMax, _, _):
+        case .sphereRandom(_, let origin, let directions, let distanceMin, let distanceMax, _, _, _):
             particle.position = origin
             // Random direction within cone
             let theta = random.next() * 2 * .pi
@@ -501,7 +559,7 @@ public final class ParticleSystem {
             )
             applyEmitterSpeed(emitter.burst, direction: unit, to: &particle)
 
-        case .boxRandom(_, let origin, let directions, let distanceMin, let distanceMax, _, _):
+        case .boxRandom(_, let origin, let directions, let distanceMin, let distanceMax, _, _, _):
             let offset = Vec3(
                 x: (distanceMin.x + random.next() * (distanceMax.x - distanceMin.x)) * directions.x,
                 y: (distanceMin.y + random.next() * (distanceMax.y - distanceMin.y)) * directions.y,

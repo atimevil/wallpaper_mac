@@ -473,6 +473,38 @@ enum SceneShaders {
         return out;
     }
 
+    // 로프·로프 트레일 정점. CPU(`RopeGeometry` + `ParticleRenderer.updateRope`)가
+    // 씬 좌표(레이어 원점·배율까지 적용)로 이미 옮긴 점을 그대로 받아, particle_vertex와
+    // 같은 T6 화면 맞춤((world - visibleOrigin)/visibleSize)만 한 번 더 건다.
+    // Swift의 `RopeVertex`와 배치가 같아야 한다 — 48바이트.
+    struct RopeVertex {
+        packed_float3 position;
+        float u;
+        float v;
+        float4 color;
+    };
+
+    vertex VertexOut rope_vertex(
+        uint vid [[vertex_id]],
+        constant RopeVertex *verts [[buffer(2)]],
+        constant ParticleUniforms &u [[buffer(3)]]
+    ) {
+        RopeVertex in = verts[vid];
+        float3 world = float3(in.position);
+
+        float2 ndc = float2(((world.x - u.visibleOrigin.x) / u.visibleSize.x) * 2.0 - 1.0,
+                            ((world.y - u.visibleOrigin.y) / u.visibleSize.y) * 2.0 - 1.0);
+
+        VertexOut out;
+        out.position = u.useTransform > 0.5
+            ? u.transform * float4(world, 1.0)
+            : float4(ndc, 0.0, 1.0);
+        out.uv = float2(in.u, in.v);
+        out.color = in.color;
+        out.screenTangents = float4(0, 0, 0, 0);
+        return out;
+    }
+
     fragment float4 particle_fragment(
         VertexOut in [[stage_in]],
         texture2d<float> tex [[texture(0)]],

@@ -27,7 +27,7 @@ final class ParticlePresetTests: XCTestCase {
         XCTAssertEqual(p.initializers.count, 4)
         XCTAssertEqual(p.operators.count, 2)
 
-        guard case .sphereRandom(let rate, let origin, _, let dmin, let dmax, _, _) = p.emitters[0] else {
+        guard case .sphereRandom(let rate, let origin, _, let dmin, let dmax, _, _, _) = p.emitters[0] else {
             return XCTFail("sphererandom이어야 한다")
         }
         XCTAssertEqual(rate, 15)
@@ -139,7 +139,7 @@ final class ParticlePresetTests: XCTestCase {
                      "directions":"0 -1 0","distancemin":"-100 -10 0","distancemax":"100 10 50"}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        guard case .boxRandom(let rate, let origin, let directions, let distanceMin, let distanceMax, _, _) = p.emitters[0] else {
+        guard case .boxRandom(let rate, let origin, let directions, let distanceMin, let distanceMax, _, _, _) = p.emitters[0] else {
             return XCTFail("boxrandom이어야 한다")
         }
         XCTAssertEqual(rate, 5)
@@ -404,7 +404,7 @@ final class ParticlePresetTests: XCTestCase {
         let json = try XCTUnwrap(preset(#"{"material":"m.json","maxcount":10,"emitter":[{"name":"boxrandom","rate":200}]}"#))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
         XCTAssertEqual(p.emitters.count, 1, "필드가 최소일 때도 파싱되어야 한다")
-        guard case .boxRandom(let rate, _, _, _, _, _, _) = p.emitters[0] else {
+        guard case .boxRandom(let rate, _, _, _, _, _, _, _) = p.emitters[0] else {
             return XCTFail("boxrandom이어야 한다")
         }
         XCTAssertEqual(rate, 200)
@@ -418,7 +418,7 @@ final class ParticlePresetTests: XCTestCase {
          "emitter":[{"name":"boxrandom","distancemax":"1024 512 0"}]}
         """))
         let p = try XCTUnwrap(ParticlePreset.parse(json))
-        guard case .boxRandom(let rate, _, _, _, let distanceMax, _, _) = p.emitters[0] else {
+        guard case .boxRandom(let rate, _, _, _, let distanceMax, _, _, _) = p.emitters[0] else {
             return XCTFail("boxrandom이어야 한다")
         }
         XCTAssertEqual(rate, ParticlePreset.defaultEmitRate, "rate가 없으면 defaultEmitRate를 쓴다")
