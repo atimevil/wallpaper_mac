@@ -760,10 +760,12 @@ extension SceneDocumentTests {
 
     /// 실물 3147346398(Minecraft Lo-Fi Fireplace)의 화면 전체를 덮는 검은
     /// 페이드 오버레이가 이 모양이다: alpha가 단발성 커브로 1(frame 0) →
-    /// 0(frame 120)로 빠지는데 `value`는 도입부 스냅숏 1이다. `value`를 그대로
-    /// 쓰면(정착값을 안 보면) 페이드가 다 끝난 뒤에도 화면이 영원히 불투명한
-    /// 검정으로 막힌다 — 그래서 정착값(커브 마지막 값 0)을 써야 한다.
-    func testAnimatedAlphaSettlesToLastKeyframeNotStartSnapshot() throws {
+    /// 0(frame 120)로 빠지는데 `value`는 도입부 스냅숏 1이다. 예전에는 여기서
+    /// "정착값(커브 마지막 값)"으로 지름길을 냈지만, 그러면 애니메이션이 재생되지
+    /// 않고 늘 끝값에 멈춘 것처럼 보인다 — 재생 중간의 값이 아예 나오지 않는다.
+    /// 이제는 `layer.alpha`가 여전히 시작 스냅숏이고, `layer.animations["alpha"]`가
+    /// 실제 재생을 맡는다(렌더러가 매 프레임 여기에 시간을 넣는다).
+    func testAnimatedAlphaKeepsSnapshotAndCarriesPlayableCurve() throws {
         let reader = try makeScenePkg(scene: """
         {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
          "objects": [
@@ -774,11 +776,15 @@ extension SceneDocumentTests {
         """)
         let doc = try SceneDocument.load(from: reader, assets: nil)
         let fade = try XCTUnwrap(doc.layers.first { $0.name == "페이드" })
-        XCTAssertEqual(fade.alpha, 0, "정착값(커브 마지막 키프레임)을 써야 한다")
+        XCTAssertEqual(fade.alpha, 1, "기준값은 여전히 첫 프레임 스냅숏이다")
+        let anim = try XCTUnwrap(fade.animations["alpha"])
+        XCTAssertEqual(anim.scalar(atSeconds: 0, base: fade.alpha), 1, accuracy: 1e-9)
+        XCTAssertEqual(anim.scalar(atSeconds: 4, base: fade.alpha), 0, accuracy: 1e-9,
+                       "4초(120프레임/30fps) 뒤에는 다 빠져야 한다")
     }
 
-    /// 반복(loop) 애니메이션은 "정착"이 없다 — value를 그대로 둔다.
-    func testLoopingAnimatedAlphaKeepsValueSnapshot() throws {
+    /// 반복(loop) 애니메이션도 커브를 그대로 들고 있는다.
+    func testLoopingAnimatedAlphaCarriesLoopCurve() throws {
         let reader = try makeScenePkg(scene: """
         {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
          "objects": [
@@ -790,6 +796,8 @@ extension SceneDocumentTests {
         let doc = try SceneDocument.load(from: reader, assets: nil)
         let layer = try XCTUnwrap(doc.layers.first { $0.name == "깜빡임" })
         XCTAssertEqual(layer.alpha, 0.7, accuracy: 0.001)
+        let anim = try XCTUnwrap(layer.animations["alpha"])
+        XCTAssertEqual(anim.mode, .loop)
     }
 
     /// 자체 보임은 따로 남는다. 스크립트가 부모를 숨길 때 렌더러가 다시 합치는 재료다.

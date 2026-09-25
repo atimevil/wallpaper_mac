@@ -396,6 +396,10 @@ public struct SceneLayer: Equatable, Sendable {
     /// `alignment`가 정한 닻에서 그림 중심까지의 거리(씬 단위, 배율 적용, 회전 전).
     /// `origin`에는 이미 더해져 있다. 스크립트가 origin을 옮길 때 다시 더하려고 따로 둔다.
     public let anchorOffset: Vec2
+    /// 씬 JSON의 타임라인 키프레임 애니메이션. 키는 `alpha`·`color`·`brightness`·
+    /// `origin`·`scale`·`angles`다. 렌더러가 매 프레임 기준값(위 각 필드)에 얹어
+    /// 논다 — 여기 있는 값은 그 기준값(첫 프레임 스냅숏)일 뿐이다.
+    public let animations: [String: PropertyAnimation]
 
     public init(
         id: Int, name: String, visible: Bool, origin: Vec3, size: Vec2,
@@ -414,12 +418,14 @@ public struct SceneLayer: Equatable, Sendable {
         puppet: PuppetSpec? = nil,
         parentID: Int? = nil,
         localVisible: Bool? = nil,
-        anchorOffset: Vec2 = Vec2(x: 0, y: 0)
+        anchorOffset: Vec2 = Vec2(x: 0, y: 0),
+        animations: [String: PropertyAnimation] = [:]
     ) {
         self.puppet = puppet
         self.parentID = parentID
         self.localVisible = localVisible ?? visible
         self.anchorOffset = anchorOffset
+        self.animations = animations
         self.scripts = scripts
         self.angles = angles
         self.localOrigin = localOrigin ?? origin
@@ -452,7 +458,7 @@ public struct SceneLayer: Equatable, Sendable {
             colorBlendMode: colorBlendMode, brightness: brightness,
             scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
             puppet: puppet, parentID: parentID, localVisible: localVisible,
-            anchorOffset: anchorOffset)
+            anchorOffset: anchorOffset, animations: animations)
     }
 
     /// 스크립트와 오브젝트 자체 변환을 붙인 사본. 나머지는 그대로다.
@@ -467,7 +473,20 @@ public struct SceneLayer: Equatable, Sendable {
             colorBlendMode: colorBlendMode, brightness: brightness,
             scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
             puppet: puppet, parentID: parentID, localVisible: localVisible,
-            anchorOffset: anchorOffset)
+            anchorOffset: anchorOffset, animations: animations)
+    }
+
+    /// 타임라인 애니메이션을 붙인 사본. 나머지는 그대로다.
+    public func attachingAnimations(_ animations: [String: PropertyAnimation]) -> SceneLayer {
+        SceneLayer(
+            id: id, name: name, visible: visible, origin: origin, size: size,
+            content: content, unrunScripts: unrunScripts, effects: effects,
+            alpha: alpha, tint: tint, rotation: rotation, displayScripts: displayScripts,
+            scale: scale, parallaxDepth: parallaxDepth,
+            colorBlendMode: colorBlendMode, brightness: brightness,
+            scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
+            puppet: puppet, parentID: parentID, localVisible: localVisible,
+            anchorOffset: anchorOffset, animations: animations)
     }
 }
 
