@@ -172,8 +172,31 @@ final class VideoConverterTests: XCTestCase {
         // keep 혼자서도 상한을 넘지만, 방금 만든 캐시를 스스로 지우면 다음에 또
         // 변환해야 하는 무한 루프가 된다 — keep은 절대 후보에 넣지 않는다.
         let evicted = VideoConverter.filesToEvict(
-            files, capBytes: 1000, keep: URL(fileURLWithPath: "/c/justmade.mp4"))
+            files, capBytes: 1000, keep: [URL(fileURLWithPath: "/c/justmade.mp4")])
         XCTAssertEqual(evicted, [])
+    }
+
+    /// 리뷰에서 잡힌 결함: 다른 화면이 지금 재생 중인 캐시가, 그저 가장 오래
+    /// 전에 변환됐다는 이유만으로 LRU 축출에 걸려 지워지면 그 화면이 멎는다.
+    /// keep은 "방금 만든 파일 하나"가 아니라 "지금 쓰고 있는 파일들의 집합"
+    /// 이어야 한다.
+    func testFilesToEvictNeverEvictsInUseFileEvenIfOldest() {
+        let oldest = Date(timeIntervalSince1970: 1)   // 원래 LRU면 제일 먼저 지워질 차례
+        let middle = Date(timeIntervalSince1970: 2)
+        let newest = Date(timeIntervalSince1970: 3)
+        let inUse = URL(fileURLWithPath: "/c/inuse.mp4")
+        let old2 = URL(fileURLWithPath: "/c/old2.mp4")
+        let recent = URL(fileURLWithPath: "/c/recent.mp4")
+        let files = [
+            VideoConverter.CacheFile(url: inUse, sizeBytes: 40, lastUsedAt: oldest),
+            VideoConverter.CacheFile(url: old2, sizeBytes: 40, lastUsedAt: middle),
+            VideoConverter.CacheFile(url: recent, sizeBytes: 40, lastUsedAt: newest),
+        ]
+        // 총합 120, 상한 50. inuse.mp4가 제일 오래됐지만 다른 화면이 재생 중이라
+        // keep에 들어간다 — 지우면 안 된다. 대신 old2/recent를 지워 상한을 맞춘다.
+        let evicted = VideoConverter.filesToEvict(files, capBytes: 50, keep: [inUse])
+        XCTAssertFalse(evicted.contains(inUse), "재생 중인 캐시는 가장 오래됐어도 지우면 안 된다")
+        XCTAssertEqual(Set(evicted), Set([old2, recent]))
     }
 
     // MARK: - convert(): 실행부의 결정적인 부분(실제 ffmpeg 없이 확인 가능한 것)
@@ -205,5 +228,47 @@ final class VideoConverterTests: XCTestCase {
 
         let result = try converter.convert(source: source)
         XCTAssertEqual(result, expected)
+    }
+
+    /// 리뷰 Minor 1: 실행 파일이 있다고 판정됐는데(locateExecutable을 거쳤으니)
+    /// 막상 Process.run()이 던지면(권한 없음 등) — 그건 "ffmpeg가 없다"가
+    /// 아니다. 잘못 붙인 이름으로 던지면 로그·상태 메시지가 실제 원인과 달라진다.
+    func testConvertSurfacesProcessRunFailureAsConversionFailedNotFfmpegNotFound() throws {
+        let source = root.appendingPathComponent("bg.webm")
+        try Data("fake source".utf8).write(to: source)
+
+        // 존재는 하지만 실행 권한이 없는 파일 — Process.run()이 실행을 거부해
+        // 던진다(ffmpeg가 "없는" 게 아니라 이 파일을 못 돌린 것뿐이다).
+        let notExecutable = root.appendingPathComponent("not-ffmpeg")
+        try Data("#!/bin/sh\necho hi\n".utf8).write(to: notExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: notExecutable.path)
+
+        let converter = VideoConverter(
+            executable: notExecutable, cacheDirectory: root.appendingPathComponent("cache"))
+        XCTAssertThrowsError(try converter.convert(source: source)) { error in
+            guard case .conversionFailed = error as? VideoConverterError else {
+                return XCTFail("ffmpegNotFound로 잘못 붙이면 안 된다: \(error)")
+            }
+        }
+    }
+
+    // MARK: - 메뉴에 보여줄 상태(없음·실패·변환 중은 한국어 사유 표시)
+
+    func testMenuLabelSuffixForEachState() {
+        XCTAssertEqual(VideoConverter.menuLabelSuffix(for: .ffmpegMissing), "(ffmpeg 필요)")
+        XCTAssertEqual(VideoConverter.menuLabelSuffix(for: .converting), "(변환 중)")
+        XCTAssertEqual(VideoConverter.menuLabelSuffix(for: .failed(reason: "x")), "(변환 실패)")
+    }
+
+    func testMenuTooltipMentionsFfmpegInstallWhenMissing() {
+        XCTAssertTrue(VideoConverter.menuTooltip(for: .ffmpegMissing).contains("ffmpeg"))
+    }
+
+    func testMenuTooltipForConvertingExplainsAutoStart() {
+        XCTAssertTrue(VideoConverter.menuTooltip(for: .converting).contains("자동으로"))
+    }
+
+    func testMenuTooltipForFailedPassesReasonThrough() {
+        XCTAssertEqual(VideoConverter.menuTooltip(for: .failed(reason: "이유")), "이유")
     }
 }

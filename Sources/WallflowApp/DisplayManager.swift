@@ -22,6 +22,9 @@ final class DisplayManager {
     /// 이번 실행에서 변환이 실패한 원본과 그 이유. 깨진 파일은 다시 돌려도
     /// 똑같이 실패하므로, 화면이 바뀔 때마다 헛되이 재시도하지 않는다.
     private var conversionFailures: [URL: String] = [:]
+    /// 변환 상태가 바뀔 때(시작/성공/실패) 불린다. 메뉴의 "(변환 중)" 같은
+    /// 표시를 다시 그리게 하는 데 쓴다 — AppCoordinator가 menuBar.refreshStates로 잇는다.
+    var onConversionStateChanged: (() -> Void)?
     /// 모든 화면에 건 배경화면. 새로 연결된 모니터에도 이것을 건다.
     ///
     /// 배정 이력이 없는 화면을 빈 채로 두면, 모니터를 꽂았을 때 거기만
@@ -211,7 +214,12 @@ final class DisplayManager {
         let source = item.contentURL
         guard !activeConversions.contains(source) else { return }
         activeConversions.insert(source)
+        onConversionStateChanged?()
         let converter = videoConverter
+        // 변환이 끝나 캐시 상한을 넘겨 정리할 때, 지금 다른 화면이 재생 중인
+        // 캐시까지 같이 지워지면 그 화면이 멎는다 — 시작 시점 스냅샷을 넘겨
+        // convert()가 그 파일들은 축출 후보에서 아예 뺀다.
+        let inUse = inUseCacheURLs()
 
         // Process는 여기(detached 클로저 안)에서만 만든다 — Sendable이 아니라
         // MainActor 쪽으로 넘길 수 없다. WorkshopWindowController의 steamcmd
@@ -219,7 +227,7 @@ final class DisplayManager {
         // 오면 곧장 self를 만질 수 있고, 무거운 작업만 detached로 뺀다.
         Task { [weak self] in
             let result: Result<URL, Error> = await Task.detached(priority: .background) {
-                Result { try converter.convert(source: source) }
+                Result { try converter.convert(source: source, keep: inUse) }
             }.value
 
             guard let self else { return }
@@ -233,7 +241,20 @@ final class DisplayManager {
                 FileHandle.standardError.write(Data(
                     "\(item.title): webm/mkv를 mp4로 바꾸지 못했다 — \(error)\n".utf8))
             }
+            self.onConversionStateChanged?()
         }
+    }
+
+    /// 지금 어떤 화면이든 재생 중인 캐시 mp4 경로들. LRU 축출이 "가장 오래
+    /// 안 쓴 것부터" 지울 때, 변환된 시각만 보면 지금 재생 중인 캐시가 그저
+    /// 제일 먼저 변환됐다는 이유만으로 뽑힐 수 있다 — 재생 중인 화면이 멎는
+    /// 결과를 낳는다. touch()가 재생 시작마다 갱신은 하지만, 변환이 도는
+    /// 수 초~수십 초 동안은 그 시점 스냅샷으로 방어해야 한다.
+    private func inUseCacheURLs() -> Set<URL> {
+        Set(assignments.values.compactMap { item -> URL? in
+            guard VideoConverter.needsConversion(item.contentURL) else { return nil }
+            return cachedVideoURL(for: item.contentURL)
+        })
     }
 
     /// 변환이 끝났을 때, 그 배경화면이 아직 걸려 있는 화면이 있으면 재시작
@@ -247,6 +268,19 @@ final class DisplayManager {
 
     private func logConversionStatus(_ item: WallpaperItem, _ message: String) {
         FileHandle.standardError.write(Data("\(item.title): \(message)\n".utf8))
+    }
+
+    /// 이 항목이 변환이 필요한 비디오라면 지금 상태를 준다(메뉴 표시용).
+    /// 캐시가 있어 정상 재생되거나 아직 변환을 시도한 적 없으면(골라야
+    /// 시작한다) 평소 라벨과 다를 게 없어 nil을 준다.
+    func conversionState(for item: WallpaperItem) -> VideoConverter.VideoConversionState? {
+        guard item.type == .video, VideoConverter.needsConversion(item.contentURL) else { return nil }
+        let source = item.contentURL
+        if cachedVideoURL(for: source) != nil { return nil }
+        guard videoConverter.isAvailable else { return .ffmpegMissing }
+        if activeConversions.contains(source) { return .converting }
+        if let failure = conversionFailures[source] { return .failed(reason: failure) }
+        return nil
     }
 
     /// 렌더가 불가능하거나 실패했을 때의 폴백. 배경이 검게 남지 않게 한다.

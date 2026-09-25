@@ -127,15 +127,17 @@ public struct VideoConverter: Sendable {
     public static let cacheCapBytes: Int64 = 2 * 1024 * 1024 * 1024
 
     /// 총합이 상한을 넘으면 가장 오래 안 쓴 것부터 지울 목록을 고른다.
-    /// keep은 절대 포함하지 않는다 — 방금 막 변환을 끝낸 파일 혼자 상한보다
-    /// 커도 그것까지 지우면, 고르자마자 다음 선택 때 또 변환해야 하는 무한
-    /// 루프가 된다(그럴 땐 상한을 일시적으로 넘긴 채로 둔다).
-    public static func filesToEvict(_ files: [CacheFile], capBytes: Int64, keep: URL? = nil) -> [URL] {
+    /// keep에 있는 파일은 절대 포함하지 않는다 — 방금 막 변환을 끝낸 파일이나
+    /// 지금 다른 화면이 재생 중인 파일을 지우면, 그게 가장 오래 안 쓴 것으로
+    /// 보이는 순간(방금 변환됐거나, 우연히 제일 먼저 변환됐거나) 재생이 멎거나
+    /// 고르자마자 또 변환해야 하는 무한 루프가 된다(그럴 땐 상한을 일시적으로
+    /// 넘긴 채로 둔다).
+    public static func filesToEvict(_ files: [CacheFile], capBytes: Int64, keep: Set<URL> = []) -> [URL] {
         let total = files.reduce(0) { $0 + $1.sizeBytes }
         var over = total - capBytes
         guard over > 0 else { return [] }
         var evicted: [URL] = []
-        for file in files.filter({ $0.url != keep }).sorted(by: { $0.lastUsedAt < $1.lastUsedAt }) {
+        for file in files.filter({ !keep.contains($0.url) }).sorted(by: { $0.lastUsedAt < $1.lastUsedAt }) {
             guard over > 0 else { break }
             evicted.append(file.url)
             over -= file.sizeBytes
@@ -156,8 +158,12 @@ public struct VideoConverter: Sendable {
     /// ffmpeg를 실제로 돌려 mp4를 만든다. 임시 파일에 쓰고 성공했을 때만
     /// 캐시 자리로 이름을 바꾼다 — 도중에 죽거나 실패해도 반쪽짜리 mp4가
     /// 캐시인 척 남지 않는다. 이미 같은 키로 변환된 것이 있으면 그대로 쓴다.
+    ///
+    /// - Parameter keep: 변환이 끝나 캐시 상한을 넘겨 정리할 때 절대 지우면
+    ///   안 되는 파일들(지금 다른 화면이 재생 중인 캐시 등). 방금 만든
+    ///   파일(finalURL)은 항상 자동으로 keep에 들어가므로 따로 넣지 않아도 된다.
     @discardableResult
-    public func convert(source: URL) throws -> URL {
+    public func convert(source: URL, keep: Set<URL> = []) throws -> URL {
         guard let executable else { throw VideoConverterError.ffmpegNotFound }
 
         let attrs = try FileManager.default.attributesOfItem(atPath: source.path)
@@ -196,8 +202,11 @@ public struct VideoConverter: Sendable {
         do {
             try process.run()
         } catch {
+            // ffmpeg는 locateExecutable()로 이미 찾은 뒤다 — "없다"가 아니라
+            // 이 실행 파일을 못 돌린 것(권한 없음 등)이다. ffmpegNotFound로
+            // 잘못 붙이면 로그와 상태 메시지가 실제 원인과 달라진다.
             try? FileManager.default.removeItem(at: tempURL)
-            throw VideoConverterError.ffmpegNotFound
+            throw VideoConverterError.conversionFailed(exitCode: -1, log: "프로세스 실행 실패: \(error)")
         }
         process.waitUntilExit()
 
@@ -219,13 +228,13 @@ public struct VideoConverter: Sendable {
             }
         }
 
-        enforceCacheCap(keep: finalURL)
+        enforceCacheCap(keep: keep.union([finalURL]))
         return finalURL
     }
 
     /// 캐시 디렉터리를 훑어 2GB 상한을 넘으면 오래 안 쓴 것부터 지운다.
     /// convert() 성공 뒤에 부른다 — 캐시가 자라는 시점은 그때뿐이다.
-    public func enforceCacheCap(capBytes: Int64 = VideoConverter.cacheCapBytes, keep: URL? = nil) {
+    public func enforceCacheCap(capBytes: Int64 = VideoConverter.cacheCapBytes, keep: Set<URL> = []) {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: cacheDirectory,
@@ -241,6 +250,44 @@ public struct VideoConverter: Sendable {
         }
         for url in Self.filesToEvict(files, capBytes: capBytes, keep: keep) {
             try? fm.removeItem(at: url)
+        }
+    }
+
+    // MARK: - 메뉴 등에 보여줄 상태
+
+    /// 변환 대상 비디오 하나의 지금 상태. "없음·실패·변환 중은 한국어 사유
+    /// 표시" 요구가 attach 시점 미리보기뿐 아니라 메뉴에도 적용된다 —
+    /// DisplayManager.conversionState(for:)가 이 값을 만들고, MenuBarController가
+    /// menuLabelSuffix/menuTooltip으로 글자를 얻는다.
+    ///
+    /// 캐시가 있어 정상 재생 중이거나, 아직 변환을 시도한 적 없는 경우(골라야
+    /// 시작한다)는 평소 라벨과 다를 게 없어 이 타입에 없다 — 그런 경우
+    /// conversionState(for:)는 nil을 준다.
+    public enum VideoConversionState: Equatable, Sendable {
+        case ffmpegMissing
+        case converting
+        case failed(reason: String)
+    }
+
+    /// 메뉴 항목 제목 뒤에 붙일 짧은 표시.
+    public static func menuLabelSuffix(for state: VideoConversionState) -> String {
+        switch state {
+        case .ffmpegMissing: return "(ffmpeg 필요)"
+        case .converting: return "(변환 중)"
+        case .failed: return "(변환 실패)"
+        }
+    }
+
+    /// 마우스를 올렸을 때 보여줄 설명. 메뉴 이름에 다 적으면 목록이 읽기
+    /// 어려워지므로 짧은 표시(menuLabelSuffix)와 나눈다.
+    public static func menuTooltip(for state: VideoConversionState) -> String {
+        switch state {
+        case .ffmpegMissing:
+            return "webm·mkv는 ffmpeg가 있어야 MP4로 바꿔 연다. 터미널에서 brew install ffmpeg로 설치할 수 있다."
+        case .converting:
+            return "webm·mkv를 MP4로 바꾸는 중이다. 끝나면 자동으로 재생을 시작한다."
+        case .failed(let reason):
+            return reason
         }
     }
 }
