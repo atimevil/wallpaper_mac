@@ -510,6 +510,36 @@ final class RealScenesTests: XCTestCase {
                                        "dust_motes_0 레이어의 이미터가 없다")
         }
     }
+    /// "Cat and bee"(3444535389): 배경 전체를 덮는 레이어(id 57, 모델
+    /// `"solidlayer": true`)가 `.image`가 아니라 `.solidColor`로 읽혀야 한다.
+    /// 그래야 렌더러가 텍스처 디코딩 없이 곧장 칠해 clearcolor(회색 0.7)가
+    /// 비쳐 보이지 않는다. 같은 재질을 쓰는 고양이 눈꺼풀(97/100)도 함께 본다 —
+    /// 배경이 검정이면 이 검정 눈꺼풀도 바탕에 묻혀 안 보여야 정상이다.
+    func testSolidLayerModelResolvesToSolidColorNotImage() throws {
+        guard let reader = try scenePkg("3444535389") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let store = try assetsStore()
+        let doc = try SceneDocument.load(from: reader, assets: store)
+        let byID = Dictionary(uniqueKeysWithValues: doc.layers.map { ($0.id, $0) })
+        for id in [57, 97, 100] {
+            guard let layer = byID[id] else {
+                XCTFail("레이어 \(id)를 찾을 수 없다")
+                continue
+            }
+            guard case .solidColor(let color) = layer.content else {
+                XCTFail("레이어 \(id)는 solidlayer 모델인데 \(layer.content)로 읽혔다")
+                continue
+            }
+            XCTAssertEqual(color, Vec3(x: 0, y: 0, z: 0))
+        }
+        // 배경 레이어는 캔버스 전체를 덮어야 한다(부호는 뒤집힘을 나타낼 뿐
+        // 크기는 절댓값이다).
+        let background = try XCTUnwrap(byID[57])
+        XCTAssertTrue(background.visible)
+        XCTAssertGreaterThanOrEqual(abs(background.size.x), Double(doc.orthoWidth))
+        XCTAssertGreaterThanOrEqual(abs(background.size.y), Double(doc.orthoHeight))
+    }
 }
 
 /// ROOT는 유효한데 이름 붙인 씬 디렉토리가 없을 때 던진다. XCTFail로 이미 실패를

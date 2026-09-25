@@ -1133,6 +1133,21 @@ public struct SceneDocument: Sendable {
            let file = userTextures[property], !file.isEmpty {
             return .image(texturePath: ReferenceResolver.externalPrefix + file)
         }
+        // 모델 JSON이 스스로 `"solidlayer": true`라고 선언하면 그게 가장 확실한
+        // 근거다 — 실물 "纯色占位符"(고양이 눈꺼풀·시계 판·배경색)이 전부
+        // `materials/util/solidlayer_instance[_3|_4][_depthtest].json`(셰이더
+        // `genericimage2/3/4` + 텍스처 `util/white`)을 쓰는데, 이 재질은 아래
+        // `plainImageShaders`에 걸려 그냥 이미지 레이어로 읽혔다. 흰 텍스처를
+        // 실제로 읽어 칠하나 셰이더로 채우나 눈에는 같아 보이지만, 색이 사용자
+        // 속성(`bgcolor`)에 물린 경우 이미지 경로는 그 값을 받되 여전히 텍스처
+        // 디코딩·샘플링을 거친다 — 단색이라고 선언된 레이어는 굳이 그럴 이유가
+        // 없다. 씬 3444535389의 배경 전체를 덮는 레이어(id 57)가 이 값을
+        // 놓치면 검게 칠해야 할 바탕이 통째로 비어 회색 clearcolor가 비친다.
+        if model["solidlayer"] as? Bool == true {
+            let color = Self.scalarOrScripted(object["color"]).flatMap(Vec3.parse)
+                ?? Vec3(x: 1, y: 1, z: 1)
+            return .solidColor(color)
+        }
         // 셰이더 flat이면서 텍스처가 없을 때만 단색이다. 실물 solidlayer가 그 모양이다.
         // OR로 쓰면 flat + _rt_ 조합이 렌더 타깃 검사에 닿지 못하고 삼켜지고,
         // textures가 없는 다른 셰이더도 전부 단색이 되어버린다. 반드시 AND다.
