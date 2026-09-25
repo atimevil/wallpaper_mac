@@ -446,14 +446,14 @@ final class EffectChain {
                 .contains { $0.name.hasPrefix("g_AudioSpectrum") })
     }
 
+    /// pkg를 모든 철자에 먼저 훑고 Assets는 그다음이다 — 배경화면이 들고 온
+    /// 자기 셰이더 사본이 있으면 그게 이겨야 한다(`ReferenceResolver.firstData`
+    /// 참고, 실물 1493910771 waterwaves).
     private static func firstText(
         of paths: [String], resolver: ReferenceResolver
     ) -> String? {
-        for path in paths {
-            if let data = resolver.data(for: path),
-               let text = String(data: data, encoding: .utf8) { return text }
-        }
-        return nil
+        guard let data = resolver.firstData(of: paths) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// 씬이 준 값을 유니폼 자리에 채운다.
