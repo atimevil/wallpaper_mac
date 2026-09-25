@@ -53,6 +53,10 @@ final class ModelRenderer {
     /// 씬의 `ambientcolor`·`skylightcolor`.
     private let ambient: SIMD3<Float>
     private let skylight: SIMD3<Float>
+    /// 씬의 점광·방향광 하나씩(있으면). `PerformLighting_V1`(`generic4` 등)이나
+    /// `generic3`의 인라인 광원 루프를 먹인다.
+    private let pointLight: (origin: Vec3, angles: Vec3, info: LightInfo)?
+    private let directionalLight: (origin: Vec3, angles: Vec3, info: LightInfo)?
 
     var needsBackground: Bool { !backgroundSlots.isEmpty }
     func setBackground(_ texture: MTLTexture?) { background = texture }
@@ -69,7 +73,8 @@ final class ModelRenderer {
         sampler: MTLSamplerState, eye: @escaping () -> SIMD3<Float>,
         clearColor: SIMD4<Float> = SIMD4(0, 0, 0, 1),
         ambient: SIMD3<Float> = SIMD3(repeating: 0.302),
-        skylight: SIMD3<Float> = SIMD3(repeating: 1)
+        skylight: SIMD3<Float> = SIMD3(repeating: 1),
+        lights: [(origin: Vec3, angles: Vec3, info: LightInfo)] = []
     ) throws {
         self.ambient = ambient
         self.skylight = skylight
@@ -130,6 +135,17 @@ final class ModelRenderer {
                   sceneTextures[texture.index] != nil else { continue }
             combos[combo] = 1
         }
+        // 점광·방향광 하나씩만 먹인다. `g_LPoint_Color[LIGHTS_POINT]`는 배열
+        // 크기를 모르는 유니폼이라 `UniformPacker`가 원소 하나 자리만 잡는다
+        // (`GLSLTranslator.declared(in:)` 문서 참고) — 그 이상을 담으면
+        // 버퍼 밖을 쓴다. 여러 빛을 쓰려면 패커부터 배열 크기를 실제 콤보값으로
+        // 아는 쪽으로 고쳐야 한다.
+        let pointLight = lights.first { $0.info.kind == .point }
+        let directionalLight = lights.first { $0.info.kind == .directional }
+        if pointLight != nil { combos["LIGHTS_POINT"] = 1 }
+        if directionalLight != nil { combos["LIGHTS_DIRECTIONAL"] = 1 }
+        self.pointLight = pointLight
+        self.directionalLight = directionalLight
         let defines = combos.sorted { $0.key < $1.key }
             .map { "#define \($0.key) \($0.value)\n" }.joined()
         let vertexLibrary = try device.makeLibrary(source: defines + vertex.source, options: nil)
@@ -284,12 +300,13 @@ final class ModelRenderer {
         guard indexCount > 0 else { return }
         if needsBackground, background == nil { return }
         let eye = eyeProvider()
-        let engine: [String: [Float]] = [
+        var engine: [String: [Float]] = [
             "g_ModelMatrix": Self.floats(world),
             "g_ViewProjectionMatrix": Self.floats(viewProjection),
             "g_ModelViewProjectionMatrix": Self.floats(viewProjection * world),
             "g_EyePosition": [eye.x, eye.y, eye.z],
-            // 조명 레이어는 아직 없다. 원점의 빛 넷 — 실물 씬도 빛 레이어가 없다.
+            // `g_LightsPosition`은 옛 셰이더(`PerformLighting_Deprecated` 이전)의
+            // 자리라 실물 어디서도 안 쓴다 — 0으로만 채워 둔다.
             "g_LightsPosition": [Float](repeating: 0, count: 12),
             "g_LightAmbientColor": [ambient.x, ambient.y, ambient.z],
             "g_LightSkylightColor": [skylight.x, skylight.y, skylight.z],
@@ -298,6 +315,21 @@ final class ModelRenderer {
             "g_TexelSizeHalf": [0.5 / 1920, 0.5 / 1080],
             "g_TexelSize": [1.0 / 1920, 1.0 / 1080],
         ]
+        // `PerformLighting_V1`·`generic3`의 인라인 루프가 읽는 빛 유니폼.
+        // `.rgb`에 밝기를 미리 곱한다 — `wfComputePBRLight`가 `.w`를 안 읽는다.
+        if let pointLight {
+            let c = pointLight.info.color, i = Float(pointLight.info.intensity)
+            engine["g_LPoint_Color"] = [Float(c.x) * i, Float(c.y) * i, Float(c.z) * i, 0]
+            engine["g_LPoint_Origin"] = [
+                Float(pointLight.origin.x), Float(pointLight.origin.y), Float(pointLight.origin.z), 0,
+            ]
+        }
+        if let directionalLight {
+            let c = directionalLight.info.color, i = Float(directionalLight.info.intensity)
+            let d = directionalLight.info.direction
+            engine["g_LDirectional_Color"] = [Float(c.x) * i, Float(c.y) * i, Float(c.z) * i, 0]
+            engine["g_LDirectional_Direction"] = [Float(d.x), Float(d.y), Float(d.z), 0]
+        }
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 1)
         encoder.setVertexBuffer(zeroBuffer, offset: 0, index: 2)

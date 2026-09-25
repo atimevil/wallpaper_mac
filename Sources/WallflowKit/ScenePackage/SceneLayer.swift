@@ -197,6 +197,56 @@ public struct SoundLayer: Equatable, Sendable {
     }
 }
 
+/// WE 광원 오브젝트(`"light": "lpoint"` 등). 위치는 이 오브젝트의 `SceneLayer.origin`
+/// (부모 사슬까지 합친 값)을 그대로 쓴다 — 3D 메시가 위치를 얻는 것과 같은 자리다.
+public struct LightInfo: Equatable, Sendable {
+    public enum Kind: String, Equatable, Sendable {
+        case point = "lpoint"
+        case spot = "lspot"
+        case directional = "ldirectional"
+        case tube = "ltube"
+    }
+    public let kind: Kind
+    public let color: Vec3
+    public let intensity: Double
+    public let radius: Double
+    public let exponent: Double
+    /// 오일러 각(도), WE의 `angles` 키. 방향광·스팟라이트의 방향을 구하는 데만 쓴다.
+    public let angles: Vec3
+
+    public init(
+        kind: Kind, color: Vec3, intensity: Double, radius: Double, exponent: Double,
+        angles: Vec3 = Vec3(x: 0, y: 0, z: 0)
+    ) {
+        self.kind = kind
+        self.color = color
+        self.intensity = intensity
+        self.radius = radius
+        self.exponent = exponent
+        self.angles = angles
+    }
+
+    /// `angles`가 가리키는 단위 방향 벡터.
+    ///
+    /// **가정.** WE 셰이더 쪽 근거(회전 없는 기본 카메라가 -Z를 본다,
+    /// `common.h`의 좌표계)만 있고 각도 합성 순서를 명시한 자료는 못 찾았다 —
+    /// 3D 오브젝트 회전에 흔한 순서(Y로 좌우, 그다음 X로 위아래, Z는 화면 기울기라
+    /// 방향과 무관)를 그대로 썼다. 실제로 확인하려면 방향광이 든 실물 씬을 미리보기와
+    /// 견주는 수밖에 없는데, 이 작업 규칙상 앱을 직접 띄워 보지 않는다 — 그림이
+    /// 어긋나 보이면 이 순서부터 의심할 것.
+    public var direction: Vec3 {
+        let yaw = angles.y * .pi / 180
+        let pitch = angles.x * .pi / 180
+        let cosPitch = cos(pitch), sinPitch = sin(pitch)
+        let cosYaw = cos(yaw), sinYaw = sin(yaw)
+        // 기본 정면 (0,0,-1)에 X축 회전(피치) 다음 Y축 회전(요)을 적용한다.
+        let x = -sinYaw * cosPitch
+        let y = sinPitch
+        let z = -cosYaw * cosPitch
+        return Vec3(x: x, y: y, z: z)
+    }
+}
+
 /// 레이어가 무엇을 그리는지.
 public enum LayerContent: Equatable, Sendable {
     /// .pkg 또는 assets 안의 텍스처 경로.
@@ -223,6 +273,8 @@ public enum LayerContent: Equatable, Sendable {
     case text(TextLayer)
     /// 소리. 그리지 않는다.
     case sound(SoundLayer)
+    /// 광원. 자기 그림은 없다 — `ModelRenderer`가 3D 메시를 밝히는 데 쓴다.
+    case light(LightInfo)
     /// 자기 그림이 없는 오브젝트. WE 편집기의 그룹(폴더), 파티클 충돌용 `solid`
     /// 경계, `light` 광원, 카메라 경로점이 전부 이 모양이다 — `image`·`model`·
     /// `particle`·`text`·`sound`·`shape` 중 아무 키도 없다. 자식은 부모 변환만

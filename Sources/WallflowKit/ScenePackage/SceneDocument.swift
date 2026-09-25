@@ -624,6 +624,30 @@ public struct SceneDocument: Sendable {
             )
         }
 
+        // 광원(`"light": "lpoint"` 등). 위치는 다른 오브젝트와 똑같이 부모 사슬을
+        // 합친 `origin`을 쓴다 — 못 읽으면(스크립트뿐이면) 그냥 그룹으로 둔다.
+        if let lightType = object["light"] as? String, let kind = LightInfo.Kind(rawValue: lightType) {
+            guard let origin else { return group() }
+            let color = Self.scalarOrScripted(object["color"]).flatMap(Vec3.parse)
+                ?? Vec3(x: 1, y: 1, z: 1)
+            let angles = Self.scalarOrScripted(object["angles"]).flatMap(Vec3.parse)
+                ?? Vec3(x: 0, y: 0, z: 0)
+            let info = LightInfo(
+                kind: kind, color: color,
+                intensity: doubleValue(object["intensity"]) ?? 1,
+                radius: doubleValue(object["radius"]) ?? 0,
+                exponent: doubleValue(object["exponent"]) ?? 1,
+                angles: angles)
+            return SceneLayer(
+                id: id, name: name, visible: visible,
+                origin: origin, size: size ?? Vec2(x: 0, y: 0),
+                content: .light(info), unrunScripts: unrun,
+                alpha: alpha, tint: tint, rotation: rotation,
+                displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
+                colorBlendMode: blendMode, brightness: brightness
+            )
+        }
+
         if let particlePresetPath = object["particle"] as? String {
             guard let origin else {
                 return unsupported("파티클 레이어지만 origin이 스크립트다. 스크립팅은 M5에서 지원한다")

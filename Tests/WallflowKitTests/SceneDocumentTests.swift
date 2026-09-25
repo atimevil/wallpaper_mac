@@ -1443,4 +1443,77 @@ extension SceneDocumentTests {
         XCTAssertEqual(SceneDocument.scriptHolders(of: object).map(\.property),
                        ["instanceoverride.controlpoint1"])
     }
+
+    // MARK: - 광원
+
+    /// 실물 scene 3589454154의 점광 오브젝트를 그대로 재현한다 — 위치는 스크립트뿐이라
+    /// `value`(편집기 마지막 값)로 대체된다.
+    func testPointLightIsParsedWithColorIntensityAndRadius() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}},
+         "objects": [{"id": 433, "light": "lpoint", "name": "",
+                      "color": "1.00000 1.00000 1.00000", "intensity": 6.0, "radius": 100.0,
+                      "exponent": 2.0, "castshadow": true,
+                      "origin": {"value": "10.0 20.0 30.0"}}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        guard case .light(let info) = doc.layers.first?.content else {
+            return XCTFail("광원 레이어가 아니다: \(String(describing: doc.layers.first?.content))")
+        }
+        XCTAssertEqual(info.kind, .point)
+        XCTAssertEqual(info.color, Vec3(x: 1, y: 1, z: 1))
+        XCTAssertEqual(info.intensity, 6.0)
+        XCTAssertEqual(info.radius, 100.0)
+        XCTAssertEqual(info.exponent, 2.0)
+        XCTAssertEqual(doc.layers.first?.origin, Vec3(x: 10, y: 20, z: 30))
+    }
+
+    /// 실물 scene 3589454154의 방향광 — `angles` 없이 `origin`만 있다.
+    func testDirectionalLightDefaultsMissingFieldsReasonably() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}},
+         "objects": [{"id": 259, "light": "ldirectional", "name": "",
+                      "color": "1.00000 0.90000 0.80000", "intensity": 5.0, "radius": 200.0,
+                      "origin": "1.00000 0.00000 0.00000"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        guard case .light(let info) = doc.layers.first?.content else {
+            return XCTFail("광원 레이어가 아니다")
+        }
+        XCTAssertEqual(info.kind, .directional)
+        XCTAssertEqual(info.color, Vec3(x: 1, y: 0.9, z: 0.8))
+        // exponent가 없으면 1(그대로)로 본다 — 0이면 감쇠 없음이 아니라 거듭제곱
+        // 자체가 사라져 다른 셰이더 식과 안 맞는다.
+        XCTAssertEqual(info.exponent, 1)
+    }
+
+    /// 자식 자리라 origin이 스크립트뿐이고 `value`조차 못 읽으면(다른 레이어와
+    /// 같은 규칙으로) 그룹으로 떨어뜨린다 — 정체불명의 원점 광원보다 안전하다.
+    func testLightWithUnreadableOriginBecomesGroup() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}},
+         "objects": [{"id": 1, "light": "lpoint", "name": "", "color": "1 1 1"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.layers.first?.content, .group)
+    }
+
+    /// 회전이 없으면 기본 정면(-Z)을 본다. `direction`은 늘 단위 벡터다.
+    func testLightDirectionWithNoRotationFacesForward() {
+        let light = LightInfo(kind: .directional, color: Vec3(x: 1, y: 1, z: 1), intensity: 1,
+                              radius: 0, exponent: 1, angles: Vec3(x: 0, y: 0, z: 0))
+        let d = light.direction
+        XCTAssertEqual(d.x, 0, accuracy: 0.0001)
+        XCTAssertEqual(d.y, 0, accuracy: 0.0001)
+        XCTAssertEqual(d.z, -1, accuracy: 0.0001)
+    }
+
+    /// y축(요) 90도를 돌리면 +X를 본다(오른손 좌표계, WE의 y-위·-z-정면).
+    func testLightDirectionRotatesWithYaw() {
+        let light = LightInfo(kind: .directional, color: Vec3(x: 1, y: 1, z: 1), intensity: 1,
+                              radius: 0, exponent: 1, angles: Vec3(x: 0, y: 90, z: 0))
+        let d = light.direction
+        XCTAssertEqual(d.x, -1, accuracy: 0.001)
+        XCTAssertEqual(d.z, 0, accuracy: 0.001)
+    }
 }
