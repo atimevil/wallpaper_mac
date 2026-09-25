@@ -37,11 +37,15 @@ func buildTex(
     flags: Int32 = 2,
     freeImageFormat: Int32 = 2,
     size: (Int32, Int32) = (2048, 1164),
+    /// 헤더의 imageWidth/imageHeight. 기본은 size와 같다(실물 대부분이 그렇다).
+    /// 밉맵이 이보다 큰 채움(TEX 패딩) 시험은 다르게 준다.
+    imageSize: (Int32, Int32)? = nil,
     mips: [(Int32, Int32, Int32, Int32, Data)]
 ) -> Data {
+    let imgSize = imageSize ?? size
     var d = nullTerminated("TEXV0005") + nullTerminated("TEXI0001")
     d += le32(format) + le32(flags)
-    d += le32(size.0) + le32(size.1) + le32(size.0) + le32(size.1)
+    d += le32(size.0) + le32(size.1) + le32(imgSize.0) + le32(imgSize.1)
     d += le32(0)                       // color
     d += nullTerminated(container)
     d += le32(1)                       // imageCount
@@ -74,10 +78,12 @@ func buildTexV1(format: Int32 = 0, flags: Int32 = 0,
 /// TEXB0002는 TEXB0003에서 freeImageFormat만 빠진 형태다.
 func buildTexV2(format: Int32 = 0, flags: Int32 = 0,
                 size: (Int32, Int32) = (32, 32),
+                imageSize: (Int32, Int32)? = nil,
                 mips: [(Int32, Int32, Int32, Int32, Data)]) -> Data {
+    let imgSize = imageSize ?? size
     var d = nullTerminated("TEXV0005") + nullTerminated("TEXI0001")
     d += le32(format) + le32(flags)
-    d += le32(size.0) + le32(size.1) + le32(size.0) + le32(size.1)
+    d += le32(size.0) + le32(size.1) + le32(imgSize.0) + le32(imgSize.1)
     d += le32(0)
     d += nullTerminated("TEXB0002")
     d += le32(1) + le32(Int32(mips.count))
