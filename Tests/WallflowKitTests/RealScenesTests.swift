@@ -129,6 +129,33 @@ final class RealScenesTests: XCTestCase {
         XCTAssertEqual(sheet.frames[59], TexSpriteFrame(x: 2880, y: 1000, width: 320, height: 200, duration: point1))
     }
 
+    /// Task 5 fix round 1 목표 씬(워크숍 3793322447). 재생 버튼이
+    /// `thisLayer.getTextureAnimation()`으로 2칸(각 1.0초)짜리 아이콘 시트를
+    /// pause()+setFrame()으로 못박는다 — 스프라이트 시트 재생을 그냥 시간에
+    /// 맡기면 이 버튼이 초당 자동으로 넘어간다. 스크립트 호스트가 첫 틱을
+    /// 돈 뒤 멈춘 채 정해진 칸에 있어야 한다.
+    func testMediaButtonPinsToAFixedFrameAfterFirstTick() throws {
+        guard let reader = try scenePkg("3793322447") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader)
+        guard let layer = doc.layers.first(where: { $0.name.contains("Play Button") }) else {
+            return XCTFail("재생 버튼 레이어를 찾을 수 없다")
+        }
+        XCTAssertFalse(layer.scripts.isEmpty, "재생 버튼에 스크립트가 붙어 있어야 한다")
+
+        let seeds = doc.layers.map(SceneScriptHost.LayerSeed.init)
+        let host = SceneScriptHost(layers: seeds, camera: doc.camera)
+        XCTAssertNil(host.fatalFailure)
+        let snapshot = host.tick(frametime: 1.0 / 60)
+        let state = try XCTUnwrap(snapshot.layers[layer.id])
+        XCTAssertEqual(state.textureAnimationPlaying, false,
+                       "재생 버튼은 init()에서 바로 pause()한다")
+        // 새 컨텍스트라 localStorage가 비어 있어 shared.ckMediaPlayButton 기본값(true)이
+        // 쓰인다 → 두 콜백 모두 setFrame(1)로 합의한다(스크립트 원문 참고).
+        XCTAssertEqual(state.textureAnimationFrame, 1)
+    }
+
     /// 226MB 텍스처 두 개가 MP4였다. 이 판정이 틀리면 두 씬이 통째로 깨진다.
     func testLargeTexturesAreDetectedAsVideo() throws {
         let cases = [

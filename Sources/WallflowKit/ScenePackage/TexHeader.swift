@@ -66,6 +66,26 @@ public struct TexSpriteSheet: Equatable, Sendable {
         // 부동소수 오차로 마지막 칸 문턱을 살짝 넘을 때만 여기 닿는다.
         return frames.last
     }
+
+    /// n번째 칸이 시작되는 누적 재생 시간(초).
+    ///
+    /// 스크립트(`thisLayer.getTextureAnimation().setFrame(n)`)가 특정 칸을
+    /// 못박았을 때, 재생 위치(`elapsed`)를 이 값으로 옮기면 `frame(atElapsed:)`가
+    /// 정확히 n번 칸을 돌려주고, 그 뒤 다시 play()해도 n번 칸부터 자연스럽게
+    /// 이어진다 — 통째로 되감기지 않는다.
+    ///
+    /// n은 count로 감싼다(wrap). 실물 스크립트가 음수나 범위 밖 값을 줄 근거는
+    /// 없지만, 사용자 파일에서 온 frameCount와 합쳐지면 방어가 필요하다 —
+    /// Swift의 `%`는 피제수가 음수면 음수를 돌려주므로 두 번 감싸 항상
+    /// `[0, count)`로 만든다. 프레임이 없으면 0.
+    public func startTime(ofFrame n: Int) -> Double {
+        guard !frames.isEmpty else { return 0 }
+        let count = frames.count
+        let index = ((n % count) + count) % count
+        var t = 0.0
+        for i in 0..<index { t += Swift.max(0, frames[i].duration) }
+        return t
+    }
 }
 
 /// .tex 안에 실제로 무엇이 들어 있는지.

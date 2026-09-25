@@ -42,6 +42,14 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         /// 마지막으로 골랐던 칸. 바뀔 때만 layerList를 갱신하고 compositor에
         /// 다시 알린다 — Loading...은 초당 10번 바뀌지, 60번이 아니다.
         var lastFrame: TexSpriteFrame?
+        /// `thisLayer.getTextureAnimation().isPlaying()`. 기본은 재생 중 — 스크립트가
+        /// 없는 레이어(Loading...의 배경 같은)는 이 값을 아무도 안 건드려 계속 돈다.
+        /// 실물 미디어 버튼(재생/셔플/즐겨찾기)은 init에서 바로 pause()를 부른다.
+        var scriptPlaying = true
+        /// 스크립트가 마지막으로 `setFrame`한 칸. `applyScriptState`가 이 값과
+        /// 다를 때만 elapsed를 옮긴다 — 매 틱 같은 값을 또 불러도(실물 update()가
+        /// 그렇게 짜여 있다) 이미 흐르고 있는 재생을 도로 처음으로 되돌리지 않는다.
+        var scriptFrame: Int?
     }
     private var spriteSheetImages: [SpriteSheetImage] = []
     /// 텍스트 레이어마다 스크립트와 구운 글자. 값이 바뀔 때만 다시 굽는다.
@@ -756,6 +764,25 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             layerList[index].0 = quad
             if !state.material.isEmpty, case .model(let renderer) = layerList[index].1 {
                 renderer.setConstants(state.material)
+            }
+            // `thisLayer.getTextureAnimation()`을 부른 스크립트가 있으면(둘은 항상
+            // 같이 온다) 재생 여부·못박은 칸을 넘긴다. 실물 미디어 버튼이 이렇게
+            // 아이콘 한 칸에 고정된다 — 안 챙기면 시트가 계속 자동으로 넘어간다.
+            if let playing = state.textureAnimationPlaying, let frame = state.textureAnimationFrame,
+               let j = spriteSheetImages.firstIndex(where: { $0.layerIndex == index }) {
+                spriteSheetImages[j].scriptPlaying = playing
+                // 매 틱 같은 n으로 다시 불러도(실물 update()가 그렇게 짜여 있다)
+                // 여기서 걸러야 재생 위치가 프레임 시작으로 계속 되감기지 않는다.
+                // ponytail: setFrame을 한 번도 안 부르고 pause()만 부르는 스크립트가
+                // 있다면(실물 3793322447은 init에서 항상 setFrame도 같이 부른다)
+                // frame이 기본값 0으로 와서 "지금 있던 자리"가 아니라 0번으로
+                // 튄다 — scriptFrame이 nil→0도 "바뀜"으로 본다. 실물로 못 본
+                // 경우라 지금은 고르지 않는다. 문제되면 __texAnim에 "frame을
+                // 한 번이라도 지정했는지" 플래그를 얹어 그때만 점프하게 한다.
+                if spriteSheetImages[j].scriptFrame != frame {
+                    spriteSheetImages[j].scriptFrame = frame
+                    spriteSheetImages[j].elapsed = spriteSheetImages[j].sheet.startTime(ofFrame: frame)
+                }
             }
             changed = true
         }
@@ -1959,7 +1986,10 @@ extension SceneRenderer: MTKViewDelegate {
             // 여기서 따로 시각을 손보지 않아도 건너뛴 시간만큼 튀지 않는다.
             var changed = false
             for i in spriteSheetImages.indices {
-                spriteSheetImages[i].elapsed += dt
+                // 스크립트가 pause()했으면(실물 미디어 버튼) 시간을 안 쌓는다 — 안
+                // 막으면 못박아 둔 칸이 매 프레임 다시 넘어가 자동 재생처럼 보인다.
+                // 나중에 play()하면 여기서 멈췄던 elapsed부터 그대로 이어진다.
+                if spriteSheetImages[i].scriptPlaying { spriteSheetImages[i].elapsed += dt }
                 let entry = spriteSheetImages[i]
                 guard entry.layerIndex < layerList.count,
                       let frame = entry.sheet.frame(atElapsed: entry.elapsed),

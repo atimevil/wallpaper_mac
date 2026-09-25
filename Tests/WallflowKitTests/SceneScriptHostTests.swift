@@ -473,4 +473,76 @@ final class SceneScriptHostTests: XCTestCase {
         XCTAssertEqual(state?.playing, true)
         XCTAssertEqual(state?.restarts, 1)
     }
+
+    // MARK: - getTextureAnimation() (Task 5 fix round 1)
+
+    /// 실물 미디어 위젯(재생/셔플/즐겨찾기)의 모양: init에서 pause()+setFrame(1),
+    /// update에서 같은 값을 매 틱 다시 부른다. `getTextureAnimation()`이 매번 새
+    /// 객체를 주면 update의 재호출이 init의 pause를 조용히 덮어써 자동 재생처럼
+    /// 보인다 — 그래서 레이어당 캐시된 같은 객체를 돌려줘야 한다.
+    func testTextureAnimationPauseAndSetFrameArePersistedAcrossCalls() {
+        let host = SceneScriptHost(layers: [
+            seed(7, "playButton", scripts: [LayerScript(
+                property: "visible",
+                source: """
+                export function init(value) {
+                    let anim = thisLayer.getTextureAnimation();
+                    anim.pause();
+                    anim.setFrame(1);
+                    return value;
+                }
+                export function update(value) {
+                    let anim = thisLayer.getTextureAnimation();
+                    anim.setFrame(1);
+                    return value;
+                }
+                """)]),
+        ], camera: nil)
+        let state = host.tick(frametime: 0.1).layers[7]
+        XCTAssertEqual(state?.textureAnimationPlaying, false)
+        XCTAssertEqual(state?.textureAnimationFrame, 1)
+    }
+
+    /// stop()은 정지 + 0번 칸으로 되감기다(레퍼런스의 IAnimation 관례).
+    func testTextureAnimationStopResetsToFrameZero() {
+        let host = SceneScriptHost(layers: [
+            seed(8, "btn", scripts: [LayerScript(
+                property: "visible",
+                source: """
+                export function init(value) {
+                    let anim = thisLayer.getTextureAnimation();
+                    anim.setFrame(4);
+                    anim.stop();
+                    return value;
+                }
+                """)]),
+        ], camera: nil)
+        let state = host.tick(frametime: 0.1).layers[8]
+        XCTAssertEqual(state?.textureAnimationPlaying, false)
+        XCTAssertEqual(state?.textureAnimationFrame, 0)
+    }
+
+    /// 대부분의 레이어는 `getTextureAnimation()`을 아예 안 부른다. 그 경우 두
+    /// 필드는 nil이어야 한다 — 렌더러가 이걸로 "이 레이어는 시트 고정과 무관하다"를 안다.
+    func testTextureAnimationFieldsAreNilWhenNeverCalled() {
+        let host = SceneScriptHost(layers: [
+            seed(9, "plain", scripts: [LayerScript(
+                property: "alpha", source: "export function update(v) { return v; }")]),
+        ], camera: nil)
+        let state = host.tick(frametime: 0.1).layers[9]
+        XCTAssertNil(state?.textureAnimationPlaying)
+        XCTAssertNil(state?.textureAnimationFrame)
+    }
+
+    /// `getAnimation()`(모델/퍼펫 애니메이션)은 이 수정의 범위 밖이라 여전히
+    /// 스텁이다 — 불러도 예외 없이 조용히 아무 일도 안 해야 한다.
+    func testGetAnimationRemainsAHarmlessStub() {
+        let host = SceneScriptHost(layers: [
+            seed(10, "mesh", scripts: [LayerScript(
+                property: "visible",
+                source: "export function init(v) { let a = thisLayer.getAnimation(); "
+                    + "a.play(); a.pause(); a.setFrame(2); return v; }")]),
+        ], camera: nil)
+        XCTAssertEqual(host.tick(frametime: 0.1).failures, [])
+    }
 }
