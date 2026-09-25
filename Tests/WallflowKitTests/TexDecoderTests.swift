@@ -82,6 +82,60 @@ final class TexDecoderTests: XCTestCase {
         XCTAssertEqual(bytes, raw)
     }
 
+    /// 실물 973101892(dark blue galaxy)가 이 모양이다: 밉맵은 4096x4096로 GPU
+    /// 정렬 채움까지 저장됐지만 헤더의 imageWidth/imageHeight(3840x2160)이
+    /// 진짜 그림 크기다. 자르지 않고 그대로 올리면 쿼드에 꽉 채워 그릴 때
+    /// 그림이 왼쪽위 구석으로 쪼그라들고 나머지가 채움 색으로 남는다.
+    func testCropsRawPixelPaddingToDeclaredImageSize() throws {
+        // 4x3 밉맵에서 왼쪽위 3x2만 진짜 그림. 행마다 다른 값을 써서 잘린 행이
+        // 섞이지 않았는지 확인한다.
+        let storedW = 4, storedH = 3, imgW = 3, imgH = 2
+        var raw = Data(repeating: 0, count: storedW * storedH * 4)
+        for row in 0..<storedH {
+            for col in 0..<storedW {
+                let idx = (row * storedW + col) * 4
+                let value = UInt8((row + 1) * 10 + col)
+                raw[idx] = value; raw[idx + 1] = value
+                raw[idx + 2] = value; raw[idx + 3] = 255
+            }
+        }
+        // 실물 973101892는 TEXB0002 컨테이너다.
+        let tex = buildTexV2(
+            format: 0, flags: 0,
+            size: (Int32(storedW), Int32(storedH)), imageSize: (Int32(imgW), Int32(imgH)),
+            mips: [(Int32(storedW), Int32(storedH), 0, raw.count32, raw)])
+
+        guard case .pixels(let bytes, let w, let h, _) = try TexDecoder.decode(tex) else {
+            return XCTFail("expected .pixels")
+        }
+        XCTAssertEqual(w, imgW)
+        XCTAssertEqual(h, imgH)
+        XCTAssertEqual(bytes.count, imgW * imgH * 4)
+        for row in 0..<imgH {
+            for col in 0..<imgW {
+                let idx = (row * imgW + col) * 4
+                let expected = UInt8((row + 1) * 10 + col)
+                XCTAssertEqual(bytes[bytes.startIndex + idx], expected, "row \(row) col \(col)")
+            }
+        }
+    }
+
+    func testDoesNotCropWhenMipAlreadyMatchesImageSize() throws {
+        // 실물 particles 256x1280 스프라이트 시트가 이 모양이다: 헤더의
+        // texWidth(2048)는 imageWidth(1280)와 다르지만 밉맵 자체는 이미
+        // 1280x256로 저장돼 채움이 없다. 이런 실물을 자르면 없던 문제가 생긴다.
+        let raw = Data(repeating: 0x7B, count: 4 * 4 * 4)
+        let tex = buildTex(
+            container: "TEXB0003", format: 0, flags: 0, freeImageFormat: -1,
+            size: (8, 8), imageSize: (4, 4), mips: [(4, 4, 0, raw.count32, raw)])
+        guard case .pixels(let bytes, let w, let h, _) = try TexDecoder.decode(tex) else {
+            return XCTFail("expected .pixels")
+        }
+        XCTAssertEqual(w, 4)
+        XCTAssertEqual(h, 4)
+        XCTAssertEqual(bytes, raw)
+    }
+
     func testSingleChannelMaskFormat() throws {
         let raw = Data(repeating: 0xFF, count: 16 * 16)
         let tex = buildTex(format: 9, flags: 2, freeImageFormat: -1, size: (16, 16),

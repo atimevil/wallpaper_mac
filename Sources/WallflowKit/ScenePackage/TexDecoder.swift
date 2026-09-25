@@ -92,17 +92,59 @@ public enum TexDecoder {
                 : payload
 
             guard bytes.count == expectedSize else { throw TexError.lz4Failed }
+            // 밉맵이 실제 그림보다 큰 경우가 있다(실물 973101892 배경이 4096x4096로
+            // 저장됐지만 진짜 그림은 3840x2160뿐, 나머지는 GPU 정렬용 채움).
+            // 헤더의 texWidth/texHeight는 이 채움과 무관하게 거짓일 때가 많아
+            // (같은 실물에서 mip이 이미 imageWidth/imageHeight와 같은 경우가 더
+            // 흔하다) 믿지 않는다 — 밉맵 실측 치수 대 헤더의 imageWidth/imageHeight로
+            // 판단한다. 자르지 않고 그대로 올리면 쿼드에 꽉 채워 그릴 때 그림이
+            // 왼쪽위로 쪼그라들고 나머지가 채움 색(주로 회색)으로 남는다.
+            // 블록 압축(DXT)은 여기서 자르지 않는다 — 이 말뭉치에서 만난 압축
+            // 포맷 채움은 텍스트/폰트 쪽 몫이라 손대지 않는다.
+            let (bytes2, w2, h2) = Self.cropPadding(
+                bytes: bytes, format: format, storedWidth: mip.width, storedHeight: mip.height,
+                imageWidth: header.imageWidth, imageHeight: header.imageHeight)
             if format == .rg88 {
                 // RG88을 RGBA8888로 편다. 아래 경로(Metal 업로드, 셰이더)가 그대로 쓰인다.
                 // 실물 light_shafts_0.tex를 재보니 R은 전 픽셀 255로 고정이고 G만
                 // 0~228로 변한다 — 흑백 밝기와 알파다. 그래서 RGB에 R을, A에 G를 넣는다.
                 // rg8Unorm으로 그냥 올리면 파랑이 0이고 알파가 1이라 색이 틀린다.
-                return .pixels(
-                    bytes: expandRG88(bytes), width: mip.width, height: mip.height,
-                    format: .rgba8888)
+                return .pixels(bytes: expandRG88(bytes2), width: w2, height: h2, format: .rgba8888)
             }
-            return .pixels(bytes: bytes, width: mip.width, height: mip.height, format: format)
+            return .pixels(bytes: bytes2, width: w2, height: h2, format: format)
         }
+    }
+
+    /// 밉맵 실측 치수(storedWidth/Height)가 헤더의 imageWidth/Height보다 크면
+    /// 왼쪽위(원점) 기준으로 잘라 채움을 없앤다. 같으면(또는 image가 더 크거나
+    /// 0이면) 손대지 않는다 — 그런 실물이 대부분이고(예: 이 말뭉치 particles
+    /// 스프라이트 시트), 거기서 자르면 없던 문제를 만든다.
+    static func cropPadding(
+        bytes: Data, format: TexPixelFormat, storedWidth: Int, storedHeight: Int,
+        imageWidth: Int, imageHeight: Int
+    ) -> (Data, Int, Int) {
+        guard !format.isBlockCompressed,
+              imageWidth > 0, imageHeight > 0,
+              imageWidth <= storedWidth, imageHeight <= storedHeight,
+              imageWidth != storedWidth || imageHeight != storedHeight
+        else { return (bytes, storedWidth, storedHeight) }
+        let srcStride = format.bytesPerRow(width: storedWidth)
+        let dstStride = format.bytesPerRow(width: imageWidth)
+        guard srcStride > 0, dstStride > 0, dstStride <= srcStride else {
+            return (bytes, storedWidth, storedHeight)
+        }
+        var cropped = Data(count: dstStride * imageHeight)
+        let ok = cropped.withUnsafeMutableBytes { dst -> Bool in
+            bytes.withUnsafeBytes { src -> Bool in
+                guard let s = src.baseAddress, let d = dst.baseAddress else { return false }
+                for row in 0..<imageHeight {
+                    memcpy(d + row * dstStride, s + row * srcStride, dstStride)
+                }
+                return true
+            }
+        }
+        guard ok else { return (bytes, storedWidth, storedHeight) }
+        return (cropped, imageWidth, imageHeight)
     }
 
     /// RG88 두 채널을 RGBA8888로 편다. R은 밝기, G는 알파다.

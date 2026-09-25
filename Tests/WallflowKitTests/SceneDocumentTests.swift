@@ -758,6 +758,40 @@ extension SceneDocumentTests {
         XCTAssertEqual(anchor.alpha, 0)
     }
 
+    /// 실물 3147346398(Minecraft Lo-Fi Fireplace)의 화면 전체를 덮는 검은
+    /// 페이드 오버레이가 이 모양이다: alpha가 단발성 커브로 1(frame 0) →
+    /// 0(frame 120)로 빠지는데 `value`는 도입부 스냅숏 1이다. `value`를 그대로
+    /// 쓰면(정착값을 안 보면) 페이드가 다 끝난 뒤에도 화면이 영원히 불투명한
+    /// 검정으로 막힌다 — 그래서 정착값(커브 마지막 값 0)을 써야 한다.
+    func testAnimatedAlphaSettlesToLastKeyframeNotStartSnapshot() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 1, "name": "페이드", "origin": "0 0 0", "size": "10 10",
+            "alpha": {"value": 1.0, "animation": {
+              "c0": [{"frame": 0, "value": 1}, {"frame": 120, "value": 0}],
+              "options": {"fps": 30, "length": 120, "mode": "single", "wraploop": null}}}}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        let fade = try XCTUnwrap(doc.layers.first { $0.name == "페이드" })
+        XCTAssertEqual(fade.alpha, 0, "정착값(커브 마지막 키프레임)을 써야 한다")
+    }
+
+    /// 반복(loop) 애니메이션은 "정착"이 없다 — value를 그대로 둔다.
+    func testLoopingAnimatedAlphaKeepsValueSnapshot() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 1, "name": "깜빡임", "origin": "0 0 0", "size": "10 10",
+            "alpha": {"value": 0.7, "animation": {
+              "c0": [{"frame": 0, "value": 1}, {"frame": 60, "value": 0}],
+              "options": {"fps": 30, "length": 60, "mode": "loop", "wraploop": null}}}}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        let layer = try XCTUnwrap(doc.layers.first { $0.name == "깜빡임" })
+        XCTAssertEqual(layer.alpha, 0.7, accuracy: 0.001)
+    }
+
     /// 자체 보임은 따로 남는다. 스크립트가 부모를 숨길 때 렌더러가 다시 합치는 재료다.
     func testLocalVisibleIsKeptSeparately() throws {
         let reader = try makeScenePkg(scene: """
