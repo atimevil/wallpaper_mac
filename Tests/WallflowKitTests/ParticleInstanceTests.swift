@@ -205,4 +205,32 @@ final class ParticleInstanceTests: XCTestCase {
         o.count = 0.05
         XCTAssertEqual(spawn(bare(burst: ParticleEmitterBurst(count: 1)), o, dt: 1e-6).count, 1)
     }
+
+    /// starttime은 프리웜이다 — 첫 프레임에 이미 그만큼 돈 상태여야 한다.
+    func testStartTimePrewarms() {
+        let preset = ParticlePreset(
+            maxCount: 64, startTime: 10, materialPath: "m.json",
+            emitters: [.sphereRandom(rate: 1, origin: zero, directions: Vec3(x: 1, y: 1, z: 0),
+                                     distanceMin: 0, distanceMax: 0)],
+            initializers: [.lifetimeRandom(min: 100, max: 100)],
+            operators: [], unsupportedNames: [])
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 2))
+        system.update(deltaTime: 1.0 / 30)
+        XCTAssertTrue((9...11).contains(system.aliveCount), "\(system.aliveCount)")
+    }
+
+    /// 파일에서 온 값이라 상한을 둔다. 한 번에 치를 값이어야 한다.
+    func testPrewarmIsCapped() throws {
+        let preset = ParticlePreset(
+            maxCount: 8, startTime: 1e6, materialPath: "m.json",
+            emitters: [.sphereRandom(rate: 0, origin: zero, directions: Vec3(x: 1, y: 1, z: 0),
+                                     distanceMin: 0, distanceMax: 0,
+                                     burst: ParticleEmitterBurst(count: 1))],
+            initializers: [.lifetimeRandom(min: 1e7, max: 1e7)],
+            operators: [], unsupportedNames: [])
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 2))
+        system.update(deltaTime: 0.05)
+        XCTAssertEqual(try XCTUnwrap(system.particles.first).age,
+                       ParticleSystem.maxPrewarm + 0.05, accuracy: 1e-6)
+    }
 }

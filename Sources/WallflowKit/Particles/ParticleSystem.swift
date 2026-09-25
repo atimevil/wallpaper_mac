@@ -51,6 +51,9 @@ public final class ParticleSystem {
     private var deadSlots: [Int] = []
     /// 시작할 때의 한꺼번에 방출을 이미 했는지. 한 번만 한다.
     private var didBurst = false
+    /// 프리웜 상한(초). 파일에서 온 값이라 한 번에 치를 만큼으로 죈다.
+    public static let maxPrewarm = 30.0
+    private var didPrewarm = false
 
     /// 이 시스템이 놓인 자리. 자식 시스템이 부모 파티클을 따라다닐 때 여기가 바뀐다.
     /// 방출할 때 파티클 위치에 더해진다.
@@ -245,15 +248,31 @@ public final class ParticleSystem {
         // Check for invalid deltaTime
         guard deltaTime.isFinite, deltaTime > 0, isPlaying else { return }
 
+        // `starttime`(프리웜): 처음 보일 때 이미 이만큼 돈 상태여야 한다. 시뮬레이션
+        // 시간이라 rate 배율과 상관없이 그대로 돈다.
+        if !didPrewarm {
+            didPrewarm = true
+            var remaining = Swift.min(Swift.max(preset.startTime, 0), Self.maxPrewarm)
+            while remaining > 1e-9 {
+                let dt = Swift.min(remaining, Self.maxTimeStep)
+                step(dt)
+                remaining -= dt
+            }
+        }
+
         // rate는 "simulation rate"(공식 문서) — 이 시스템의 시계를 늦추거나 당긴다.
         // 곱한 뒤 다시 죈다. 큰 배율이 한 걸음에 길게 걷게 두면 적분이 튄다.
         let dt = Swift.min(deltaTime * instance.rate, Self.maxTimeStep)
         guard dt > 0 else { return }
+        step(dt)
+    }
 
+    /// 시뮬레이션 한 걸음. `dt`는 이미 시뮬레이션 시간이다.
+    private func step(_ dt: Double) {
         // Remove dead particles from alive tracking
         removeDeadParticles()
 
-        // 시작할 때 한꺼번에 뿌리는 몫. 첫 update에서 한 번만 한다.
+        // 시작할 때 한꺼번에 뿌리는 몫. 첫 걸음에서 한 번만 한다.
         if !didBurst {
             didBurst = true
             emitBurst()
