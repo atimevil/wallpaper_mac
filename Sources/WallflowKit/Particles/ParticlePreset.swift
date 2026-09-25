@@ -184,11 +184,6 @@ public enum ParticleOperator: Equatable, Sendable {
     case controlPointAttract(controlPoint: Int, origin: Vec3, scale: Double, threshold: Double)
 }
 
-/// 씬이 프리셋 위에 얹는 조정값.
-///
-/// 창작마당 씬은 프리셋을 그대로 쓰지 않고 `instanceoverride`로 개수·속도·크기를
-/// 배로 조절한다. 무시하면 씬이 의도한 것과 전혀 다른 밀도로 뿌린다 — 실물
-/// Hiyuki의 벚꽃은 `count`가 0.05라 프리셋 200장 중 10장만 원한다.
 /// `remapvalue`가 무엇에 값을 넣는지.
 public enum ParticleRemapOutput: Equatable, Sendable {
     case velocity
@@ -247,6 +242,11 @@ public enum ParticleRemapTransform: Equatable, Sendable {
     }
 }
 
+/// 씬이 프리셋 위에 얹는 조정값.
+///
+/// 창작마당 씬은 프리셋을 그대로 쓰지 않고 `instanceoverride`로 개수·속도·크기를
+/// 배로 조절한다. 무시하면 씬이 의도한 것과 전혀 다른 밀도로 뿌린다 — 실물
+/// Hiyuki의 벚꽃은 `count`가 0.05라 프리셋 200장 중 10장만 원한다.
 public struct ParticleOverride: Equatable, Sendable {
     /// 전부 배율이다. 1이면 프리셋 그대로.
     public var count: Double = 1

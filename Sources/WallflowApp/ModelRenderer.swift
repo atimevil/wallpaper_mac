@@ -223,14 +223,6 @@ final class ModelRenderer {
         }
         self.backgroundSlots = backgroundSlots
         self.reflectionSlots = reflectionSlots
-        if ProcessInfo.processInfo.environment["WALLFLOW_EFFECT_DEBUG"] != nil {
-            FileHandle.standardError.write(Data("""
-            MODELDBG \(materialPath) shader=\(shaderName) 정점 \(model.vertexCount) 색인 \(model.indices.count) \
-            속성 \(vertex.attributes.map { "\($0.slot):\($0.name)" }) 뒤화면 \(backgroundSlots) \
-            텍스처 \(bound.keys.sorted()) 블렌딩 \(blending)
-
-            """.utf8))
-        }
     }
 
     private static func packed(_ uniforms: [GLSLTranslator.Uniform], _ layout: UniformPacker.Layout,
