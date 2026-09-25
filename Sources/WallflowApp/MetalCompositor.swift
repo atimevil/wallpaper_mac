@@ -285,13 +285,14 @@ final class MetalCompositor {
         maxCount: Int, blend: ParticleBlendMode, texture: MTLTexture,
         layerOrigin: SIMD3<Float>, layerScale: SIMD3<Float>,
         sheet: ParticleSpriteSheet?, animationMode: ParticleAnimationMode,
+        renderKind: ParticleRenderKind = .sprite,
         normalMap: MTLTexture? = nil, refractAmount: Float = 0.05
     ) throws -> ParticleRenderer {
         try ParticleRenderer(
             device: device, library: library, maxCount: maxCount,
             blend: blend, texture: texture, sampler: sampler, layerOrigin: layerOrigin,
             layerScale: layerScale, sheet: sheet, animationMode: animationMode,
-            normalMap: normalMap, refractAmount: refractAmount)
+            renderKind: renderKind, normalMap: normalMap, refractAmount: refractAmount)
     }
 
     /// 씬의 직교 공간 크기를 정한다.

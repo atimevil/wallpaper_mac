@@ -307,6 +307,91 @@ public struct ParticleOverride: Equatable, Sendable {
     }
 }
 
+/// `renderer` 항목. 파티클을 사각형 하나로 찍을지, 속도 방향으로 늘여
+/// 그릴지(트레일), 파티클을 잇는 선으로 그릴지(로프)를 정한다.
+///
+/// 무시하면 오브 꼬리·소용돌이 궤적·빗줄기가 전부 점으로만 나온다(실물에서
+/// 확인 — "빛이 안 이어짐" 결함).
+///
+/// 필드 기본값은 WE 에디터 문서(docs.wallpaperengine.io/en/scene/particles/
+/// component/renderer.html)가 숫자를 안 주는 자리라 전부 실물 프리셋에서 근거를
+/// 찾았다: `subdivision` 0(`dischargearc.json`·`thunderbolt.json`이 명시적으로
+/// 0), `uvScale` 1(안 적힌 배율의 관례, 코드베이스 전체가 이 규칙), `uvScrolling`
+/// false(WE의 다른 켜짐/꺼짐 필드들과 같은 관례). `ropeTrail`의 `segments`·
+/// `fadeAlpha`는 실물 프리셋(창작마당 17개 + 번들 Assets) 어디에도 값이 없어
+/// 근거가 없다 — `segments`는 "더 매끄럽게"라는 문서 설명상 최솟값 1(추가
+/// 매끄러움 없음)을, `fadeAlpha`는 다른 uv 토글들과 같은 꺼짐(false)을 썼다.
+public enum ParticleRenderKind: Equatable, Sendable {
+    case sprite
+    /// `g_RenderVar0`(length, maxlength, minlength) 그대로.
+    case spriteTrail(length: Double, maxLength: Double, minLength: Double)
+    case rope(subdivision: Int, uvScale: Double, uvScrolling: Bool)
+    case ropeTrail(subdivision: Int, length: Double, segments: Int, fadeAlpha: Bool,
+                   uvScale: Double, uvScrolling: Bool)
+
+    /// `renderer` 배열 첫 항목을 읽는다. WE는 여러 renderer를 적을 수 있게
+    /// 배열로 두지만 실물은 전부 한 개다 — 첫 항목만 쓴다.
+    /// - Parameters:
+    ///   - unsupportedNames: 모르는 이름을 여기 채운다.
+    ///   - malformedNames: 아는 이름인데 필수 필드가 깨졌으면 여기 채운다.
+    static func parse(
+        _ raw: Any?, unsupportedNames: inout Set<String>, malformedNames: inout Set<String>
+    ) -> ParticleRenderKind {
+        guard let array = raw as? [Any], let dict = array.first as? [String: Any],
+              let name = dict["name"] as? String
+        else { return .sprite }
+
+        func double(_ key: String) -> Double? {
+            if let d = dict[key] as? Double { return d.isFinite ? d : nil }
+            if let i = dict[key] as? Int { return Double(i) }
+            return nil
+        }
+        func int(_ key: String, default def: Int) -> Int {
+            if let i = dict[key] as? Int { return i }
+            if let d = dict[key] as? Double, d.isFinite { return Int(d) }
+            return def
+        }
+        func bool(_ key: String, default def: Bool) -> Bool {
+            (dict[key] as? Bool) ?? def
+        }
+
+        switch name {
+        case "sprite":
+            return .sprite
+
+        case "spritetrail":
+            // length/maxlength는 실물이 항상 짝으로 적는다 — 없으면 그릴 수
+            // 없으니 아는 이름 + malformed로 남기고 sprite로 떨어진다.
+            guard let length = double("length"), let maxLength = double("maxlength")
+            else { malformedNames.insert(name); return .sprite }
+            let minLength = double("minlength") ?? 0
+            return .spriteTrail(length: length, maxLength: maxLength, minLength: minLength)
+
+        case "rope":
+            return .rope(
+                subdivision: int("subdivision", default: 0),
+                uvScale: double("uvscale") ?? 1,
+                uvScrolling: bool("uvscrolling", default: false))
+
+        case "ropetrail":
+            guard let length = double("length") else {
+                malformedNames.insert(name); return .sprite
+            }
+            return .ropeTrail(
+                subdivision: int("subdivision", default: 0),
+                length: length,
+                segments: int("segments", default: 1),
+                fadeAlpha: bool("fadealpha", default: false),
+                uvScale: double("uvscale") ?? 1,
+                uvScrolling: bool("uvscrolling", default: false))
+
+        default:
+            unsupportedNames.insert(name)
+            return .sprite
+        }
+    }
+}
+
 /// 스프라이트 시트를 어떻게 넘길지.
 public enum ParticleAnimationMode: String, Equatable, Sendable {
     /// 수명에 따라 칸을 훑는다. 꽃잎이 도는 것처럼 보이게 하는 용도다.
@@ -469,6 +554,8 @@ public struct ParticlePreset: Equatable, Sendable {
     /// 씬의 `instanceoverride`. 초기화자에 굽지 않는다 — `ParticleSystem`이 스폰
     /// 결과와 힘에 곱한다. 초기화자가 없는 프리셋에도 먹어야 하기 때문이다.
     public let instance: ParticleOverride
+    /// `renderer`가 정하는 그리기 방식. 없으면 `.sprite`.
+    public let renderKind: ParticleRenderKind
 
     /// public struct의 memberwise 이니셜라이저는 internal이라 테스트 타깃에서
     /// 쓸 수 없다. Task 3의 시뮬레이션 테스트가 프리셋을 직접 만들어야 하므로
@@ -481,8 +568,10 @@ public struct ParticlePreset: Equatable, Sendable {
         childReferences: [ParticleChildReference] = [],
         children: [ParticleChild] = [],
         controlPoints: [ParticleControlPoint] = [],
-        instance: ParticleOverride = ParticleOverride()
+        instance: ParticleOverride = ParticleOverride(),
+        renderKind: ParticleRenderKind = .sprite
     ) {
+        self.renderKind = renderKind
         self.instance = instance
         self.controlPoints = controlPoints
         self.maxCount = maxCount
@@ -518,7 +607,7 @@ public struct ParticlePreset: Equatable, Sendable {
             malformedNames: malformedNames,
             animationMode: animationMode,
             childReferences: childReferences,
-            children: children, controlPoints: controlPoints, instance: override)
+            children: children, controlPoints: controlPoints, instance: override, renderKind: renderKind)
     }
 
     /// 읽어 온 자식들을 붙인 사본.
@@ -528,7 +617,7 @@ public struct ParticlePreset: Equatable, Sendable {
             emitters: emitters, initializers: initializers, operators: operators,
             unsupportedNames: unsupportedNames, malformedNames: malformedNames,
             animationMode: animationMode, childReferences: childReferences,
-            children: children, controlPoints: controlPoints, instance: instance)
+            children: children, controlPoints: controlPoints, instance: instance, renderKind: renderKind)
     }
 
     /// 총량 예산에 맞추기 위한 축소 배율. 줄일 필요가 없으면 1이다.
@@ -551,7 +640,7 @@ public struct ParticlePreset: Equatable, Sendable {
             initializers: initializers, operators: operators,
             unsupportedNames: unsupportedNames, malformedNames: malformedNames,
             animationMode: animationMode, childReferences: childReferences,
-            children: children, controlPoints: controlPoints, instance: instance)
+            children: children, controlPoints: controlPoints, instance: instance, renderKind: renderKind)
     }
 
     public static func parse(_ json: [String: Any]) -> ParticlePreset? {
@@ -670,6 +759,9 @@ public struct ParticlePreset: Equatable, Sendable {
             }
         }
 
+        let renderKind = ParticleRenderKind.parse(
+            json["renderer"], unsupportedNames: &unsupportedNames, malformedNames: &malformedNames)
+
         return ParticlePreset(
             maxCount: maxCount,
             startTime: startTime,
@@ -681,7 +773,8 @@ public struct ParticlePreset: Equatable, Sendable {
             malformedNames: Array(malformedNames).sorted(),
             animationMode: ParticleAnimationMode.parse(json["animationmode"]),
             childReferences: parseChildren(json["children"]),
-            controlPoints: parseControlPoints(json["controlpoint"])
+            controlPoints: parseControlPoints(json["controlpoint"]),
+            renderKind: renderKind
         )
     }
 
