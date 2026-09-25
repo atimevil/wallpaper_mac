@@ -486,10 +486,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             Vec3(x: Double($0.x), y: Double($0.y), z: 0)
         }
         // 화면 좌표(왼쪽 위 원점, 포인트). `input.cursorScreenPosition`이 된다.
-        var screenCursor: Vec2?
-        if let frame = (view.window?.screen ?? NSScreen.main)?.frame {
+        let screenCursor: Vec2? = (view.window?.screen ?? NSScreen.main).map { screen in
             let mouse = NSEvent.mouseLocation
-            screenCursor = Vec2(x: Double(mouse.x - frame.minX), y: Double(frame.maxY - mouse.y))
+            let frame = screen.frame
+            return Vec2(x: Double(mouse.x - frame.minX), y: Double(frame.maxY - mouse.y))
         }
         // 스크립트가 오디오를 달라고 했을 때만 스펙트럼을 넘긴다. 듣고 있지 않으면
         // 빈 사전이라 버퍼가 0으로 남는다 — 가짜 소리를 지어내지 않는다.
@@ -1477,7 +1477,6 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         // 셰이더가 `#include "common.h"` 하는 헤더들. pkg와 assets 양쪽에 있다.
         // 안 모으면 `ApplyBlending` 같은 공용 함수를 못 찾아 컴파일이 통째로 실패한다.
         let shaderIncludes = Self.collectShaderHeaders(reader: reader, assets: assets)
-        var chains: [(chain: EffectChain, source: MTLTexture)] = []
 
         let context = BuildContext(
             device: device, compositor: compositor, resolver: resolver,

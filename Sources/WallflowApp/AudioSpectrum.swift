@@ -59,7 +59,7 @@ final class AudioSpectrum: NSObject {
                 let content = try await SCShareableContent.excludingDesktopWindows(
                     false, onScreenWindowsOnly: false)
                 guard let display = content.displays.first else {
-                    await self?.stopped("화면을 찾지 못했다")
+                    self?.stopped("화면을 찾지 못했다")
                     return
                 }
                 // 그림은 필요 없다. 소리만 받는다 — 화면 픽셀을 읽지 않는다는 뜻이다.
@@ -79,9 +79,9 @@ final class AudioSpectrum: NSObject {
                 try stream.addStreamOutput(
                     self, type: .audio, sampleHandlerQueue: self.queue)
                 try await stream.startCapture()
-                await self.started(stream)
+                self.started(stream)
             } catch {
-                await self?.stopped("\(error.localizedDescription)")
+                self?.stopped("\(error.localizedDescription)")
             }
         }
     }

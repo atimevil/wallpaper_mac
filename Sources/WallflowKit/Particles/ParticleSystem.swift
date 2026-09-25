@@ -241,6 +241,9 @@ public final class ParticleSystem {
         guard !isPlaying else { return }
         isPlaying = true
         didBurst = false
+        // `didPrewarm`은 안 지운다. 프리웜은 콜드 스타트에서 밀린 시간을 따라잡는
+        // 몫이라 스크립트가 거는 `stop(); play()` 재시작에는 안 낀다 — 재시작은
+        // 한꺼번에 뿌리는 몫만 다시 하고 `starttime`은 다시 돌지 않는다.
         emissionCredits = Array(repeating: 0.0, count: preset.emitters.count)
     }
 

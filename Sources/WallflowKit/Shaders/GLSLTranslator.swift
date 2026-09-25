@@ -447,7 +447,7 @@ public enum GLSLTranslator {
     /// assets 셰이더 466개에는 `%`가 하나도 없다. 창작마당 셰이더에만 나오므로
     /// 이 변환이 건드리는 범위가 좁다.
     static func rewritingModulo(_ source: String) -> String {
-        var characters = Array(source)
+        let characters = Array(source)
         var index = 0
         var out: [Character] = []
         out.reserveCapacity(characters.count)
