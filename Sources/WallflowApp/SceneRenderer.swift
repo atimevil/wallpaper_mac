@@ -1651,6 +1651,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 skipped.append("\(layer.name): 3D 메시를 그리지 못한다: \(error)")
             }
 
+        case .group:
+            // 그룹·solid·light·카메라 자리표시자. 자식이 부모 변환만 받으면 되고
+            // 자신은 그릴 그림이 없다. 로그에 올릴 것도 없다.
+            break
+
         case .unsupported(let reason):
             skipped.append("\(layer.name): \(reason)")
         }

@@ -219,7 +219,11 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(doc.layers.map(\.visible), [true, false])
     }
 
-    /// M2는 이미지 레이어만 그린다. 나머지는 이유를 달아 남긴다.
+    /// 참조가 끊긴 레이어는 이유를 달아 남긴다 — 조용히 사라지면 안 된다.
+    ///
+    /// "Time"은 origin이 아예 없다. 예전에는 origin 없는 최상위 텍스트를 통째로
+    /// 버렸지만(`testTopLevelTextWithoutOriginDefaultsToOrigin` 참고), 이제는
+    /// 화면 원점에 그린다 — 실물 "RST文字"가 이 모양이라 버리면 안 된다.
     func testNonImageLayersBecomeUnsupportedRatherThanDisappearing() throws {
         let reader = try makeScenePkg(scene: """
         {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
@@ -228,11 +232,13 @@ final class SceneDocumentTests: XCTestCase {
         """)
         let doc = try SceneDocument.load(from: reader)
         XCTAssertEqual(doc.layers.count, 2)
-        for layer in doc.layers {
-            guard case .unsupported = layer.content else {
-                return XCTFail("\(layer.name)이 unsupported가 아니다")
-            }
+        guard case .unsupported = doc.layers[0].content else {
+            return XCTFail("참조가 끊긴 파티클은 unsupported여야 한다: \(doc.layers[0].content)")
         }
+        guard case .text(let text) = doc.layers[1].content else {
+            return XCTFail("origin 없는 최상위 텍스트도 그려야 한다: \(doc.layers[1].content)")
+        }
+        XCTAssertEqual(text.value, "12:00")
     }
 
     /// origin이나 scale이 문자열이 아니라 스크립트 객체인 씬이 실제로 있다.
@@ -933,6 +939,99 @@ extension SceneDocumentTests {
         guard case .unsupported = layer.content else {
             return XCTFail("이펙트 없는 후처리는 건너뛴다: \(layer.content)")
         }
+    }
+
+    /// 모델 JSON이 `"fullscreen": true`를 선언하는데 걸 이펙트가 없으면(실물
+    /// 3509243656 "光标旋转后处理" — 커서 이벤트만 듣고 그림은 안 만든다, 로파이
+    /// 카페 씬(2370927443)의 이름 없는 구분선 7개도 마찬가지) 아무것도 안 그리는
+    /// 통과 레이어다. "origin이나 size를 읽을 수 없다"로 보고하면 안 된다 —
+    /// 파일이 깨진 게 아니라 원래 안 그리는 레이어다.
+    func testFullscreenPassthroughWithoutEffectsIsGroup() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "------------------------",
+                          "image": "models/util/fullscreenlayer.json"}]}
+            """,
+            extras: [
+                "models/util/fullscreenlayer.json":
+                    #"{"material": "materials/util/fullscreenlayer.json", "fullscreen": true}"#,
+                "materials/util/fullscreenlayer.json":
+                    #"{"passes": [{"shader": "passthrough", "textures": ["_rt_FullFrameBuffer"]}]}"#,
+            ])).layers.first)
+        XCTAssertEqual(layer.content, .group)
+    }
+
+    /// `"fullscreen": true` 모델에 이펙트가 걸려 있으면(실물 2370927443의 구분선
+    /// 하나가 foliagesway를 건다) 여전히 후처리 레이어로 그려야 한다 — 그림이
+    /// 없다고 전부 group으로 뭉개면 진짜 이펙트가 사라진다.
+    func testFullscreenPassthroughWithEffectsIsStillPostProcess() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 640, "height": 360}},
+             "objects": [{"id": 1, "name": "------------------------",
+                          "image": "models/util/fullscreenlayer.json",
+                          "effects": [{"file": "effects/grain/effect.json"}]}]}
+            """,
+            extras: [
+                "models/util/fullscreenlayer.json":
+                    #"{"material": "materials/util/fullscreenlayer.json", "fullscreen": true}"#,
+                "materials/util/fullscreenlayer.json":
+                    #"{"passes": [{"shader": "passthrough", "textures": ["_rt_FullFrameBuffer"]}]}"#,
+                "effects/grain/effect.json": #"{"passes": [{"material": "materials/g.json"}]}"#,
+                "effects/grain/materials/g.json": #"{"passes": [{"shader": "effects/grain"}]}"#,
+            ])).layers.first)
+        XCTAssertEqual(layer.content, .postProcess)
+        XCTAssertEqual(layer.size, Vec2(x: 640, y: 360))
+    }
+
+    /// `image`·`model`·`particle`·`text`·`sound`·`shape` 중 아무 키도 없는
+    /// 오브젝트. WE 편집기의 그룹(폴더)이 이 모양이다(실물 3299228616 "Clock
+    /// Layer 1" — origin·angles·visible 스크립트만 있고 자식 여섯을 묶는다).
+    /// "알 수 없는 레이어 종류"로 보고하면 안 된다 — 자식이 부모 변환을 받도록
+    /// 트리에는 남되, 그릴 그림이 없을 뿐이다.
+    func testContentlessGroupObjectIsGroup() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "Clock Layer 1", "origin": "10 20 0",
+                      "angles": "0 0 0", "locktransforms": true}]}
+        """)).layers.first)
+        XCTAssertEqual(layer.content, .group)
+    }
+
+    /// `solid`(파티클 충돌 경계)·`light`(광원)·카메라 경로점도 같은 이유로 group이다
+    /// — 실물 3444535389 "Cat and bee"의 이름 없는 solid 8개, 3589454154의 light
+    /// 오브젝트가 이 모양이다. 자체 그림이 없을 뿐 씬이 깨진 게 아니다.
+    func testSolidAndLightObjectsAreGroup() throws {
+        let solid = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "", "disablepropagation": false, "solid": true,
+                      "origin": "0 0 0"}]}
+        """)).layers.first)
+        XCTAssertEqual(solid.content, .group)
+
+        let light = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "", "light": true, "color": "1 1 1",
+                      "intensity": 1.0, "radius": 100.0, "origin": "0 0 0"}]}
+        """)).layers.first)
+        XCTAssertEqual(light.content, .group)
+    }
+
+    /// 최상위(부모 없음) 텍스트 레이어에 origin이 아예 없을 수 있다(실물
+    /// 3509243656 "RST文字" — 리부트 버튼 글자다). 부모가 없으니 "부모와 같은
+    /// 자리"가 곧 화면 원점이다 — origin이 없다고 텍스트를 통째로 버리면 안 된다.
+    func testTopLevelTextWithoutOriginDefaultsToOrigin() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "RST文字", "size": "181 88",
+                      "text": {"value": "reset"}, "anchor": "none"}]}
+        """)).layers.first)
+        guard case .text(let text) = layer.content else {
+            return XCTFail("텍스트여야 한다: \(layer.content)")
+        }
+        XCTAssertEqual(text.value, "reset")
+        XCTAssertEqual(layer.origin, Vec3(x: 0, y: 0, z: 0))
     }
 
     /// 굴절 파티클은 **법선 지도까지 들고** 나온다.

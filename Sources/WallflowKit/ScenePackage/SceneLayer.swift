@@ -223,6 +223,13 @@ public enum LayerContent: Equatable, Sendable {
     case text(TextLayer)
     /// 소리. 그리지 않는다.
     case sound(SoundLayer)
+    /// 자기 그림이 없는 오브젝트. WE 편집기의 그룹(폴더), 파티클 충돌용 `solid`
+    /// 경계, `light` 광원, 카메라 경로점이 전부 이 모양이다 — `image`·`model`·
+    /// `particle`·`text`·`sound`·`shape` 중 아무 키도 없다. 자식은 부모 변환만
+    /// 물려받으면 되고, 이 오브젝트 자신은 그릴 것이 없다. `unsupported`로
+    /// 뭉치면 실물 씬마다 수십 줄씩 "알 수 없는 레이어 종류"를 찍어 진짜 결함을
+    /// 파묻는다.
+    case group
     /// 그리지 못하는 레이어. 이유를 남겨 나중에 무엇을 만들지 알 수 있게 한다.
     /// 화면 전체에 거는 후처리 레이어. 자기 그림이 없고, **그 아래까지 합성된
     /// 화면**을 받아 이펙트를 건다. 실물 씬 하나가 마지막 레이어로 filmgrain·vhs·
