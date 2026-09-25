@@ -1504,6 +1504,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             let system = ParticleSystem(
                 preset: preset,
                 random: SeededRandom(seed: UInt64(bitPattern: Int64(layer.id))))
+            // 월드(화면) 좌표 제어점(플래그 2)을 로컬로 바꾸려면 이 레이어의
+            // 씬 원점·배율이 있어야 한다 — ParticleSystem.controlPointPosition 참고.
+            system.layerOrigin = layer.origin
+            system.layerScale = layer.scale
             if !system.unimplementedOperators.isEmpty {
                 degraded.append(
                     "\(layer.name): 아직 처리하지 않는 연산자 "
