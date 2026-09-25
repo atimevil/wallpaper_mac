@@ -24,6 +24,10 @@ enum SceneShaders {
         float2 size;
         // 직교 공간의 전체 크기
         float2 projection;
+        // 스프라이트 시트 프레임의 UV 사각형(0~1). 시트가 아니면 (0,0)/(1,1)이라
+        // quad_vertex가 텍스처 전체를 그대로 읽는다.
+        float2 uvOrigin;
+        float2 uvScale;
         // 레이어 색과 투명도. 씬이 정한 alpha와 color다.
         float4 color;
         // 화면 평면 회전(라디안).
@@ -73,7 +77,9 @@ enum SceneShaders {
         );
         VertexOut out;
         out.position = float4(ndc, 0.0, 1.0);
-        out.uv = in.position + 0.5;
+        // 스프라이트 시트 한 칸만 읽는다. uvOrigin/uvScale이 기본값(0,0)/(1,1)이면
+        // 예전과 똑같이 텍스처 전체를 읽는다 — NDC(위)는 T6이 다룰 몫이라 손대지 않는다.
+        out.uv = u.uvOrigin + (in.position + 0.5) * u.uvScale;
         out.color = u.color;
         out.screenTangents = float4(0.0);
         return out;

@@ -213,4 +213,94 @@ final class TexHeaderTests: XCTestCase {
         XCTAssertNil(header.spriteSheet)
         XCTAssertEqual(header.mipmaps.count, 1)
     }
+
+    // MARK: - 프레임 표 디코드 (Task 5)
+
+    /// 실물 Loading...(3795096226)의 background.tex 앞 두 칸과 같은 값으로
+    /// 합성한다. 배치가 [예약, 길이(초), x, y, 폭, 미상, 미상, 높이]임을
+    /// 실물 8종으로 확인했다(TexSpriteFrame 문서 참고) — 여기서는 그 배치대로
+    /// 디코드되는지만 본다.
+    func testDecodesFrameTableIntoRectsAndDurations() throws {
+        let frames = [
+            spriteFrame(x: 0, y: 0, width: 320, height: 200, duration: 0.1),
+            spriteFrame(x: 320, y: 0, width: 320, height: 200, duration: 0.1),
+        ]
+        var tex = buildTex(flags: 4, freeImageFormat: -1, size: (3200, 1200),
+                           mips: [(3200, 1200, 1, 15360000, Data(repeating: 9, count: 40))])
+        tex += spriteSheetV3(frameCount: 2, grid: (320, 200), frames: frames)
+        let sheet = try XCTUnwrap(try TexHeader.parse(tex).spriteSheet)
+        // duration은 파일에 float32로 적힌다. Double(Float(0.1))로 같은 반올림을
+        // 거쳐야 비교가 맞는다 — literal 0.1(Double)과는 마지막 자리가 다르다.
+        let point1 = Double(Float(0.1))
+        XCTAssertEqual(sheet.frames, [
+            TexSpriteFrame(x: 0, y: 0, width: 320, height: 200, duration: point1),
+            TexSpriteFrame(x: 320, y: 0, width: 320, height: 200, duration: point1),
+        ])
+    }
+
+    /// TEXS0002(격자 없음)도 같은 32바이트 배치를 쓴다 — 실물 smoke3·lightning1·2가
+    /// 이 컨테이너다. duration이 0이어도(파티클 시트는 실물 전부 이렇다) 프레임
+    /// 자체는 정확히 디코드되어야 한다.
+    func testDecodesFrameTableWithoutGrid() throws {
+        let frames = [spriteFrame(x: 128, y: 0, width: 128, height: 128, duration: 0)]
+        var tex = buildTexV2(flags: 4, size: (256, 256),
+                             mips: [(256, 256, 0, 0, Data(repeating: 1, count: 20))])
+        tex += spriteSheetV2(frameCount: 1, frames: frames)
+        let sheet = try XCTUnwrap(try TexHeader.parse(tex).spriteSheet)
+        XCTAssertEqual(sheet.frames, [
+            TexSpriteFrame(x: 128, y: 0, width: 128, height: 128, duration: 0),
+        ])
+    }
+
+    // MARK: - 프레임 선택 (Task 5, 순수 함수)
+
+    func testFrameSelectionEmptySheetReturnsNil() {
+        let sheet = TexSpriteSheet(frameCount: 0, gridWidth: nil, gridHeight: nil, frames: [])
+        XCTAssertNil(sheet.frame(atElapsed: 1))
+    }
+
+    /// 누적 길이를 따라간다: 0~1초는 0번, 1~2초는 1번, 2~3초는 2번.
+    func testFrameSelectionWalksAccumulatedDurations() {
+        let frames = (0..<3).map {
+            TexSpriteFrame(x: Double($0), y: 0, width: 1, height: 1, duration: 1)
+        }
+        let sheet = TexSpriteSheet(frameCount: 3, gridWidth: nil, gridHeight: nil, frames: frames)
+        XCTAssertEqual(sheet.frame(atElapsed: 0), frames[0])
+        XCTAssertEqual(sheet.frame(atElapsed: 0.9), frames[0])
+        XCTAssertEqual(sheet.frame(atElapsed: 1.5), frames[1])
+        XCTAssertEqual(sheet.frame(atElapsed: 2.999), frames[2])
+    }
+
+    /// 전체 길이(3초)를 넘기면 되감는다. 몇 바퀴를 돌아도 위상만 같으면 같은 칸이다.
+    func testFrameSelectionLoops() {
+        let frames = (0..<3).map {
+            TexSpriteFrame(x: Double($0), y: 0, width: 1, height: 1, duration: 1)
+        }
+        let sheet = TexSpriteSheet(frameCount: 3, gridWidth: nil, gridHeight: nil, frames: frames)
+        XCTAssertEqual(sheet.frame(atElapsed: 3.5), frames[0])
+        XCTAssertEqual(sheet.frame(atElapsed: 99.5), frames[0])   // 33바퀴 + 0.5초
+        XCTAssertEqual(sheet.frame(atElapsed: 7.2), frames[1])
+    }
+
+    /// 길이가 0인 칸은 창이 없어 절대 고를 수 없다 — 항상 다음 칸으로 넘어간다.
+    func testFrameSelectionSkipsZeroDurationFrames() {
+        let frames = [
+            TexSpriteFrame(x: 0, y: 0, width: 1, height: 1, duration: 0),
+            TexSpriteFrame(x: 1, y: 0, width: 1, height: 1, duration: 0.5),
+        ]
+        let sheet = TexSpriteSheet(frameCount: 2, gridWidth: nil, gridHeight: nil, frames: frames)
+        XCTAssertEqual(sheet.frame(atElapsed: 0), frames[1])
+        XCTAssertEqual(sheet.frame(atElapsed: 0.4), frames[1])
+    }
+
+    /// 전부 0(또는 음수)이면 되감을 길이 자체가 없다. 나누기 0이나 무한 루프 대신
+    /// 첫 프레임에 멈춘다 — TEXS0002 파티클 시트가 실물로 이 모양이다.
+    func testFrameSelectionAllNonPositiveDurationsReturnsFirstFrame() {
+        let frames = [
+            TexSpriteFrame(x: 0, y: 0, width: 1, height: 1, duration: 0),
+            TexSpriteFrame(x: 1, y: 0, width: 1, height: 1, duration: -1),
+        ]
+        let sheet = TexSpriteSheet(frameCount: 2, gridWidth: nil, gridHeight: nil, frames: frames)
+        XCTAssertEqual(sheet.frame(atElapsed: 5), frames[0])
+    }
 }

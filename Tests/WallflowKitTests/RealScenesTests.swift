@@ -48,7 +48,9 @@ final class RealScenesTests: XCTestCase {
         return AssetsStore(root: url)
     }
 
-    private func scenePkg(_ id: String) throws -> PkgReader? {
+    /// package 기본값은 "scene.pkg"지만 실물 중 GIF 배경 템플릿(예: 3795096226)은
+    /// project.json의 "file"이 가리키는 이름이 달라 "gifscene.pkg"로 온다.
+    private func scenePkg(_ id: String, package: String = "scene.pkg") throws -> PkgReader? {
         if let badPath = badPath {
             XCTFail("WALLFLOW_TEST_SCENES가 설정되었지만 디렉토리가 아니거나 존재하지 않음: \(badPath)")
             return nil
@@ -56,7 +58,7 @@ final class RealScenesTests: XCTestCase {
         guard let root else {
             throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
         }
-        let url = root.appendingPathComponent(id).appendingPathComponent("scene.pkg")
+        let url = root.appendingPathComponent(id).appendingPathComponent(package)
         guard FileManager.default.fileExists(atPath: url.path) else {
             // ROOT는 설정되고 유효한데 이 씬만 없다. 여기서 nil을 반환하면 호출부의
             // `guard let ... else { throw XCTSkip(...) }`로 빠져 "환경변수 미설정"으로
@@ -98,6 +100,33 @@ final class RealScenesTests: XCTestCase {
         }
         XCTAssertEqual(cg.width, 2048)
         XCTAssertEqual(cg.height, 1164)
+    }
+
+    /// Task 5 목표 씬(워크숍 3795096226 "Loading...", 패키지 gifscene.pkg).
+    /// 이미지 레이어 하나가 320x200 GIF를 10x6 격자로 늘어놓은 3200x1200
+    /// 스프라이트 시트다. 시트인 줄 모르면 격자 전체를 정지 이미지로 그린다 —
+    /// 이 시험은 프레임 표가 60칸·320x200·0.1초로 정확히 풀리는지만 본다
+    /// (그린 결과 자체는 SceneRenderer/앱 쪽이라 여기서 보지 않는다).
+    func testLoadingSceneBackgroundTextureIsA60FrameSpriteSheet() throws {
+        guard let reader = try scenePkg("3795096226", package: "gifscene.pkg") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let data = try reader.data(for: "materials/background.tex")
+        let header = try TexHeader.parse(data)
+        XCTAssertEqual(header.flags, 7, "sprite-sheet 비트(4)를 포함해야 한다")
+        let sheet = try XCTUnwrap(header.spriteSheet)
+        XCTAssertEqual(sheet.frameCount, 60)
+        XCTAssertEqual(sheet.frames.count, 60)
+        XCTAssertTrue(sheet.frames.allSatisfy { $0.width == 320 && $0.height == 200 },
+                      "모든 칸이 320x200이어야 한다")
+        let point1 = Double(Float(0.1))
+        XCTAssertTrue(sheet.frames.allSatisfy { $0.duration == point1 },
+                      "모든 칸이 0.1초여야 한다")
+        // 10칸씩 한 줄, 6줄. 인덱스 10이 둘째 줄 첫 칸이다.
+        XCTAssertEqual(sheet.frames[0], TexSpriteFrame(x: 0, y: 0, width: 320, height: 200, duration: point1))
+        XCTAssertEqual(sheet.frames[9], TexSpriteFrame(x: 2880, y: 0, width: 320, height: 200, duration: point1))
+        XCTAssertEqual(sheet.frames[10], TexSpriteFrame(x: 0, y: 200, width: 320, height: 200, duration: point1))
+        XCTAssertEqual(sheet.frames[59], TexSpriteFrame(x: 2880, y: 1000, width: 320, height: 200, duration: point1))
     }
 
     /// 226MB 텍스처 두 개가 MP4였다. 이 판정이 틀리면 두 씬이 통째로 깨진다.

@@ -20,10 +20,20 @@ struct QuadUniforms {
     var origin: SIMD2<Float>
     var size: SIMD2<Float>
     var projection: SIMD2<Float>
+    /// 스프라이트 시트 프레임의 UV 사각형(0~1). 시트가 아니면 (0,0)/(1,1)이라
+    /// 텍스처 전체를 그대로 읽는다 — quad_vertex의 기본값과 같다.
+    var uvOrigin: SIMD2<Float> = SIMD2(0, 0)
+    var uvScale: SIMD2<Float> = SIMD2(1, 1)
     /// 레이어의 color와 alpha. MSL의 float4와 배치가 같아야 한다.
     var color: SIMD4<Float>
     var rotation: Float
     var padding: (Float, Float, Float) = (0, 0, 0)
+
+    /// MSL의 QuadUniforms와 같은 80바이트여야 한다: float2 5개(origin·size·
+    /// projection·uvOrigin·uvScale, 40) + 암묵 패딩(8, float4 정렬) + color(16) +
+    /// rotation(4) + pad[3](12) = 80. init(device:)이 이 값을 실제로 검증한다 —
+    /// ParticleInstance.expectedStride와 같은 이유다.
+    static let expectedStride = 80
 }
 
 struct QuadInstance {
@@ -41,6 +51,10 @@ struct QuadInstance {
     /// 원근 씬에서의 세계 변환. 직교 씬에서는 쓰지 않는다(항등).
     /// 단위 쿼드(-0.5..0.5)를 세계 단위 크기로 늘리고 돌리고 옮긴 것이다.
     var world: simd_float4x4 = matrix_identity_float4x4
+    /// 이 레이어가 스프라이트 시트 이미지일 때 지금 보여줄 칸의 UV 사각형.
+    /// 시트가 아니면 기본값(전체 0~1)이라 예전과 똑같이 그려진다.
+    var uvOrigin: SIMD2<Float> = SIMD2(0, 0)
+    var uvScale: SIMD2<Float> = SIMD2(1, 1)
 }
 
 /// MSL의 `Quad3DUniforms`와 같은 배치.
@@ -118,6 +132,14 @@ final class MetalCompositor {
 
     init(device: MTLDevice) throws {
         self.device = device
+        // 배치가 어긋나면 컴파일은 통과하고 쿼드만 엉뚱한 자리·UV로 그려진다.
+        // ParticleRenderer가 ParticleInstance에 거는 것과 같은 가드다.
+        guard MemoryLayout<QuadUniforms>.stride == QuadUniforms.expectedStride else {
+            throw CompositorError.pipelineFailed(
+                "QuadUniforms 배치가 MSL과 다르다: "
+                + "\(MemoryLayout<QuadUniforms>.stride)바이트, "
+                + "\(QuadUniforms.expectedStride)여야 한다")
+        }
         guard let queue = device.makeCommandQueue() else { throw CompositorError.commandQueueFailed }
         self.queue = queue
 
@@ -443,6 +465,7 @@ final class MetalCompositor {
             var uniforms = QuadUniforms(
                 origin: quad.origin + parallax * quad.parallaxDepth,
                 size: quad.size, projection: projection,
+                uvOrigin: quad.uvOrigin, uvScale: quad.uvScale,
                 color: quad.color, rotation: quad.rotation)
 
             // 섞기 파이프라인이 없는 기기면 보통 합성으로 그린다.

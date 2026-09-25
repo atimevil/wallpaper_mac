@@ -25,8 +25,25 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private var particles: [(system: ParticleSystem,
                              groups: [String: (ParticleRenderer, Float)],
                              layerOrigin: SIMD2<Float>)] = []
-    /// 직전 프레임 시각. 첫 프레임에는 없다.
+    /// 직전 프레임 시각. 첫 프레임에는 없다. 파티클과 스프라이트 시트 이미지가
+    /// 같이 쓴다 — 하나만 있어도 매 프레임의 dt는 같아야 한다.
     private var lastFrameTime: CFTimeInterval?
+    /// 텍스처가 스프라이트 시트인 이미지 레이어. 매 프레임 누적 재생 시간으로
+    /// 칸을 고른다. `SceneRenderer.spriteSheet(of:)`(파티클용)와 달리 프레임마다
+    /// 정확한 픽셀 사각형이 필요해 `TexHeader.spriteSheet`를 직접 쓴다.
+    private struct SpriteSheetImage {
+        let layerIndex: Int
+        let sheet: TexSpriteSheet
+        /// 프레임의 x/y/w/h는 원본 텍스처 픽셀 좌표다. UV로 바꾸려면 실제로 GPU에
+        /// 올라간 텍스처의 크기가 있어야 한다 — 헤더의 texWidth/texHeight는 JPEG·PNG
+        /// 처럼 디코드된 실제 크기와 다를 수 있다(TexHeaderTests의 TEXB0003 예처럼).
+        let textureSize: SIMD2<Float>
+        var elapsed: Double = 0
+        /// 마지막으로 골랐던 칸. 바뀔 때만 layerList를 갱신하고 compositor에
+        /// 다시 알린다 — Loading...은 초당 10번 바뀌지, 60번이 아니다.
+        var lastFrame: TexSpriteFrame?
+    }
+    private var spriteSheetImages: [SpriteSheetImage] = []
     /// 텍스트 레이어마다 스크립트와 구운 글자. 값이 바뀔 때만 다시 굽는다.
     private var texts: [TextState] = []
     /// 씬의 스크립트 전부를 돌리는 호스트. 스크립트가 없는 씬이면 nil이다.
@@ -1233,6 +1250,17 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     layerList.append((quad, .dynamic { [weak video] in video?.currentTexture() }))
                 } else {
                     let texture = try context.compositor.makeTexture(from: decoded)
+                    // 텍스처가 스프라이트 시트면(예: "Loading..."의 320x200 GIF 60장을
+                    // 3200x1200 한 장에 늘어놓은 배경) 매 프레임 한 칸씩 골라 그린다 —
+                    // 안 그러면 격자 전체가 정지 이미지 한 장으로 찍힌다. 파티클과 달리
+                    // 격자 규칙(framesPerRow)을 다시 계산하지 않고 프레임 표의 실제
+                    // 사각형을 그대로 쓴다 — 칸 크기가 균일하지 않은 시트도 맞는다.
+                    if let header = try? TexHeader.parse(raw), let sheet = header.spriteSheet,
+                       sheet.frames.count > 1 {
+                        spriteSheetImages.append(SpriteSheetImage(
+                            layerIndex: layerList.count, sheet: sheet,
+                            textureSize: SIMD2(Float(texture.width), Float(texture.height))))
+                    }
                     // 이펙트가 걸려 있으면 그 결과를 대신 그린다. 컴파일이 안 되면
                     // 체인이 nil이라 원본을 그대로 쓴다 — 레이어를 버리지 않는다.
                     // 씬 전체 예산을 넘으면 더 걸지 않는다. 레이어는 원본으로 그린다.
@@ -1492,6 +1520,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                             Float(document.skylightColor.z)))
         buildContext = context
         layerList = []
+        // layerList의 인덱스를 들고 있다 — layerList와 같이 끊어야 다음 씬을
+        // 열 때 엉뚱한 레이어의 UV를 덮어쓰지 않는다.
+        spriteSheetImages = []
         puppets = []
         puppetStartTime = nil
         effectChains = []
@@ -1618,9 +1649,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         // 비디오·파티클·텍스트는 모두 시간에 따라 바뀐다.
         // 시간을 쓰는 이펙트(`g_Time`)도 마찬가지다 — 빼면 빛줄기가 첫 프레임에
         // 멈춘 채로 남는다. 움직이지 않는 이펙트는 여기 해당하지 않는다.
+        // 스프라이트 시트 이미지도 마찬가지다 — 안 넣으면 정적 씬으로 오인해
+        // 뷰가 계속 멈춰 있고 "Loading..."이 한 프레임에 고정된다.
         let hasAnimatedEffect = effectChains.contains { $0.chain.isAnimated }
         if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty || hasAnimatedEffect
-            || scriptHost != nil || !puppets.isEmpty {
+            || scriptHost != nil || !puppets.isEmpty || !spriteSheetImages.isEmpty {
             view.isPaused = false
             view.enableSetNeedsDisplay = false
             // 전력 정책이 30fps를 지시한다. 60fps 소스라도 그 이상 그리지 않는다.
@@ -1652,7 +1685,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             // VideoRenderer.apply와 맞춘다: 이미 재생 중이면 다시 부르지 않는다.
             for video in videos where !video.isPlaying { video.play() }
             applySoundSetting()
-            if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty {
+            if !videos.isEmpty || !particles.isEmpty || !texts.isEmpty || !spriteSheetImages.isEmpty {
                 view?.isPaused = false
                 view?.preferredFramesPerSecond = fps
             }
@@ -1666,6 +1699,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         for entry in sounds { entry.player.stop() }
         sounds.removeAll()
         particles.removeAll()
+        spriteSheetImages.removeAll()
         texts.removeAll()
         puppets.removeAll()
         puppetStartTime = nil
@@ -1720,11 +1754,19 @@ extension SceneRenderer: MTKViewDelegate {
             puppetStartTime = start
             for puppet in puppets { puppet.update(time: now - start) }
         }
-        if !particles.isEmpty {
+        // 파티클과 스프라이트 시트 이미지가 dt를 함께 쓴다 — 같은 프레임이면
+        // 같은 dt여야 한다. 첫 프레임(또는 막 재생을 재개한 프레임)은 직전 시각이
+        // 없다. 0을 넘기면 그만큼 멈춰 있던 시간이 한 번에 적분되지 않는다
+        // (`apply(.paused)`가 lastFrameTime을 nil로 끊어 둔다).
+        let dt: CFTimeInterval
+        if !particles.isEmpty || !spriteSheetImages.isEmpty {
             let now = CACurrentMediaTime()
-            // 첫 프레임에는 직전 시각이 없다. 0을 넘기면 시뮬레이션이 그냥 넘어간다.
-            let dt = lastFrameTime.map { now - $0 } ?? 0
+            dt = lastFrameTime.map { now - $0 } ?? 0
             lastFrameTime = now
+        } else {
+            dt = 0
+        }
+        if !particles.isEmpty {
             // 커서를 씬 좌표로 옮긴다. 제어점이 마우스를 따라가는 프리셋이
             // 이걸 본다 — 반딧불이 손끝을 피해 흩어지는 것이 그것이다.
             let cursor = sceneCursorPosition(in: view)
@@ -1748,6 +1790,26 @@ extension SceneRenderer: MTKViewDelegate {
                     target.0.update(particles: [], textureRatio: target.1)
                 }
             }
+        }
+        if !spriteSheetImages.isEmpty, let compositor {
+            // elapsed는 dt만 쌓는다 — 멈췄다 다시 그릴 때 dt가 0이 되므로(위 참고)
+            // 여기서 따로 시각을 손보지 않아도 건너뛴 시간만큼 튀지 않는다.
+            var changed = false
+            for i in spriteSheetImages.indices {
+                spriteSheetImages[i].elapsed += dt
+                let entry = spriteSheetImages[i]
+                guard entry.layerIndex < layerList.count,
+                      let frame = entry.sheet.frame(atElapsed: entry.elapsed),
+                      frame != entry.lastFrame
+                else { continue }
+                spriteSheetImages[i].lastFrame = frame
+                layerList[entry.layerIndex].0.uvOrigin = SIMD2(
+                    Float(frame.x) / entry.textureSize.x, Float(frame.y) / entry.textureSize.y)
+                layerList[entry.layerIndex].0.uvScale = SIMD2(
+                    Float(frame.width) / entry.textureSize.x, Float(frame.height) / entry.textureSize.y)
+                changed = true
+            }
+            if changed { compositor.setLayers(layerList) }
         }
         compositor?.draw(in: view)
     }
