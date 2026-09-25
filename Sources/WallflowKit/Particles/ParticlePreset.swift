@@ -314,9 +314,13 @@ public enum ParticleOperator: Equatable, Sendable {
     /// 적어 axis 부호 말고 다른 자리가 없다). `axis`는 collisionPlane과 같은
     /// 이유로 기본 Y.
     case collisionQuad(origin: Vec3, axis: Vec3, size: Vec2, behavior: ParticleCollisionBehavior)
-    /// `follow` 자식이 매 프레임 부모 파티클의 색·크기·알파·속도를 그대로
-    /// 받는다(WE 2.7) — `inheritInitialValueFromEvent`의 매 프레임 판. 실물
-    /// 창작마당 미리보기가 필드를 하나도 안 적는다.
+    /// `follow` 자식이 매 프레임 부모 파티클의 색·크기·알파를 그대로 받는다
+    /// (WE 2.7) — `inheritInitialValueFromEvent`의 매 프레임 판. **속도는 안
+    /// 옮긴다** — 실물 미리보기 자식이 `speedmin:50, speedmax:200`인 제 이미터를
+    /// 따로 갖는데, 속도까지 부모 것으로 덮으면 그 이미터 속도를 매 프레임
+    /// 지워 파티클이 부모와 한 덩어리로 뭉친다. WE 문서도 이 사건형의 용례로
+    /// "color, size or opacity"만 든다. 실물 창작마당 미리보기가 필드를
+    /// 하나도 안 적는다.
     case inheritValueFromEvent
 }
 

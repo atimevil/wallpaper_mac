@@ -338,17 +338,22 @@ final class ParticleChildTests: XCTestCase {
          "emitter": [{"name": "sphererandom", "rate": 0, "instantaneous": 1,
                       "distancemin": 0, "distancemax": 0}],
          "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100},
-                         {"name": "colorrandom", "min": "255 255 255", "max": "255 255 255"}],
+                         {"name": "colorrandom", "min": "255 255 255", "max": "255 255 255"},
+                         {"name": "velocityrandom", "min": "10 0 0", "max": "10 0 0"}],
          "operator": [{"name": "colorchange", "starttime": 0, "endtime": 1,
                        "startvalue": "1 1 1", "endvalue": "0 0 0"}],
          "children": [{"name": "particles/child.json", "type": "eventfollow",
                        "maxcount": 1, "origin": "0 0 0"}]}
         """
+        // 자식은 제 이미터로 사방(speedmax:200)에 뿌린다 — follow 자식은
+        // 부모 위치를 이미 따라가므로(originOffset), 속도까지 부모 것으로
+        // 덮으면 이 이미터 속도가 매 프레임 지워져 자식이 한 점으로 뭉친다.
         let childJSON = """
-        {"maxcount": 1, "material": "materials/spark.json",
-         "emitter": [{"name": "sphererandom", "rate": 100, "distancemin": 0, "distancemax": 0}],
+        {"maxcount": 20, "material": "materials/spark.json",
+         "emitter": [{"name": "sphererandom", "rate": 100, "distancemin": 0,
+                      "distancemax": 0, "speedmin": 50, "speedmax": 200}],
          "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100}],
-         "operator": [{"name": "inheritvaluefromevent"}]}
+         "operator": [{"name": "movement"}, {"name": "inheritvaluefromevent"}]}
         """
         let parentObject = try XCTUnwrap(try JSONSerialization.jsonObject(
             with: Data(parentJSON.utf8)) as? [String: Any])
@@ -367,9 +372,18 @@ final class ParticleChildTests: XCTestCase {
         for _ in 0..<500 { system.update(deltaTime: 0.1) }
         let parent = try XCTUnwrap(system.particles.first)
         let groups = system.renderableGroups()
-        let childParticle = try XCTUnwrap(groups[1].particles.first(where: \.isAlive))
-        XCTAssertEqual(childParticle.color.x, parent.color.x, accuracy: 0.02)
+        let childParticles = groups[1].particles.filter(\.isAlive)
+        XCTAssertFalse(childParticles.isEmpty)
+        for childParticle in childParticles {
+            XCTAssertEqual(childParticle.color.x, parent.color.x, accuracy: 0.02, "색은 옮겨야 한다")
+        }
         XCTAssertLessThan(parent.color.x, 0.9, "이 시점엔 부모 색이 이미 바뀌어 있어야 검증 의미가 있다")
+        // 속도는 부모 것으로 안 덮여야 한다 — 자식마다 제 이미터가 준 서로
+        // 다른(사방으로 뿌린) 속도를 지켜야 한다.
+        let velocitiesMatchParent = childParticles.allSatisfy {
+            abs($0.velocity.x - parent.velocity.x) < 0.5 && abs($0.velocity.y - parent.velocity.y) < 0.5
+        }
+        XCTAssertFalse(velocitiesMatchParent, "속도는 부모 것으로 덮이면 안 된다 — 제 이미터 속도를 지켜야 한다")
     }
 
     // MARK: inheritControlPointVelocity (WE 2.7)

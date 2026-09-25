@@ -1464,13 +1464,19 @@ public final class ParticleSystem {
             Self.applyCollisionResponse(normal: normal, behavior: behavior, to: &particle)
 
         case .inheritValueFromEvent:
-            // `inheritInitialValueFromEvent`의 매 프레임 판 — `updateChildren`이
-            // `follow` 자식의 `parentSnapshot`을 매 프레임 새로 채운다.
+            // `inheritInitialValueFromEvent`의 매 프레임 판이지만 **속도는
+            // 안 옮긴다.** 실물 `inheritvaluefromevent` 미리보기의 자식은
+            // `speedmin:50, speedmax:200`인 자기 이미터가 있다 — follow
+            // 자식은 부모 위치를 `originOffset`으로 이미 따라가므로, 속도까지
+            // 부모 것으로 덮으면 사방으로 뿌려지는 이미터 속도를 매 프레임
+            // 지워 파티클이 부모와 한 덩어리로 뭉친다. WE 문서도 이 사건형의
+            // 용례로 "color, size or opacity"만 든다(속도는 없다) —
+            // `inheritInitialValueFromEvent`(한 번, onDeath 폭발이 죽은
+            // 부모의 운동을 물려받는 용도)만 속도를 옮긴다.
             guard let parent = parentSnapshot else { return }
             particle.color = parent.color
             particle.size = parent.size
             particle.alpha = parent.alpha
-            particle.velocity = parent.velocity
         }
     }
 
