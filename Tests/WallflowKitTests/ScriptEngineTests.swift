@@ -80,6 +80,31 @@ final class ScriptEngineTests: XCTestCase {
             ScriptEngine.stripModuleSyntax("    export let x = 1;"), "    let x = 1;")
     }
 
+    /// 원래 규칙은 줄 맨 앞의 `export`만 봐서, 앞 문장과 세미콜론으로 한 줄에
+    /// 있으면 놓쳤다. JavaScriptCore가 SyntaxError를 던지고 유닛이 조용히
+    /// 등록 실패한다(`SceneScriptHostTests`에 이 한계를 피하려고 줄을 나눠
+    /// 쓴 흔적이 남아 있다).
+    func testStripsExportAfterSemicolonOnSameLine() {
+        XCTAssertEqual(
+            ScriptEngine.stripModuleSyntax("let done = false; export function update(v) { return v; }"),
+            "let done = false; function update(v) { return v; }")
+    }
+
+    /// `;` 뿐 아니라 `}` 뒤에 이어지는 export도 같은 이유로 지워야 한다.
+    func testStripsExportAfterClosingBraceOnSameLine() {
+        XCTAssertEqual(
+            ScriptEngine.stripModuleSyntax("function helper() {} export function update(v) { return v; }"),
+            "function helper() {} function update(v) { return v; }")
+    }
+
+    /// 문자열 치환만 맞고 JavaScriptCore가 여전히 못 읽으면 의미가 없다 —
+    /// 실제로 엔진에 올라가 등록되고 update가 불리는지까지 확인한다.
+    func testOneLineScriptWithMidLineExportRegistersAndRuns() {
+        let engine = ScriptEngine(source: "let done = false; export function update(v) { return v; }")
+        XCTAssertNil(engine.failure, "\(String(describing: engine.failure))")
+        XCTAssertEqual(engine.update(value: "hi"), "hi")
+    }
+
     func testScriptWithoutUpdateIsReported() {
         let engine = ScriptEngine(source: "var x = 1;")
         XCTAssertEqual(engine.failure, .noUpdateFunction)
