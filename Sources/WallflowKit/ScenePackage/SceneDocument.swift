@@ -44,6 +44,19 @@ public struct SceneDocument: Sendable {
     /// `general.zoom`. 저자가 편집기에서 정해 둔 확대율 — 화면 맞춤(`CanvasFit`)이
     /// 배율에 곱한다. 0 이하이거나 유한하지 않거나 없으면 1(확대 없음)이다.
     public let zoom: Double
+    /// `general.bloom`. 켰으면 밝은 자리를 퍼뜨려 더한다. 직교·원근 둘 다에서
+    /// 온다 — `general`은 투영 종류를 가리기 전에 읽는 한 딕셔너리라 둘 다 같은
+    /// 자리에서 얻는다.
+    public let bloom: Bool
+    /// `general.bloomstrength`. 퍼뜨린 값에 곱하는 배율. 없으면 1.
+    public let bloomStrength: Double
+    /// `general.bloomthreshold`. 이 밝기(0~1) 위인 자리만 퍼뜨린다. 없으면 1
+    /// (거의 다 안 퍼짐 — WE 편집기 기본값과 같다).
+    public let bloomThreshold: Double
+    /// `general.hdr`. 지금은 저장만 한다 — 완전한 톤매핑은 오프스크린이 8비트라
+    /// 못 하고(`MetalCompositor.colorPixelFormat` 참고), 블룸이 그 대신 밝은
+    /// 자리를 눈에 띄게 한다.
+    public let hdr: Bool
 
     /// 도형(`shape: quad`) 레이어의 기준 한 변. 파일에는 크기가 없다.
     /// 근거는 `presets/lightshafts/`의 미리보기 씬(256x256 캔버스)과
@@ -153,6 +166,14 @@ public struct SceneDocument: Sendable {
         // 0 이하나 NaN, 아예 없으면 확대 없음(1)로 본다 — 깨진 값이 화면을 통째로
         // 밀어내면 안 된다.
         let zoom = doubleValue(general["zoom"]).map { $0 > 0 ? $0 : 1 } ?? 1
+        // `bloom`은 맨 Bool이거나 `{"user":…, "value":true}`다. 세기·문턱값은
+        // 거기 더해 스크립트가 붙기도 한다(실물 오디오 반응 블룸) — `doubleValue`가
+        // `value`만 읽어 정착값으로 그린다. 직교·원근 둘 다 `general`을 그대로
+        // 읽으므로 이 자리 하나면 둘 다 된다.
+        let bloom = boolValue(general["bloom"]) ?? false
+        let bloomStrength = doubleValue(general["bloomstrength"]) ?? 1
+        let bloomThreshold = doubleValue(general["bloomthreshold"]) ?? 1
+        let hdr = boolValue(general["hdr"]) ?? false
 
         let resolver = ReferenceResolver(pkg: reader, assets: assets)
 
@@ -209,7 +230,8 @@ public struct SceneDocument: Sendable {
             layers: layers,
             scriptModules: scriptModules,
             parallaxAmount: parallaxOn && amount.isFinite ? Swift.min(Swift.max(amount, 0), 2) : 0,
-            zoom: zoom
+            zoom: zoom, bloom: bloom, bloomStrength: bloomStrength, bloomThreshold: bloomThreshold,
+            hdr: hdr
         )
     }
 

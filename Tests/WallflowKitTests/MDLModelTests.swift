@@ -80,6 +80,23 @@ final class MDLModelTests: XCTestCase {
         XCTAssertEqual(model.indices.count % 3, 0, "삼각형 목록이어야 한다")
     }
 
+    /// 실물 `MDLV0016`(Hollow Cylinder, Three-Body 씬의 나침반). 이 버전은
+    /// 경계 상자 24바이트가 통째로 없다 — `boneCount` 바로 뒤에 `vertexFormat`이
+    /// 온다. 정점 위치에서 직접 잰 경계가 나와야 한다.
+    func testParsesRealMDLV0016WithoutBoundsSection() throws {
+        let pkg = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
+            "Library/Application Support/Wallflow/workshop/steamapps/workshop/content/431960/3509243656/scene.pkg")
+        guard let data = try? Data(contentsOf: pkg) else { throw XCTSkip("Three-Body 씬이 설치되어 있지 않다") }
+        let reader = try PkgReader(data: data)
+        let model = try MDLModel.parse(try reader.data(for: "models/Hollow Cylinder/Hollow Cylinder.mdl"))
+        XCTAssertEqual(model.vertexCount, 258)
+        XCTAssertEqual(model.indices.count, 768)
+        XCTAssertEqual(model.indices.count % 3, 0, "삼각형 목록이어야 한다")
+        // 정점에서 잰 경계라 원점 대칭에 가까워야 한다(원기둥이라 y만 짧다).
+        XCTAssertEqual(model.boundsMin.z, -1.9, accuracy: 0.01)
+        XCTAssertEqual(model.boundsMax.z, 1.9, accuracy: 0.01)
+    }
+
     /// 실물 프리즘. 설치돼 있을 때만 — 여기서 배치를 알아냈으므로 여기서 맞아야 한다.
     func testParsesRealPrism() throws {
         let pkg = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
