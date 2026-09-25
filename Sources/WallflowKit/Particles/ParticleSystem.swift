@@ -339,6 +339,10 @@ public final class ParticleSystem {
                 x: position.x + child.reference.origin.x,
                 y: position.y + child.reference.origin.y,
                 z: position.z + child.reference.origin.z)
+            // 월드 좌표(플래그 2) 제어점을 자식도 풀 수 있어야 한다 — 안 물려주면
+            // 기본값(원점 0, 배율 1)이라 변환이 헛돈다(worldToLocal 참고).
+            system.layerOrigin = layerOrigin
+            system.layerScale = layerScale
             childInstances[index].append(
                 ChildInstance(system: system, followSlot: trigger == .follow ? slot : nil))
         }
@@ -970,18 +974,30 @@ public final class ParticleSystem {
     /// 프레임에는 시스템 자리에 둔다(가만히 있는 편이 튀는 것보다 낫다).
     func controlPointPosition(_ id: Int) -> Vec3? {
         guard let point = preset.controlPoints.first(where: { $0.id == id }) else {
-            // 프리셋에 없는 번호라도 0번은 시스템 자신의 자리로 본다.
-            return id == 0 ? originOffset : nil
+            // 프리셋에 없는 번호라도 0번은 시스템 자신의 자리로 본다. 덮어쓰기가
+            // 있으면 그 위에 얹는다 — 정의된 점이 없어 플래그를 모르니 로컬로 본다
+            // (world 플래그는 프리셋의 점에만 달리므로 여기선 판단할 근거가 없다).
+            guard id == 0 else { return nil }
+            guard let raw = instance.controlPoints[0] else { return originOffset }
+            return Vec3(x: originOffset.x + raw.x,
+                        y: originOffset.y + raw.y,
+                        z: originOffset.z + raw.z)
         }
         if point.hasUnknownBinding { return nil }
-        let base = point.followsCursor ? (cursorPosition ?? originOffset) : originOffset
         // 씬의 controlpointN 덮어쓰기(스크립트 포함)가 있으면 프리셋 offset을
         // 통째로 대신한다. 매번 다시 읽는다 — 스크립트가 언제든 바꿀 수 있다.
         let raw = instance.controlPoints[id] ?? point.offset
-        let offset = point.isWorldSpace ? worldToLocal(raw) : raw
-        return Vec3(x: base.x + offset.x,
-                    y: base.y + offset.y,
-                    z: base.z + offset.z)
+        if point.isWorldSpace {
+            // 월드 좌표는 씬 전체 기준 절대 좌표라 그 자체가 최종 로컬 자리다 —
+            // 이 시스템의 원점/커서(base)를 더하면 안 된다. 특히 자식 시스템은
+            // originOffset이 "부모 파티클이 지금 있는 자리"라서, 더하면 화면
+            // 좌표에 부모 위치가 또 얹혀 이중으로 밀린다.
+            return worldToLocal(raw)
+        }
+        let base = point.followsCursor ? (cursorPosition ?? originOffset) : originOffset
+        return Vec3(x: base.x + raw.x,
+                    y: base.y + raw.y,
+                    z: base.z + raw.z)
     }
 
     /// 월드(화면) 좌표(플래그 2)를 이 시스템의 로컬 좌표로 바꾼다. 파티클
@@ -992,7 +1008,9 @@ public final class ParticleSystem {
     /// 실물에서 아직 못 봤다. `layerOrigin`/`layerScale`은 렌더러가 시스템을
     /// 만들 때 한 번 넣어 준 값이라, 스크립트가 나중에 레이어를 옮겨도 다시
     /// 갱신되지 않는다 — 그런 조합도 아직 실물에서 못 봤다. 둘 다 필요해지면
-    /// 렌더러가 `cursorPosition`처럼 매 틱 갱신해야 한다.
+    /// 렌더러가 `cursorPosition`처럼 매 틱 갱신해야 한다. 자식 시스템도 부모가
+    /// 스폰하는 순간 이 값을 한 번만 물려받는다(`spawnChildren` 참고) — 부모
+    /// 레이어가 나중에 옮겨져도 이미 만들어진 자식에는 다시 전파되지 않는다.
     private func worldToLocal(_ v: Vec3) -> Vec3 {
         func axis(_ value: Double, _ origin: Double, _ scale: Double) -> Double {
             // 배율 0(또는 비유한)은 나눗셈을 피하려고 1로 본다 — NaN이 여기서

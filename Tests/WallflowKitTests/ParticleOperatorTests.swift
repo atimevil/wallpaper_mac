@@ -387,6 +387,17 @@ extension ParticleOperatorTests {
         XCTAssertEqual(system.controlPointPosition(1), Vec3(x: 5, y: 0, z: 0))
     }
 
+    /// `controlpoint0` 덮어쓰기는 프리셋이 0번을 따로 정의하지 않았어도 먹어야
+    /// 한다 — 0번은 "이 시스템 자신의 자리"라 항상 있는 취급이지, 프리셋이 안
+    /// 적었다고 덮어쓰기까지 무시하면 안 된다.
+    func testControlPointZeroOverrideAppliesWithoutPresetDeclaration() throws {
+        let preset = try preset(controlPoints: "[]", operators: "[]")
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 1))
+        XCTAssertEqual(system.controlPointPosition(0), Vec3(x: 0, y: 0, z: 0), "덮어쓰기 전에는 원점")
+        system.instance.controlPoints[0] = Vec3(x: 7, y: 8, z: 9)
+        XCTAssertEqual(system.controlPointPosition(0), Vec3(x: 7, y: 8, z: 9))
+    }
+
     /// 씬의 `controlpointN` 덮어쓰기는 프리셋의 offset을 통째로 대신한다.
     func testControlPointOverrideReplacesPresetOffset() throws {
         let preset = try preset(
