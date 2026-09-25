@@ -919,15 +919,17 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 스크립트가 하나라도 있으면 그 묶음 전체를 건드리지 않는다(스크립트 쪽
     /// 값을 그대로 둔다).
     ///
-    /// ponytail: 글자·파티클·소리 레이어는 자기 자리 갱신 경로가 따로 있어(구운
-    /// 글자의 `text.origin`, `particle.layerOrigin` 등) 여기서는 건드리지 않는다.
-    /// 필요해지면 그 경로에 맞춰 따로 얹는다.
+    /// 글자·파티클은 각자 자리 갱신 경로가 따로 있어(구운 글자의 `text.origin`,
+    /// 파티클의 `layerOrigin`/`instance.alpha`) `applyScriptState`와 같은 자리를
+    /// 건드린다 — 글자는 T4가 구운 크기를 다시 재지 않고 상자 중심만 옮기고,
+    /// 파티클은 스크립트가 미는 것과 같은 필드(커서 계산용 layerOrigin, 알파는
+    /// `instanceoverride.alpha`)만 쓴다. 소리 전용 레이어는 그릴 쿼드가 없어
+    /// `target.indices`가 비어 있으므로 아래 루프가 저절로 아무 일도 하지 않는다.
     private func applyPropertyAnimations(elapsed: Double) {
-        guard !animatedLayers.isEmpty, buildContext != nil else { return }
+        guard !animatedLayers.isEmpty, let context = buildContext else { return }
         var changed = false
         for (id, layer) in animatedLayers {
-            guard let target = scriptTargets[id], target.textIndex == nil,
-                  target.particleIndex == nil, target.soundIndex == nil else { continue }
+            guard let target = scriptTargets[id] else { continue }
             let transformScripted = layer.scripts.contains { ["origin", "angles", "scale"].contains($0.property) }
             let colorScripted = layer.scripts.contains { ["alpha", "color"].contains($0.property) }
 
@@ -963,6 +965,32 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
             guard touchesTransform || touchesColor else { continue }
             let world = target.composed(origin: origin, angles: angles, scale: scale)
+
+            // 글자는 T4가 구운 크기를 여기서 다시 재지 않는다 — 상자 중심(boxCenter)만
+            // 옮기고, 처음 세울 때 정해진 정렬 오프셋(origin - boxCenter)을 그대로
+            // 얹는다. 그래야 매 프레임 다시 굽지 않고도 자리만 움직인다(T4 회귀 금지).
+            if touchesTransform, let ti = target.textIndex, ti < texts.count {
+                let text = texts[ti]
+                let alignOffset = SIMD2(text.origin.x - text.boxCenter.x, text.origin.y - text.boxCenter.y)
+                text.boxCenter = SIMD2(Float(world.origin.x), Float(world.origin.y))
+                text.origin = text.boxCenter + alignOffset
+                text.worldOrigin = world.origin
+                text.worldAngles = world.anglesDegrees
+            }
+            // 파티클은 자기 draw가 커서 계산에 쓰는 layerOrigin을 따로 들고 있다
+            // (스크립트가 미는 자리와 같다 — `applyScriptState`의 particleIndex 분기 참고).
+            if touchesTransform, let pi = target.particleIndex, pi < particles.count {
+                particles[pi].layerOrigin = SIMD2(Float(world.origin.x), Float(world.origin.y))
+            }
+            // 파티클 알파는 스크립트가 미는 것과 같은 자리(`instanceoverride.alpha`)를 쓴다.
+            if touchesColor, let pi = target.particleIndex, pi < particles.count {
+                var instance = particles[pi].system.instance
+                if abs(instance.alpha - alpha) > 1e-9 {
+                    instance.alpha = alpha
+                    particles[pi].system.instance = instance
+                }
+            }
+
             for index in target.indices where index < layerList.count {
                 var quad = layerList[index].0
                 if touchesColor {
@@ -972,7 +1000,18 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                         layer.visible ? Float(alpha) : 0)
                 }
                 if touchesTransform {
-                    if buildContext?.isPerspective == true {
+                    if let ti = target.textIndex, ti < texts.count {
+                        let text = texts[ti]
+                        if context.isPerspective {
+                            quad.world = Scene3D.world(
+                                origin: world.origin, anglesDegrees: world.anglesDegrees,
+                                scale: Vec3(x: 1, y: 1, z: 1),
+                                size: Vec2(x: Double(text.size.x), y: Double(text.size.y)))
+                        } else {
+                            quad.origin = text.origin
+                            quad.size = text.size
+                        }
+                    } else if context.isPerspective {
                         quad.world = Scene3D.world(
                             origin: world.origin, anglesDegrees: world.anglesDegrees, scale: world.scale,
                             size: target.unitWorld ? Vec2(x: 1, y: 1) : target.baseSize)

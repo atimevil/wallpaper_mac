@@ -177,6 +177,43 @@ final class RealScenesTests: XCTestCase {
                        "4초 뒤에는 완전히 투명해야 한다")
     }
 
+    /// 같은 씬(3147346398)의 "Clock"·"Date"는 글자 레이어인데 origin이 애니메이션이다.
+    /// 라운드 1은 글자·파티클 레이어를 렌더러에서 통째로 건너뛰었다(T4 굽기를
+    /// 건드릴까 봐) — 이 시험은 Kit 파싱 단계가 콘텐츠 종류와 무관하게 커브를
+    /// 주웠는지만 본다(실제 재생은 SceneRenderer 쪽이라 여기서 보지 않는다).
+    func testTextLayerOriginAnimationParsesRegardlessOfContentKind() throws {
+        guard let reader = try scenePkg("3147346398") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader)
+        for name in ["Clock", "Date"] {
+            guard let layer = doc.layers.first(where: { $0.name == name }) else {
+                XCTFail("\(name) 레이어를 찾을 수 없다"); continue
+            }
+            guard case .text = layer.content else {
+                XCTFail("\(name)는 글자 레이어여야 한다"); continue
+            }
+            let anim = try XCTUnwrap(layer.animations["origin"], "\(name)의 origin에 커브가 있어야 한다")
+            XCTAssertTrue(anim.relative, "origin 커브는 기준 좌표에 더하는 오프셋이다")
+        }
+    }
+
+    /// 워크숍 2597392171 "Fog 1"은 파티클 레이어인데 origin이 애니메이션이다.
+    func testParticleLayerOriginAnimationParses() throws {
+        guard let reader = try scenePkg("2597392171") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader)
+        guard let layer = doc.layers.first(where: { $0.name == "Fog 1" }) else {
+            return XCTFail("Fog 1 레이어를 찾을 수 없다")
+        }
+        guard case .particle = layer.content else {
+            return XCTFail("Fog 1은 파티클 레이어여야 한다")
+        }
+        let anim = try XCTUnwrap(layer.animations["origin"])
+        XCTAssertEqual(anim.mode, .loop)
+    }
+
     /// 226MB 텍스처 두 개가 MP4였다. 이 판정이 틀리면 두 씬이 통째로 깨진다.
     func testLargeTexturesAreDetectedAsVideo() throws {
         let cases = [
