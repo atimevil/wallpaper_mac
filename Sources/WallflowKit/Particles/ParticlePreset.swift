@@ -238,6 +238,45 @@ public struct ParticleOverride: Equatable, Sendable {
             && lifetime == 1 && alpha == 1 && brightness == 1 && color == nil
     }
 
+    /// 스크립트(`layer.instance`, `instanceoverride.<키>`)가 읽고 쓰는 이름.
+    /// `colorn`만 벡터다.
+    public static let scriptKeys = [
+        "alpha", "size", "count", "speed", "lifetime", "rate", "brightness", "colorn",
+    ]
+
+    /// 스크립트 쪽 `layer.instance`의 시작값.
+    public var scriptValues: [String: EffectConstant] {
+        var out: [String: EffectConstant] = [
+            "alpha": .scalar(alpha), "size": .scalar(size), "count": .scalar(count),
+            "speed": .scalar(speed), "lifetime": .scalar(lifetime), "rate": .scalar(rate),
+            "brightness": .scalar(brightness),
+        ]
+        if let color { out["colorn"] = .vector([color.x, color.y, color.z]) }
+        return out
+    }
+
+    /// 스크립트가 쓴 값을 얹는다. 파일과 같은 규칙 — 유한하고 0~100인 배율만 받는다.
+    public mutating func apply(_ values: [String: EffectConstant]) {
+        for (key, value) in values {
+            switch (key, value) {
+            case ("colorn", .vector(let v)) where v.count >= 3 && v.prefix(3).allSatisfy(\.isFinite):
+                color = Vec3(x: v[0], y: v[1], z: v[2])
+            case (_, .scalar(let d)) where d.isFinite && d >= 0 && d <= 100:
+                switch key {
+                case "alpha": alpha = d
+                case "size": size = d
+                case "count": count = d
+                case "speed": speed = d
+                case "lifetime": lifetime = d
+                case "rate": rate = d
+                case "brightness": brightness = d
+                default: break
+                }
+            default: break
+            }
+        }
+    }
+
     /// `instanceoverride` 객체에서 읽는다. 배율은 파일에서 오므로 이상한 값은 버린다.
     public static func parse(_ json: [String: Any]) -> ParticleOverride {
         var result = ParticleOverride()

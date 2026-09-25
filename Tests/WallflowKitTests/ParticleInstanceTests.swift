@@ -125,4 +125,28 @@ final class ParticleInstanceTests: XCTestCase {
         XCTAssertEqual(p.instance.size, 2)
         XCTAssertEqual(p.maxCount, 32)
     }
+
+    /// 스크립트가 쓴 값도 파일과 같은 규칙으로 거른다.
+    func testApplyFiltersScriptValues() {
+        var o = ParticleOverride()
+        o.apply(["rate": .scalar(0.5), "size": .scalar(.nan), "speed": .scalar(-1),
+                 "count": .scalar(1e9), "colorn": .vector([0.1, 0.2, 0.3]),
+                 "brightness": .vector([1, 2, 3])])
+        XCTAssertEqual(o.rate, 0.5)
+        XCTAssertEqual(o.size, 1)
+        XCTAssertEqual(o.speed, 1)
+        XCTAssertEqual(o.count, 1)
+        XCTAssertEqual(o.brightness, 1)
+        XCTAssertEqual(o.color, Vec3(x: 0.1, y: 0.2, z: 0.3))
+    }
+
+    /// 스크립트 쪽 시작값은 지금 배율 그대로다. 색은 있을 때만.
+    func testScriptValuesRoundTrip() {
+        var o = ParticleOverride()
+        o.rate = 0.19
+        var back = ParticleOverride()
+        back.apply(o.scriptValues)
+        XCTAssertEqual(back, o)
+        XCTAssertNil(o.scriptValues["colorn"])
+    }
 }

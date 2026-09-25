@@ -221,6 +221,8 @@ public final class ParticleSystem {
     /// 거두고 더 뿌리지 않는다 — 실물 "졸음" 씬이 마우스가 움직이면 zzz를 `stop()`으로
     /// 지운다. 다시 틀면 처음처럼 한꺼번에 뿌리는 몫부터 시작한다.
     public private(set) var isPlaying = true
+    /// 렌더러가 마지막으로 본 스크립트 `stop()` 횟수.
+    public var restartsSeen = 0
 
     public func stop() {
         isPlaying = false

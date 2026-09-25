@@ -410,4 +410,67 @@ final class SceneScriptHostTests: XCTestCase {
         ], camera: nil, modules: ["WEMath": "export function half(x) { return x / 2; }"])
         XCTAssertEqual(host.tick(frametime: 0.1).layers[1]?.alpha, 0.5)
     }
+
+    /// 파티클 배율(`layer.instance`). 속성 스크립트 `instanceoverride.<키>`가 시작값을
+    /// 받고, 돌려준 값이 스냅샷으로 나온다.
+    func testInstanceOverrideScriptRoundTrip() {
+        var s = seed(3, "vortex", scripts: [LayerScript(
+            property: "instanceoverride.rate",
+            source: "export function update(v) { return v * 2; }")])
+        s.instance = ["rate": .scalar(0.25)]
+        let host = SceneScriptHost(layers: [s], camera: nil)
+        XCTAssertEqual(host.tick(frametime: 0.1).layers[3]?.instance["rate"], .scalar(0.5))
+    }
+
+    /// 실물 PS2 시계의 `particles` 레이어 스크립트 그대로다. colorn 시작값은 "0 0 0"이고
+    /// 스크립트가 테마색 × 0.175로 바꾼다 — 안 돌리면 가산 혼합이라 파티클이 안 보인다.
+    func testInstanceColorScriptUsesUserProperties() {
+        let source = """
+        let particleColor = new Vec3(0, 0, 0);
+        export function update(value) { return particleColor; }
+        export function applyUserProperties(userProperties) {
+            particleColor = userProperties.schemecolor.multiply(0.175);
+        }
+        """
+        var s = seed(4, "particles", scripts: [LayerScript(
+            property: "instanceoverride.colorn", source: source)])
+        s.instance = ["colorn": .vector([0, 0, 0])]
+        let host = SceneScriptHost(layers: [s], camera: nil,
+                                   userProperties: ["schemecolor": .color(Vec3(x: 1, y: 0.5, z: 0))])
+        guard case .vector(let c)? = host.tick(frametime: 0.1).layers[4]?.instance["colorn"] else {
+            return XCTFail("colorn 벡터가 나와야 한다")
+        }
+        XCTAssertEqual(c[0], 0.175, accuracy: 1e-9)
+        XCTAssertEqual(c[1], 0.0875, accuracy: 1e-9)
+    }
+
+    /// 일반 속성 스크립트 안에서 `thisLayer.instance`를 고쳐도 나온다(실물 PS2 오브).
+    func testLayerInstanceWritesAreReported() {
+        let host = SceneScriptHost(layers: [
+            seed(5, "orb", scripts: [LayerScript(
+                property: "origin",
+                source: "export function update(v) { thisLayer.instance.colorn = new Vec3(0.1, 0.2, 0.3); return v; }")]),
+        ], camera: nil)
+        XCTAssertEqual(host.tick(frametime: 0.1).layers[5]?.instance["colorn"],
+                       .vector([0.1, 0.2, 0.3]))
+    }
+
+    /// 한 틱 안의 `stop(); play()`는 재시작이다. 최종 상태만 보면 사라지므로 횟수로 센다.
+    func testStopThenPlayInOneTickCountsRestart() {
+        let host = SceneScriptHost(layers: [
+            SceneScriptHost.LayerSeed(
+                id: 6, name: "orb", origin: Vec3(x: 0, y: 0, z: 0),
+                angles: Vec3(x: 0, y: 0, z: 0), scale: Vec3(x: 1, y: 1, z: 1),
+                alpha: 1, visible: true, playing: true,
+                scripts: [LayerScript(
+                    property: "origin",
+                    // `stripModuleSyntax`는 줄 맨 앞의 `export`만 지운다(ScriptEngine.swift).
+                    // 앞 문장과 한 줄에 있으면 `export`가 안 지워져 구문 오류로 등록 자체가
+                    // 실패한다 — 그래서 `let done`과 `export function`을 줄로 나눈다.
+                    source: "let done = false;\nexport function update(v) { if (!done) { thisLayer.stop(); thisLayer.play(); done = true; } return v; }")]),
+        ], camera: nil)
+        let state = host.tick(frametime: 0.1).layers[6]
+        XCTAssertEqual(state?.playing, true)
+        XCTAssertEqual(state?.restarts, 1)
+    }
 }

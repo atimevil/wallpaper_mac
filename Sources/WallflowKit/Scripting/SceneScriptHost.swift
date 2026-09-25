@@ -72,6 +72,8 @@ public final class SceneScriptHost: @unchecked Sendable {
         public var pointSize: Double?
         /// 부모 레이어 id. `thisLayer.getChildren()`이 이걸로 자식을 찾는다.
         public var parent: Int?
+        /// 파티클이면 씬 배율(`layer.instance`)의 시작값. 아니면 비어 있다.
+        public var instance: [String: EffectConstant] = [:]
 
         public init(id: Int, name: String, origin: Vec3, angles: Vec3, scale: Vec3,
                     alpha: Double, visible: Bool, color: Vec3 = Vec3(x: 1, y: 1, z: 1),
@@ -98,6 +100,7 @@ public final class SceneScriptHost: @unchecked Sendable {
             var playing: Bool?
             var volume: Double?
             var pointSize: Double?
+            var instance: [String: EffectConstant] = [:]
             switch layer.content {
             case .text(let t):
                 text = t.value
@@ -105,9 +108,10 @@ public final class SceneScriptHost: @unchecked Sendable {
             case .sound(let s):
                 playing = !s.startsSilent
                 volume = s.volume
-            case .particle:
+            case .particle(let preset, _, _, _, _):
                 // 파티클도 `play()/stop()`의 대상이다. 처음에는 돈다.
                 playing = true
+                instance = preset.instance.scriptValues
             default: break
             }
             // 보임은 자체 값이다. 부모까지 합친 값은 렌더러가 조상 사슬로 다시 만든다 —
@@ -118,6 +122,7 @@ public final class SceneScriptHost: @unchecked Sendable {
                       text: text, playing: playing, volume: volume, scripts: layer.scripts)
             self.pointSize = pointSize
             self.parent = layer.parentID
+            self.instance = instance
         }
     }
 
@@ -140,6 +145,11 @@ public final class SceneScriptHost: @unchecked Sendable {
         public var material: [String: EffectConstant] = [:]
         /// 글자 크기(씬 단위). 글자 레이어가 아니면 nil.
         public var pointSize: Double?
+        /// 파티클 배율(`layer.instance`). 스크립트가 안 건드렸어도 시작값이 온다.
+        public var instance: [String: EffectConstant] = [:]
+        /// 스크립트가 `stop()`을 부른 횟수. 한 틱 안의 `stop(); play()`는 최종 상태만
+        /// 보면 사라지므로 횟수로 재시작을 알린다.
+        public var restarts = 0
     }
 
     public struct Snapshot: Equatable, Sendable {
@@ -295,6 +305,13 @@ public final class SceneScriptHost: @unchecked Sendable {
                 else if let v = Self.vec3(value) { material[key] = .vector([v.x, v.y, v.z]) }
             }
             state.material = material
+            var instance: [String: EffectConstant] = [:]
+            for (key, value) in (raw["io"] as? [String: Any] ?? [:]) {
+                if let d = Self.number(value) { instance[key] = .scalar(d) }
+                else if let v = Self.vec3(value) { instance[key] = .vector([v.x, v.y, v.z]) }
+            }
+            state.instance = instance
+            state.restarts = Swift.max(0, (raw["rs"] as? NSNumber)?.intValue ?? 0)
             state.pointSize = Self.number(raw["pt"]).map { Swift.max($0, 0) }
             layers[id] = state
             order.append(id)
@@ -377,6 +394,15 @@ public final class SceneScriptHost: @unchecked Sendable {
         if let volume = seed.volume { fields["vol"] = "\(finite(volume))" }
         if let pointSize = seed.pointSize { fields["pt"] = "\(finite(pointSize))" }
         if let parent = seed.parent { fields["parent"] = "\(parent)" }
+        if !seed.instance.isEmpty {
+            let pairs = seed.instance.sorted { $0.key < $1.key }.map { key, value -> String in
+                switch value {
+                case .scalar(let d): return "\(jsString(key)): \(finite(d))"
+                case .vector(let v): return "\(jsString(key)): [\(v.map { "\(finite($0))" }.joined(separator: ","))]"
+                }
+            }
+            fields["io"] = "{" + pairs.joined(separator: ", ") + "}"
+        }
         return "{" + fields.map { "\"\($0.key)\": \($0.value)" }.joined(separator: ", ") + "}"
     }
 
@@ -519,6 +545,15 @@ public final class SceneScriptHost: @unchecked Sendable {
         return (a && a.length >= 3) ? new Vec3(a[0], a[1], a[2]) : new Vec3(d[0], d[1], d[2]);
     }
 
+    function __wfInstance(raw) {
+        var out = {};
+        for (var k in (raw || {})) {
+            var v = raw[k];
+            out[k] = (v && v.length >= 3) ? new Vec3(v[0], v[1], v[2]) : v;
+        }
+        return out;
+    }
+
     function __wfMakeLayer(seed) {
         var L = {
             id: seed.id,
@@ -534,7 +569,7 @@ public final class SceneScriptHost: @unchecked Sendable {
             parallaxDepth: new Vec2(0, 0),
             isUserHidden: false,
             pointsize: (typeof seed.pt === 'number') ? seed.pt : undefined,
-            instance: {},
+            instance: __wfInstance(seed.io),
             __playing: (typeof seed.p === 'boolean') ? seed.p : undefined,
             volume: (typeof seed.vol === 'number') ? seed.vol : undefined,
             __asset: seed.asset,
@@ -549,7 +584,9 @@ public final class SceneScriptHost: @unchecked Sendable {
             },
             getParent: function () { return this.__parent === null ? null : (__wf.layers[this.__parent] || null); },
             play: function () { this.__playing = true; },
-            stop: function () { this.__playing = false; },
+            // stop()은 파티클을 거둔다. 한 틱 안의 stop(); play()는 최종 상태만 보면
+            // 사라지므로 횟수를 센다 — 렌더러가 이걸로 재시작한다.
+            stop: function () { this.__playing = false; this.__restarts = (this.__restarts || 0) + 1; },
             pause: function () { this.__playing = false; },
             isPlaying: function () { return this.__playing === true; },
             getAnimation: __wfAnimationStub,
@@ -687,6 +724,7 @@ public final class SceneScriptHost: @unchecked Sendable {
     }
 
     function __wfValue(L, p, u) {
+        if (p.indexOf('instanceoverride.') === 0) { return L.instance[p.slice(17)]; }
         if (u && u.material) { return u.material[p]; }
         switch (p) {
             case 'visible': return L.visible;
@@ -702,6 +740,12 @@ public final class SceneScriptHost: @unchecked Sendable {
         if (u && u.material) {
             if (typeof r === 'number') { if (isFinite(r)) { u.material[p] = r; } }
             else if (typeof r === 'object') { u.material[p] = new Vec3(r); }
+            return;
+        }
+        if (p.indexOf('instanceoverride.') === 0) {
+            var key = p.slice(17);
+            if (typeof r === 'number') { if (isFinite(r)) { L.instance[key] = r; } }
+            else if (typeof r === 'object') { L.instance[key] = new Vec3(r); }
             return;
         }
         switch (p) {
@@ -765,6 +809,18 @@ public final class SceneScriptHost: @unchecked Sendable {
             if (typeof L.volume === 'number') { entry.vol = L.volume; }
             if (typeof L.pointsize === 'number') { entry.pt = L.pointsize; }
             if (typeof L.__asset === 'string') { entry.asset = L.__asset; }
+            if (L.instance) {
+                var io = {}, anyIO = false;
+                for (var ik in L.instance) {
+                    var iv = L.instance[ik];
+                    if (typeof iv === 'number') { io[ik] = iv; anyIO = true; }
+                    else if (iv && typeof iv === 'object' && typeof iv.x === 'number') {
+                        io[ik] = [+iv.x, +iv.y, +iv.z]; anyIO = true;
+                    }
+                }
+                if (anyIO) { entry.io = io; }
+            }
+            if (typeof L.__restarts === 'number') { entry.rs = L.__restarts; }
             if (L.__material) {
                 var m = {};
                 for (var k in L.__material) {

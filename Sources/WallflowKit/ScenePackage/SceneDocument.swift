@@ -194,12 +194,28 @@ public struct SceneDocument: Sendable {
         "visible", "origin", "angles", "scale", "size", "alpha", "color", "text",
     ]
 
+    /// 스크립트를 품을 수 있는 자리 전부. 파티클의 `instanceoverride` 값도 스크립트일 수
+    /// 있다(실물 PS2 시계 `colorn`, Universal Reflex 3 `rate`) — 이름은 `instanceoverride.<키>`.
+    /// 속성 스크립트와 모듈 import 수집이 같은 목록을 봐야 한다.
+    static func scriptHolders(of object: [String: Any]) -> [(property: String, holder: [String: Any])] {
+        var holders: [(property: String, holder: [String: Any])] =
+            scriptableProperties.compactMap { key in
+                (object[key] as? [String: Any]).map { (key, $0) }
+            }
+        let instance = object["instanceoverride"] as? [String: Any] ?? [:]
+        for key in ParticleOverride.scriptKeys {
+            if let holder = instance[key] as? [String: Any] {
+                holders.append(("instanceoverride.\(key)", holder))
+            }
+        }
+        return holders
+    }
+
     /// 오브젝트의 속성 스크립트 전부. `text`는 `text` 객체 안에 있다.
     static func layerScripts(of object: [String: Any]) -> [LayerScript] {
         var scripts: [LayerScript] = []
-        for key in scriptableProperties {
-            guard let holder = object[key] as? [String: Any],
-                  let source = holder["script"] as? String else { continue }
+        for (key, holder) in scriptHolders(of: object) {
+            guard let source = holder["script"] as? String else { continue }
             var properties: [String: ScriptPropertyValue] = [:]
             for (name, raw) in (holder["scriptproperties"] as? [String: Any] ?? [:]) {
                 if let n = raw as? NSNumber, !(raw is String) {
@@ -261,9 +277,8 @@ public struct SceneDocument: Sendable {
     ) -> [String: String] {
         var wanted: Set<String> = []
         for object in objects {
-            for key in scriptableProperties {
-                guard let script = (object[key] as? [String: Any])?["script"] as? String
-                else { continue }
+            for (_, holder) in scriptHolders(of: object) {
+                guard let script = holder["script"] as? String else { continue }
                 for line in script.split(whereSeparator: \.isNewline) {
                     let trimmed = line.trimmingCharacters(in: .whitespaces)
                     guard trimmed.hasPrefix("import ") else { continue }

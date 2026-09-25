@@ -644,10 +644,25 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             }
         }
         if let pi = target.particleIndex, pi < particles.count {
+            let system = particles[pi].system
             particles[pi].layerOrigin = SIMD2(Float(world.origin.x), Float(world.origin.y))
+            // 스크립트의 `layer.instance`. 스폰 결과는 새로 나는 파티클부터 먹는다.
+            var instance = system.instance
+            instance.apply(state.instance)
+            if instance != system.instance {
+                system.instance = instance
+                changed = true
+            }
+            // 한 틱 안의 `stop(); play()`는 재시작이다(실물 PS2 오브가 색을 바꾼 뒤
+            // 이렇게 다시 튼다). 거둔 뒤 아래 play()가 다시 뿌린다.
+            if state.restarts > system.restartsSeen {
+                system.restartsSeen = state.restarts
+                system.stop()
+                changed = true
+            }
             // 스크립트의 play()/stop(). 바뀔 때만 — stop()은 파티클을 거두므로 매 틱 부르면 안 된다.
-            if let playing = state.playing, playing != particles[pi].system.isPlaying {
-                playing ? particles[pi].system.play() : particles[pi].system.stop()
+            if let playing = state.playing, playing != system.isPlaying {
+                playing ? system.play() : system.stop()
                 changed = true
             }
         }

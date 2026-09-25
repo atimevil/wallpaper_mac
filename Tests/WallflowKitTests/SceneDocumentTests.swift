@@ -1119,4 +1119,19 @@ extension SceneDocumentTests {
         XCTAssertEqual(try layer("보통").origin, Vec3(x: 50, y: 50, z: 0))
         XCTAssertEqual(try layer("오른아래").origin, Vec3(x: 90, y: 120, z: 0))
     }
+
+    /// instanceoverride 값도 스크립트일 수 있다(실물 PS2 시계 colorn, Universal Reflex 3 rate).
+    func testInstanceOverrideScriptsAreLayerScripts() {
+        let object: [String: Any] = [
+            "particle": "particles/p.json",
+            "instanceoverride": [
+                "id": 1, "count": 2.0,
+                "rate": ["script": "export function update(v) { return v; }", "value": 0.19],
+            ],
+        ]
+        XCTAssertEqual(SceneDocument.layerScripts(of: object).map(\.property),
+                       ["instanceoverride.rate"])
+        XCTAssertEqual(SceneDocument.scriptHolders(of: object).map(\.property),
+                       ["instanceoverride.rate"])
+    }
 }
