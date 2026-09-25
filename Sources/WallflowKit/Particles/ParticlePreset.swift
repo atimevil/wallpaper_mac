@@ -118,6 +118,45 @@ public enum ParticleInitializer: Equatable, Sendable {
     case mapSequenceAroundControlPoint(controlPoint: Int, count: Double,
                                        boundsStart: Double, boundsEnd: Double,
                                        mirror: Bool, speedMin: Vec3, speedMax: Vec3)
+    /// 두 제어점을 잇는 선 위에 순서대로 자리를 잡는다(WE 2.7, "Position between
+    /// control points"). `mapSequenceAroundControlPoint`의 직선 판 — 같은
+    /// `nextSequenceSlot` 카운터를 쓴다.
+    ///
+    /// `count`가 안 적히면(실물 `thunderbolt.json`·창작마당 편집기 미리보기
+    /// 둘 다 생략) 프리셋의 `maxCount` 전체를 쓴다 — 편집기 미리보기가 정확히
+    /// `maxcount`(100)개를 선 전체에 고르게 깐다(`ParticleSystem`에서 해석).
+    /// `mapSequenceAroundControlPoint`가 안 적힌 값을 1로 보는 것과 다른
+    /// 이유다 — 그쪽은 실물에 한 번도 등장하지 않은 필드였지만, 이쪽은 실물
+    /// 두 곳 모두 "선 전체를 채운다"는 뜻으로 생략한다.
+    ///
+    /// `arcamount`(실물 `thunderbolt.json`이 0.1)는 선을 활 모양으로 휘는
+    /// 값으로 보이지만 정확한 공식을 실물만으로 확정할 수 없어 반영하지
+    /// 않는다 — 부르는 쪽이 있으면 보고한다(`vortex_v2`의 고리와 같은 규칙).
+    /// `flags`도 마찬가지로 안 읽는다(실물 값이 4/19/23으로 제각각이라 어느
+    /// 비트가 무슨 뜻인지 확정할 근거가 없다).
+    case mapSequenceBetweenControlPoints(
+        controlPointStart: Int, controlPointEnd: Int, count: Double, hasArc: Bool)
+    /// 파티클마다 최대 10개 색 중 하나를 무작위로 고른다(WE 2.7). 실물
+    /// `colorlist`(창작마당 편집기 미리보기)의 색은 **이미 0~1**이다 —
+    /// `colorrandom`의 0~255와 다르다(그쪽은 `Vec3.parse`한 뒤 255로 나누지만,
+    /// 여기는 그대로 쓴다).
+    case colorList(colors: [Vec3])
+    /// HSV로 파티클 색을 고른다(WE 2.7). 안 적힌 채도·명도는 1(꽉 찬 색) —
+    /// 실물이 `huesteps`만 적고 나머지를 생략하는데, 0으로 보면 전부 검정이
+    /// 되어 안 보인다. `huesteps`는 색상을 그 개수만큼 이산 구간으로 자른다
+    /// (0이면 연속).
+    case hsvColorRandom(hueMin: Double, hueMax: Double, hueSteps: Int,
+                        saturationMin: Double, saturationMax: Double,
+                        valueMin: Double, valueMax: Double)
+    /// 태어난 자리를 매끄러운 3차원 잡음으로 흔든다(WE 2.7, "organic, fractal
+    /// patterns"). 실물 `thunderbolt.json`이 `distance:100, scale:0,
+    /// timescale:5`를 쓴다 — `scale:0`이면 공간 항이 사라져 잡음이 **자리와
+    /// 무관하게 시간에만** 따라 흔들린다. 번개가 매 순간 다른 지그재그로
+    /// 다시 그려지는 것이 이것이다(파티클은 계속 죽고 새로 나므로, "태어날
+    /// 때 한 번" 건 오프셋이 시간에 따라 계속 바뀌는 결과가 깜빡이는 번개로
+    /// 보인다). `turbulence` 연산자와 같은 잡음 함수·같은 시간 배율(0.01)을
+    /// 쓴다 — 한 코드베이스 안에서 "매끄러운 잡음"의 관례를 통일했다.
+    case positionOffsetRandom(distance: Double, scale: Double, timeScale: Double)
 }
 public enum ParticleOperator: Equatable, Sendable {
     case movement(gravity: Vec3, drag: Double)
@@ -185,6 +224,79 @@ public enum ParticleOperator: Equatable, Sendable {
     case remapValue(output: ParticleRemapOutput, transform: ParticleRemapTransform,
                     inputScale: Double, outputMin: Vec3, outputMax: Vec3)
     case controlPointAttract(controlPoint: Int, origin: Vec3, scale: Double, threshold: Double)
+    /// 속력 상한(WE 2.7). `maxspeed`를 넘는 파티클을 그 값으로 죈다.
+    /// `blendinstart`~`blendinend`(수명 비율)에 걸쳐 0→1로 서서히 걸린다 —
+    /// `alphafade`와 같은 "비율 구간" 관례다. 둘이 같으면(실물
+    /// `thunderbolt_child_spawner.json`이 `0.2, 0.2`) 그 지점에서 바로 켠다.
+    case capVelocity(maxSpeed: Double, blendInStart: Double, blendInEnd: Double)
+    /// `mapSequenceBetweenControlPoints`가 태어날 때 고른 두 제어점 사이의
+    /// 자리(0~1)를 매 프레임 다시 지킨다(WE 2.7, "keeps the relative distance
+    /// between a particle and two control points constant"). 실물(창작마당
+    /// 미리보기·`thunderbolt.json`·`thunderbolt_beam_child.json`) 전부 필드가
+    /// 없다 — 짝인 초기화자가 고른 제어점·자리를 그대로 쓴다는 뜻으로 읽었다.
+    /// 그 초기화자가 없으면(파티클에 저장된 자리가 없으면) 아무것도 안 한다.
+    case maintainDistanceBetweenControlPoints
+    /// 제어점에서 정한 거리(`variablestrength`가 클수록 세게)를 유지하려고
+    /// 당기거나 민다(WE 2.7). 번호를 안 적으면(실물 두 곳 다) 0번이다 —
+    /// `controlPointAttract`와 같은 관례.
+    case maintainDistanceToControlPoint(controlPoint: Int, variableStrength: Double)
+    /// 제어점 가까이서 움직임을 줄인다(WE 2.7) — 번개가 끝점 근처에서 멈칫하는
+    /// 효과. `distanceinner`~`distanceouter` 구간에서 속도에 곱하는 배율이
+    /// `reductioninner`~`reductionouter`로 보간된다. 문서 이름이 "reduction"
+    /// 이라 값이 클수록 더 줄어든다고 읽었다 — 실물 `thunderbolt.json`이 안쪽
+    /// `reductioninner: 1000`(강하게 죽인다)만 적고 바깥은 기본(문서대로
+    /// 0 — 안 줄임)을 쓴다.
+    case reduceMovementNearControlPoint(
+        controlPoint: Int, distanceInner: Double, distanceOuter: Double,
+        reductionInner: Double, reductionOuter: Double)
+    /// 새떼처럼 뭉친다(WE 2.7) — 근처 파티클과 응집(cohesion)·분리
+    /// (separation)·정렬(alignment) 힘을 더한다. 실물이 `separationfactor: 0`
+    /// (분리 없음)과 `alignmentfactor`를 생략하는 경우가 다 있어 셋 다 독립
+    /// 선택 필드다.
+    ///
+    /// ponytail: 이웃을 전수조사한다(O(n²)). 실물 프리셋의 `maxcount`가
+    /// 커도 수백 단위(`dripping_water`는 16)라 문제없지만, 수천 단위 프리셋이
+    /// 나오면 공간 격자로 이웃만 추려야 한다.
+    case boids(cohesionFactor: Double, separationFactor: Double, alignmentFactor: Double,
+              neighborThreshold: Double)
+    /// 평면과 충돌한다(WE 2.7). `axis`는 실물에 한 번도 안 적혀 있어(창작마당
+    /// 미리보기 유일 사례) 중력 방향(우리 2D 세계 좌표계의 -Y)과 짝이 되는
+    /// Y축을 기본으로 뒀다. `distance`는 그 축 위의 평면 위치, `bouncefactor`는
+    /// 반사 후 속력에 곱하는 값(1이면 완전 반사).
+    case collisionPlane(axis: Vec3, distance: Double, behavior: ParticleCollisionBehavior)
+    /// 구와 충돌한다(WE 2.7). `origin`은 실물에 있지만 `radius`는 한 번도
+    /// 적힌 적이 없다 — 지어내지 않고 0(충돌 안 함, `spriteTrail`의 옛
+    /// `maxLength` 부재 처리와 같은 "안전한 무효과" 기본값)으로 둔다. 씬이
+    /// 반지름을 적으면 그 값을 쓴다.
+    case collisionSphere(origin: Vec3, radius: Double, behavior: ParticleCollisionBehavior)
+    /// 사각 판과 충돌한다(WE 2.7) — 한쪽 면에서만 막는다(문서: "one side").
+    /// `axis`는 collisionPlane과 같은 이유로 기본 Y.
+    case collisionQuad(origin: Vec3, axis: Vec3, size: Vec2, behavior: ParticleCollisionBehavior)
+}
+
+/// 충돌 연산자 네 가지가 공유하는 충돌 후 동작(WE 2.7 문서: Bounce/Slide/
+/// Stop/Delete). 안 적으면 Bounce가 기본 — 실물 `collisionplane` 미리보기가
+/// `collisionbehavior`를 아예 안 적고 `bouncefactor`만 적는다(Bounce가
+/// 아니면 그 필드가 쓰일 곳이 없다).
+public enum ParticleCollisionBehavior: Equatable, Sendable {
+    /// 반사한다. 반사 후 속력에 `bounceFactor`를 곱한다(1 미만이면 매번 약해진다).
+    case bounce(bounceFactor: Double)
+    /// 표면을 따라 미끄러진다 — 수직 성분만 지운다.
+    case slide
+    /// 그 자리에서 멈춘다 — 속도를 0으로 지운다.
+    case stop
+    /// 파티클을 죽인다(문서: "triggering the death event") — `eventdeath` 자식이
+    /// 있으면 그 자리에서 터진다.
+    case delete
+
+    public static func parse(_ raw: Any?, bounceFactor: Double) -> ParticleCollisionBehavior {
+        switch (raw as? String)?.lowercased() {
+        case "slide": return .slide
+        case "stop": return .stop
+        case "delete", "kill": return .delete
+        default: return .bounce(bounceFactor: bounceFactor)
+        }
+    }
 }
 
 /// `remapvalue`가 무엇에 값을 넣는지.
@@ -786,12 +898,16 @@ public struct ParticlePreset: Equatable, Sendable {
         let knownInitializerNames = Set<String>([
             "lifetimerandom", "sizerandom", "alpharandom", "velocityrandom",
             "colorrandom", "rotationrandom", "angularvelocityrandom", "turbulentvelocityrandom",
-            "mapsequencearoundcontrolpoint"
+            "mapsequencearoundcontrolpoint", "mapsequencebetweencontrolpoints", "colorlist",
+            "hsvcolorrandom", "positionoffsetrandom"
         ])
         let knownOperatorNames = Set<String>([
             "movement", "angularmovement", "alphafade", "alphachange", "sizechange",
             "colorchange", "oscillateposition", "oscillatealpha", "oscillatesize",
-            "turbulence", "vortex", "vortex_v2", "remapvalue", "controlpointattract"
+            "turbulence", "vortex", "vortex_v2", "remapvalue", "controlpointattract",
+            "capvelocity", "maintaindistancebetweencontrolpoints", "maintaindistancetocontrolpoint",
+            "reducemovementnearcontrolpoint", "boids", "collisionplane", "collisionsphere",
+            "collisionquad"
         ])
 
         // Parse maxCount with clamping
@@ -1165,6 +1281,47 @@ public struct ParticlePreset: Equatable, Sendable {
                 boundsStart: boundsStart, boundsEnd: boundsEnd,
                 mirror: mirror, speedMin: speedMin, speedMax: speedMax)
 
+        case "mapsequencebetweencontrolpoints":
+            // 시작/끝 번호를 안 적으면 0번/1번이다(실물 thunderbolt.json이
+            // 이렇게 생략한다 — 다른 제어점 초기화자들의 "0번" 관례를 그대로
+            // 확장했다: 시작이 0번이면 끝은 다음 번호).
+            let controlPointStart = getInt(dict["controlpointstart"]) ?? 0
+            let controlPointEnd = getInt(dict["controlpointend"]) ?? 1
+            // count 0은 "안 적음"의 신호로 두고(ParticleSystem이 maxCount로
+            // 채운다) 음수·비유한은 버린다.
+            let rawCount = num(dict, "count", 0) ?? 0
+            let count = rawCount.isFinite && rawCount > 0 ? rawCount : 0
+            let hasArc = (getDouble(dict["arcamount"]) ?? 0) != 0
+            return .mapSequenceBetweenControlPoints(
+                controlPointStart: controlPointStart, controlPointEnd: controlPointEnd,
+                count: count, hasArc: hasArc)
+
+        case "colorlist":
+            // 실물 색은 이미 0~1이다(colorrandom의 0~255와 다르다) — 그대로 쓴다.
+            guard let raw = dict["colors"] as? [Any] else { return nil }
+            let colors = raw.compactMap { ($0 as? String).flatMap(Vec3.parse) }
+            guard !colors.isEmpty else { return nil }
+            return .colorList(colors: colors)
+
+        case "hsvcolorrandom":
+            let hueMin = getDouble(dict["huemin"]) ?? 0
+            let hueMax = getDouble(dict["huemax"]) ?? 1
+            let hueSteps = getInt(dict["huesteps"]) ?? 0
+            let saturationMin = getDouble(dict["saturationmin"]) ?? 1
+            let saturationMax = getDouble(dict["saturationmax"]) ?? 1
+            let valueMin = getDouble(dict["valuemin"]) ?? 1
+            let valueMax = getDouble(dict["valuemax"]) ?? 1
+            return .hsvColorRandom(
+                hueMin: hueMin, hueMax: hueMax, hueSteps: Swift.max(0, hueSteps),
+                saturationMin: saturationMin, saturationMax: saturationMax,
+                valueMin: valueMin, valueMax: valueMax)
+
+        case "positionoffsetrandom":
+            let distance = getDouble(dict["distance"]) ?? 0
+            let scale = getDouble(dict["scale"]) ?? 0.01
+            let timeScale = getDouble(dict["timescale"]) ?? 0
+            return .positionOffsetRandom(distance: distance, scale: scale, timeScale: timeScale)
+
         default:
             return nil
         }
@@ -1324,6 +1481,86 @@ public struct ParticlePreset: Equatable, Sendable {
             let scale = getDouble(dict["scale"]) ?? 0
             let threshold = getDouble(dict["threshold"]) ?? 0
             return .controlPointAttract(controlPoint: controlPoint, origin: origin, scale: scale, threshold: threshold)
+
+        case "capvelocity":
+            guard let maxSpeed = getDouble(dict["maxspeed"]) else { return nil }
+            let blendInStart = getDouble(dict["blendinstart"]) ?? 0
+            let blendInEnd = getDouble(dict["blendinend"]) ?? blendInStart
+            return .capVelocity(
+                maxSpeed: maxSpeed, blendInStart: blendInStart, blendInEnd: blendInEnd)
+
+        case "maintaindistancebetweencontrolpoints":
+            return .maintainDistanceBetweenControlPoints
+
+        case "maintaindistancetocontrolpoint":
+            let controlPoint: Int
+            if dict["controlpoint"] == nil {
+                controlPoint = 0
+            } else if let parsed = getInt(dict["controlpoint"]) {
+                controlPoint = parsed
+            } else {
+                return nil
+            }
+            let variableStrength = getDouble(dict["variablestrength"]) ?? 0
+            return .maintainDistanceToControlPoint(
+                controlPoint: controlPoint, variableStrength: variableStrength)
+
+        case "reducemovementnearcontrolpoint":
+            let controlPoint: Int
+            if dict["controlpoint"] == nil {
+                controlPoint = 0
+            } else if let parsed = getInt(dict["controlpoint"]) {
+                controlPoint = parsed
+            } else {
+                return nil
+            }
+            let distanceInner = getDouble(dict["distanceinner"]) ?? 0
+            let distanceOuter = getDouble(dict["distanceouter"]) ?? 0
+            let reductionInner = getDouble(dict["reductioninner"]) ?? 0
+            let reductionOuter = getDouble(dict["reductionouter"]) ?? 0
+            return .reduceMovementNearControlPoint(
+                controlPoint: controlPoint, distanceInner: distanceInner,
+                distanceOuter: distanceOuter, reductionInner: reductionInner,
+                reductionOuter: reductionOuter)
+
+        case "boids":
+            let cohesionFactor = getDouble(dict["cohesionfactor"]) ?? 0
+            let separationFactor = getDouble(dict["separationfactor"]) ?? 0
+            let alignmentFactor = getDouble(dict["alignmentfactor"]) ?? 0
+            let neighborThreshold = getDouble(dict["neighborthreshold"]) ?? 0
+            return .boids(
+                cohesionFactor: cohesionFactor, separationFactor: separationFactor,
+                alignmentFactor: alignmentFactor, neighborThreshold: neighborThreshold)
+
+        case "collisionplane":
+            let axis = (dict["axis"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 0, y: 1, z: 0)
+            let distance = getDouble(dict["distance"]) ?? 0
+            let bounceFactor = getDouble(dict["bouncefactor"]) ?? 1
+            let behavior = ParticleCollisionBehavior.parse(
+                dict["collisionbehavior"], bounceFactor: bounceFactor)
+            return .collisionPlane(axis: axis, distance: distance, behavior: behavior)
+
+        case "collisionsphere":
+            let origin = (dict["origin"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 0, y: 0, z: 0)
+            // 반지름은 실물에 한 번도 안 적혀 있다 — 0(충돌 안 함)이 지어내지
+            // 않는 유일한 기본값이다.
+            let radius = getDouble(dict["radius"]) ?? 0
+            let bounceFactor = getDouble(dict["bouncefactor"]) ?? 1
+            let behavior = ParticleCollisionBehavior.parse(
+                dict["collisionbehavior"], bounceFactor: bounceFactor)
+            return .collisionSphere(origin: origin, radius: radius, behavior: behavior)
+
+        case "collisionquad":
+            let origin = (dict["origin"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 0, y: 0, z: 0)
+            let axis = (dict["axis"] as? String).flatMap(Vec3.parse) ?? Vec3(x: 0, y: 1, z: 0)
+            guard let sizeText = dict["size"] as? String else { return nil }
+            let sizeParts = sizeText.split(separator: " ").compactMap { Double($0) }
+            guard sizeParts.count == 2, sizeParts.allSatisfy(\.isFinite) else { return nil }
+            let size = Vec2(x: sizeParts[0], y: sizeParts[1])
+            let bounceFactor = getDouble(dict["bouncefactor"]) ?? 1
+            let behavior = ParticleCollisionBehavior.parse(
+                dict["collisionbehavior"], bounceFactor: bounceFactor)
+            return .collisionQuad(origin: origin, axis: axis, size: size, behavior: behavior)
 
         default:
             return nil

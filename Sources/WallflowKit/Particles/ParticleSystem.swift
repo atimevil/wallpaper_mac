@@ -25,6 +25,16 @@ public struct Particle: Equatable, Sendable {
     /// 태어난 차례. 슬롯은 재사용돼 버퍼 순서가 스폰 순서가 아니다 — 로프가
     /// `age` 동률(같은 프레임에 여럿 태어남)을 가를 때만 쓴다.
     public var spawnSequence: Int = 0
+    /// `mapSequenceBetweenControlPoints`가 태어날 때 고른 두 제어점 사이의
+    /// 자리(0~1)와 그 제어점 번호. `nil`이면 그 초기화자를 안 썼다는 뜻이라
+    /// `maintainDistanceBetweenControlPoints`가 아무것도 안 한다.
+    public var sequenceFraction: Double?
+    public var sequenceControlPointStart: Int = 0
+    public var sequenceControlPointEnd: Int = 1
+    /// `maintainDistanceToControlPoint`가 처음 만난 프레임(태어난 순간)에 잰
+    /// 제어점까지의 거리. 목표 거리를 적는 필드가 없어 이것을 기준으로 삼는다
+    /// (타입 선언부 주석 참고).
+    public var maintainedDistanceToControlPoint: Double?
 
     public var isAlive: Bool {
         age < lifetime
@@ -151,11 +161,32 @@ public final class ParticleSystem {
                case .unsupported(let name) = output {
                 unimplemented.insert("remapvalue(\(name))")
             }
+            if case .maintainDistanceToControlPoint(let point, _) = op,
+               Self.unresolvableControlPoint(point, in: preset) {
+                unimplemented.insert("maintaindistancetocontrolpoint(제어점 \(point))")
+            }
+            if case .reduceMovementNearControlPoint(let point, _, _, _, _) = op,
+               Self.unresolvableControlPoint(point, in: preset) {
+                unimplemented.insert("reducemovementnearcontrolpoint(제어점 \(point))")
+            }
         }
         for initializer in preset.initializers {
             if case .mapSequenceAroundControlPoint(let point, _, _, _, _, _, _) = initializer,
                Self.unresolvableControlPoint(point, in: preset) {
                 unimplemented.insert("mapsequencearoundcontrolpoint(제어점 \(point))")
+            }
+            if case .mapSequenceBetweenControlPoints(let start, let end, _, let hasArc) = initializer {
+                if Self.unresolvableControlPoint(start, in: preset) {
+                    unimplemented.insert("mapsequencebetweencontrolpoints(제어점 \(start))")
+                }
+                if Self.unresolvableControlPoint(end, in: preset) {
+                    unimplemented.insert("mapsequencebetweencontrolpoints(제어점 \(end))")
+                }
+                // arcamount는 실물 값만으로 정확한 공식을 확정할 수 없어
+                // 반영하지 않는다(타입 선언부 주석 참고) — 적혀 있으면 남긴다.
+                if hasArc {
+                    unimplemented.insert("mapsequencebetweencontrolpoints(arc)")
+                }
             }
         }
         for emitter in preset.emitters {
@@ -716,6 +747,76 @@ public final class ParticleSystem {
                 x: speedMin.x + random.next() * (speedMax.x - speedMin.x),
                 y: speedMin.y + random.next() * (speedMax.y - speedMin.y),
                 z: speedMin.z + random.next() * (speedMax.z - speedMin.z))
+
+        case .mapSequenceBetweenControlPoints(let cpStart, let cpEnd, let rawCount, _):
+            let start = controlPointPosition(cpStart) ?? originOffset
+            let end = controlPointPosition(cpEnd) ?? originOffset
+            // count를 안 적으면(실물 대부분) 선 전체에 maxCount개를 고르게 깐다
+            // — 타입 선언부 주석 참고.
+            let count = rawCount > 0 ? rawCount : Double(preset.maxCount)
+            let slot = Self.nextSequenceSlot(&sequenceCounters[index, default: 0], count: count,
+                                             mirror: false)
+            let fraction = count > 0 ? slot / count : 0
+            particle.position = Vec3(
+                x: start.x + (end.x - start.x) * fraction,
+                y: start.y + (end.y - start.y) * fraction,
+                z: start.z + (end.z - start.z) * fraction)
+            // maintainDistanceBetweenControlPoints가 매 프레임 다시 이 자리로
+            // 당길 수 있게 저장해 둔다.
+            particle.sequenceFraction = fraction
+            particle.sequenceControlPointStart = cpStart
+            particle.sequenceControlPointEnd = cpEnd
+
+        case .colorList(let colors):
+            // 실물 값이 이미 0~1이다 — colorrandom과 달리 255로 안 나눈다.
+            let pick = colors[Int(random.next() * Double(colors.count)) % colors.count]
+            particle.color = pick
+
+        case .hsvColorRandom(let hueMin, let hueMax, let hueSteps, let saturationMin,
+                             let saturationMax, let valueMin, let valueMax):
+            var hue = hueMin + random.next() * (hueMax - hueMin)
+            if hueSteps > 0 {
+                hue = (hue * Double(hueSteps)).rounded(.down) / Double(hueSteps)
+            }
+            let saturation = saturationMin + random.next() * (saturationMax - saturationMin)
+            let value = valueMin + random.next() * (valueMax - valueMin)
+            particle.color = Self.hsvToRGB(hue: hue, saturation: saturation, value: value)
+
+        case .positionOffsetRandom(let distance, let scale, let timeScale):
+            // scale이 0이면(실물 thunderbolt.json) 공간 항이 사라져 잡음이
+            // 자리와 무관하게 시간에만 따라 흔들린다 — 타입 선언부 주석 참고.
+            // turbulence 연산자와 같은 시간 배율(0.01)을 쓴다.
+            let t = elapsed * timeScale * 0.01
+            let field = Vec3(
+                x: Self.noise(particle.position.x * scale, particle.position.y * scale,
+                              particle.position.z * scale + t),
+                y: Self.noise(particle.position.y * scale + 19.7,
+                              particle.position.z * scale, particle.position.x * scale + t),
+                z: Self.noise(particle.position.z * scale + 43.3,
+                              particle.position.x * scale, particle.position.y * scale + t))
+            particle.position = Vec3(
+                x: particle.position.x + field.x * distance,
+                y: particle.position.y + field.y * distance,
+                z: particle.position.z + field.z * distance)
+        }
+    }
+
+    /// HSV(0~1 셋 다)를 RGB(0~1)로 바꾼다. 표준 공식 그대로다.
+    static func hsvToRGB(hue: Double, saturation: Double, value: Double) -> Vec3 {
+        guard saturation > 0 else { return Vec3(x: value, y: value, z: value) }
+        let h = (hue - hue.rounded(.down)) * 6
+        let i = Int(h.rounded(.down))
+        let f = h - h.rounded(.down)
+        let p = value * (1 - saturation)
+        let q = value * (1 - saturation * f)
+        let t = value * (1 - saturation * (1 - f))
+        switch i % 6 {
+        case 0: return Vec3(x: value, y: t, z: p)
+        case 1: return Vec3(x: q, y: value, z: p)
+        case 2: return Vec3(x: p, y: value, z: t)
+        case 3: return Vec3(x: p, y: q, z: value)
+        case 4: return Vec3(x: t, y: p, z: value)
+        default: return Vec3(x: value, y: p, z: q)
         }
     }
 
@@ -734,6 +835,22 @@ public final class ParticleSystem {
     }
 
     private func applyOperators(dt: Double) {
+        // boids는 다른 파티클의 자리·속도를 읽어야 해서 파티클 하나만 보고
+        // 도는 나머지 연산자와 다르다. 이번 프레임 시작 스냅샷으로 미리
+        // 힘을 다 계산해 두고, 아래 루프에서는 더하기만 한다 — 안 그러면
+        // 먼저 갱신된 파티클이 뒤 파티클 계산에 섞여 순서에 따라 결과가
+        // 달라진다. 실물에 boids가 둘 이상인 프리셋은 없어 첫 번째만 쓴다.
+        var boidForce: [Vec3]?
+        for op in preset.operators {
+            if case .boids(let cohesionFactor, let separationFactor, let alignmentFactor,
+                          let neighborThreshold) = op {
+                boidForce = computeBoidForces(
+                    cohesionFactor: cohesionFactor, separationFactor: separationFactor,
+                    alignmentFactor: alignmentFactor, neighborThreshold: neighborThreshold)
+                break
+            }
+        }
+
         for i in 0..<particleBuffer.count {
             guard particleBuffer[i].isAlive else { continue }
 
@@ -744,10 +861,55 @@ public final class ParticleSystem {
             if hasAlphaCurve { particleBuffer[i].alpha = particleBuffer[i].baseAlpha }
             if hasColorCurve { particleBuffer[i].color = particleBuffer[i].baseColor }
 
+            if let boidForce {
+                particleBuffer[i].velocity = Self.add(
+                    particleBuffer[i].velocity, Self.scale(boidForce[i], dt))
+            }
             for op in preset.operators {
                 applyOperator(op, to: &particleBuffer[i], dt: dt)
             }
         }
+    }
+
+    /// 이웃(半threshold 안) 파티클과의 응집·분리·정렬 힘. O(n²) — ponytail: 실물
+    /// `maxcount`가 수백 단위라 문제없지만, 수천 단위 프리셋이 나오면 공간
+    /// 격자로 이웃만 추려야 한다.
+    private func computeBoidForces(
+        cohesionFactor: Double, separationFactor: Double, alignmentFactor: Double,
+        neighborThreshold: Double
+    ) -> [Vec3] {
+        var forces = Array(repeating: Vec3(x: 0, y: 0, z: 0), count: particleBuffer.count)
+        guard neighborThreshold > 0 else { return forces }
+        let thresholdSq = neighborThreshold * neighborThreshold
+        for i in 0..<particleBuffer.count {
+            guard particleBuffer[i].isAlive else { continue }
+            let pi = particleBuffer[i]
+            var centerSum = Vec3(x: 0, y: 0, z: 0)
+            var separationSum = Vec3(x: 0, y: 0, z: 0)
+            var velocitySum = Vec3(x: 0, y: 0, z: 0)
+            var neighborCount = 0
+            for j in 0..<particleBuffer.count where j != i {
+                guard particleBuffer[j].isAlive else { continue }
+                let pj = particleBuffer[j]
+                let delta = Self.subtract(pj.position, pi.position)
+                let distSq = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z
+                guard distSq < thresholdSq, distSq > 1e-9 else { continue }
+                neighborCount += 1
+                centerSum = Self.add(centerSum, pj.position)
+                velocitySum = Self.add(velocitySum, pj.velocity)
+                let dist = distSq.squareRoot()
+                separationSum = Self.subtract(separationSum, Self.scale(delta, 1 / dist))
+            }
+            guard neighborCount > 0 else { continue }
+            let n = Double(neighborCount)
+            let cohesionDir = Self.subtract(Self.scale(centerSum, 1 / n), pi.position)
+            let alignmentDir = Self.subtract(Self.scale(velocitySum, 1 / n), pi.velocity)
+            forces[i] = Self.add(
+                Self.add(Self.scale(cohesionDir, cohesionFactor),
+                        Self.scale(separationSum, separationFactor)),
+                Self.scale(alignmentDir, alignmentFactor))
+        }
+        return forces
     }
 
     private func applyOperator(_ op: ParticleOperator, to particle: inout Particle, dt: Double) {
@@ -1030,6 +1192,165 @@ public final class ParticleSystem {
                 x: particle.velocity.x + delta.x / distance * strength,
                 y: particle.velocity.y + delta.y / distance * strength,
                 z: particle.velocity.z + delta.z / distance * strength)
+
+        case .capVelocity(let maxSpeed, let blendInStart, let blendInEnd):
+            // alphaFade와 같은 "비율 구간" 관례 — 수명의 [blendInStart,
+            // blendInEnd] 사이에서 0→1로 켜진다. 둘이 같으면 그 지점에서 바로
+            // 켠다(실물 thunderbolt_child_spawner.json이 0.2, 0.2).
+            guard particle.lifetime > 0 else { return }
+            let progress = min(max(particle.age / particle.lifetime, 0), 1)
+            let span = blendInEnd - blendInStart
+            let factor = span > 1e-9
+                ? min(max((progress - blendInStart) / span, 0), 1)
+                : (progress >= blendInStart ? 1.0 : 0.0)
+            guard factor > 0 else { return }
+            let speed = Self.length(particle.velocity)
+            guard speed > maxSpeed else { return }
+            // 완전히 안 죈 속력에서 maxSpeed로 factor만큼 섞는다.
+            let limitedSpeed = speed - (speed - maxSpeed) * factor
+            let scale = limitedSpeed / speed
+            particle.velocity = Self.scale(particle.velocity, scale)
+
+        case .maintainDistanceBetweenControlPoints:
+            // 짝인 초기화자(mapSequenceBetweenControlPoints)가 저장해 둔 자리를
+            // 매 프레임 다시 지킨다 — 제어점이 움직이면 그 자리를 따라간다.
+            guard let fraction = particle.sequenceFraction else { return }
+            let start = controlPointPosition(particle.sequenceControlPointStart) ?? originOffset
+            let end = controlPointPosition(particle.sequenceControlPointEnd) ?? originOffset
+            particle.position = Vec3(
+                x: start.x + (end.x - start.x) * fraction,
+                y: start.y + (end.y - start.y) * fraction,
+                z: start.z + (end.z - start.z) * fraction)
+
+        case .maintainDistanceToControlPoint(let controlPoint, let variableStrength):
+            // "태어났을 때의 거리"를 목표로 삼는다 — 필드에 목표 거리가 없어
+            // 유일하게 지어내지 않는 기준점이다. 이 연산자를 처음 만나는
+            // 프레임(태어난 순간)에 그 거리를 저장해 둔다.
+            guard let center = controlPointPosition(controlPoint) else { return }
+            let delta = Self.subtract(particle.position, center)
+            let distance = Self.length(delta)
+            guard distance > 1e-6 else { return }
+            if particle.maintainedDistanceToControlPoint == nil {
+                particle.maintainedDistanceToControlPoint = distance
+            }
+            guard let target = particle.maintainedDistanceToControlPoint else { return }
+            // 목표보다 가까우면(diff>0) 밀어내고, 멀면(diff<0) 당긴다.
+            let diff = target - distance
+            let strength = variableStrength * diff * dt
+            particle.velocity = Self.add(
+                particle.velocity, Self.scale(delta, strength / distance))
+
+        case .reduceMovementNearControlPoint(let controlPoint, let distanceInner,
+                                             let distanceOuter, let reductionInner,
+                                             let reductionOuter):
+            // vortex의 distanceInner/distanceOuter와 같은 보간 관례 —
+            // distanceInner에서 reductionInner, distanceOuter에서 reductionOuter다.
+            guard let center = controlPointPosition(controlPoint) else { return }
+            let distance = Self.length(Self.subtract(particle.position, center))
+            let span = distanceOuter - distanceInner
+            let ratio = span > 1e-9
+                ? min(max((distance - distanceInner) / span, 0), 1) : 1.0
+            let reduction = reductionInner + (reductionOuter - reductionInner) * ratio
+            guard reduction > 0 else { return }
+            let speed = Self.length(particle.velocity)
+            guard speed > 1e-9 else { return }
+            // "reduction"은 초당 줄이는 속력이다(문서화된 공식 없음 — 실물
+            // `reductioninner: 1000`이 속도 단위와 같은 자리수라 드래그로
+            // 읽었다). 0 아래로는 안 내려간다.
+            let newSpeed = max(0, speed - reduction * dt)
+            particle.velocity = Self.scale(particle.velocity, newSpeed / speed)
+
+        case .boids:
+            // 다른 파티클을 봐야 하는 연산자라 여기서는 처리하지 않는다 —
+            // `applyOperators`가 프레임 시작 스냅샷으로 미리 힘을 계산해 얹는다.
+            break
+
+        case .collisionPlane(let axis, let distance, let behavior):
+            let axisLength = Self.length(axis)
+            guard axisLength > 1e-9 else { return }
+            let normal = Self.scale(axis, 1 / axisLength)
+            let signedDistance = Self.dot(particle.position, normal) - distance
+            guard signedDistance < 0 else { return }
+            particle.position = Self.subtract(particle.position, Self.scale(normal, signedDistance))
+            Self.applyCollisionResponse(normal: normal, behavior: behavior, to: &particle)
+
+        case .collisionSphere(let origin, let radius, let behavior):
+            guard radius > 0 else { return }
+            let center = Self.add(origin, originOffset)
+            let delta = Self.subtract(particle.position, center)
+            let dist = Self.length(delta)
+            guard dist < radius, dist > 1e-6 else { return }
+            let normal = Self.scale(delta, 1 / dist)
+            particle.position = Self.add(center, Self.scale(normal, radius))
+            Self.applyCollisionResponse(normal: normal, behavior: behavior, to: &particle)
+
+        case .collisionQuad(let origin, let axis, let size, let behavior):
+            let axisLength = Self.length(axis)
+            guard axisLength > 1e-9 else { return }
+            let normal = Self.scale(axis, 1 / axisLength)
+            let center = Self.add(origin, originOffset)
+            // 평면 위 두 접선축. `ParticleOrientationBasis`와 같은 방식 —
+            // 법선이 월드 업과 거의 평행하면 대신 +X를 씨앗으로 쓴다.
+            let worldUp = Vec3(x: 0, y: 1, z: 0)
+            let seed = abs(normal.y) > 0.999 ? Vec3(x: 1, y: 0, z: 0) : worldUp
+            guard let right = Self.normalize(Self.cross(seed, normal)) else { return }
+            let forward = Self.cross(normal, right)
+            let delta = Self.subtract(particle.position, center)
+            let alongNormal = Self.dot(delta, normal)
+            // 문서: "한쪽 면에서만" 막는다 — 법선이 가리키는 반대쪽에서 온
+            // 파티클만 막는다(collisionPlane과 같은 부호 관례).
+            guard alongNormal < 0 else { return }
+            let alongRight = Self.dot(delta, right)
+            let alongForward = Self.dot(delta, forward)
+            guard abs(alongRight) <= size.x / 2, abs(alongForward) <= size.y / 2 else { return }
+            particle.position = Self.subtract(particle.position, Self.scale(normal, alongNormal))
+            Self.applyCollisionResponse(normal: normal, behavior: behavior, to: &particle)
+        }
+    }
+
+    // MARK: - Vec3 도우미(충돌·거리 유지 연산자가 여럿 쓴다)
+
+    static func length(_ v: Vec3) -> Double {
+        (v.x * v.x + v.y * v.y + v.z * v.z).squareRoot()
+    }
+    static func dot(_ a: Vec3, _ b: Vec3) -> Double { a.x * b.x + a.y * b.y + a.z * b.z }
+    static func cross(_ a: Vec3, _ b: Vec3) -> Vec3 {
+        Vec3(x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x)
+    }
+    static func add(_ a: Vec3, _ b: Vec3) -> Vec3 {
+        Vec3(x: a.x + b.x, y: a.y + b.y, z: a.z + b.z)
+    }
+    static func subtract(_ a: Vec3, _ b: Vec3) -> Vec3 {
+        Vec3(x: a.x - b.x, y: a.y - b.y, z: a.z - b.z)
+    }
+    static func scale(_ v: Vec3, _ s: Double) -> Vec3 { Vec3(x: v.x * s, y: v.y * s, z: v.z * s) }
+    static func normalize(_ v: Vec3) -> Vec3? {
+        let len = length(v)
+        guard len > 1e-9, len.isFinite else { return nil }
+        return scale(v, 1 / len)
+    }
+
+    /// 충돌 네 연산자가 공유하는 반응 — 반사/미끄러짐/정지/삭제.
+    /// `normal`은 충돌면에서 파티클 쪽을 향하는 단위 벡터다.
+    static func applyCollisionResponse(
+        normal: Vec3, behavior: ParticleCollisionBehavior, to particle: inout Particle
+    ) {
+        let vn = dot(particle.velocity, normal)
+        // 이미 면에서 멀어지는 중이면(같은 프레임에 두 번 안 걸리게) 아무것도
+        // 안 한다.
+        guard vn < 0 else { return }
+        switch behavior {
+        case .bounce(let bounceFactor):
+            let reflected = subtract(particle.velocity, scale(normal, 2 * vn))
+            particle.velocity = scale(reflected, bounceFactor)
+        case .slide:
+            particle.velocity = subtract(particle.velocity, scale(normal, vn))
+        case .stop:
+            particle.velocity = Vec3(x: 0, y: 0, z: 0)
+        case .delete:
+            // 다음 프레임 시작(`removeDeadParticles`)에서 onDeath 자식을 낳고
+            // 슬롯을 돌려준다 — 다른 수명 만료와 같은 경로다.
+            particle.age = particle.lifetime
         }
     }
 
