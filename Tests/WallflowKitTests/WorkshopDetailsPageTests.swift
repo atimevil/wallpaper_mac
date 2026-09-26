@@ -43,4 +43,12 @@ final class WorkshopDetailsPageTests: XCTestCase {
         func item(_ id: String) -> WorkshopItem { WorkshopItem(id: id, title: id, sizeBytes: 0, previewURL: nil, tags: []) }
         XCTAssertEqual(WorkshopPaging.merge([item("1"), item("2")], [item("2"), item("3")]).map(\.id), ["1", "2", "3"])
     }
+    func testStarSymbolsWholeHalfAndEmpty() {
+        XCTAssertEqual(StarRating.symbols(for: 4),
+                       ["star.fill", "star.fill", "star.fill", "star.fill", "star"])
+        XCTAssertEqual(StarRating.symbols(for: 3.5),
+                       ["star.fill", "star.fill", "star.fill", "star.leadinghalf.filled", "star"])
+        XCTAssertEqual(StarRating.symbols(for: 0), Array(repeating: "star", count: 5))
+        XCTAssertEqual(StarRating.symbols(for: 5), Array(repeating: "star.fill", count: 5))
+    }
 }

@@ -76,6 +76,20 @@ public enum WorkshopText {
     }
 }
 
+/// 0~5점(0.5 단위) 평점을 별 5개짜리 SF Symbol 이름으로 바꾼다.
+/// 반올림은 0.25 미만은 버리고 0.75 이상은 올린다(0.25~0.75는 반별).
+public enum StarRating {
+    public static func symbols(for rating: Double) -> [String] {
+        let clamped = min(max(rating, 0), 5)
+        return (0..<5).map { index in
+            let remaining = clamped - Double(index)
+            if remaining >= 0.75 { return "star.fill" }
+            if remaining >= 0.25 { return "star.leadinghalf.filled" }
+            return "star"
+        }
+    }
+}
+
 /// 무한 스크롤 페이지를 이어붙인다. id 중복은 먼저 온 것을 지키고, 순서는 유지한다.
 public enum WorkshopPaging {
     public static func merge(_ existing: [WorkshopItem], _ page: [WorkshopItem]) -> [WorkshopItem] {
