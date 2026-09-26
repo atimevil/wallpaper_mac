@@ -67,10 +67,8 @@ final class WorkshopWindowController: NSWindowController {
     private var detailsPageInFlight: Set<String> = []
 
     private let loginButton = NSButton(title: "스팀 로그인", target: nil, action: nil)
-    private let removeButton = NSButton(title: "지우기", target: nil, action: nil)
     private let accountField = NSTextField()
     fileprivate let statusLabel = NSTextField(labelWithString: "")
-    private let downloadButton = NSButton(title: "받아서 추가", target: nil, action: nil)
     private let spinner = NSProgressIndicator()
 
     /// 창작마당 항목 누적 목록. 무한 스크롤이라 페이지를 붙여 나간다
@@ -175,6 +173,13 @@ final class WorkshopWindowController: NSWindowController {
         let detailWidth = detailContainer.widthAnchor.constraint(equalToConstant: 340)
         detailWidth.priority = .defaultHigh
         detailWidth.isActive = true
+        // 위 340은 그냥 "바랐으면 하는" 값이라 항목을 고르면 미리보기·제목·태그
+        // 같은 내용이 요구하는 폭에 밀려 쉽게 어겨진다 — 필수(required)로
+        // 최소·최대를 박아 어떤 내용이 와도 300~420을 벗어나지 못하게 한다.
+        NSLayoutConstraint.activate([
+            detailContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 300),
+            detailContainer.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
+        ])
         // 사이드바·상세는 창이 늘어나도 그대로다 — 늘어난 자리는 격자가 가져간다.
         splitView.setHoldingPriority(.dragThatCannotResizeWindow, forSubviewAt: 0)
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
@@ -202,6 +207,8 @@ final class WorkshopWindowController: NSWindowController {
         // 검색은 Enter로만 돈다. 글자마다 요청하면 스팀에 부담이고 결과가 튄다.
         searchField.sendsWholeSearchString = true
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // 좁은 창에서 다른 도구(정렬·칸 크기)에 밀려 120pt까지 찌그러지던 것을 막는다.
+        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
 
         for sort in WorkshopSort.allCases { sortPopup.addItem(withTitle: sort.label) }
         sortPopup.target = self
@@ -290,24 +297,16 @@ final class WorkshopWindowController: NSWindowController {
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
 
-        downloadButton.target = self
-        downloadButton.action = #selector(download)
-        downloadButton.keyEquivalent = "\r"
-
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         statusLabel.textColor = .secondaryLabelColor
-
-        removeButton.target = self
-        removeButton.action = #selector(removeSelected)
 
         applyButton.target = self
         applyButton.action = #selector(applySelected)
         applyButton.keyEquivalent = "\r"
 
-        let bottom = NSStackView(views: [
-            spinner, statusLabel, removeButton, applyButton, downloadButton,
-        ])
+        // "지우기"·"받아서 추가"는 뺐다 — 상세 패널의 버튼이 같은 일을 한다.
+        let bottom = NSStackView(views: [spinner, statusLabel, applyButton])
         bottom.orientation = .horizontal
         bottom.spacing = 8
 
@@ -355,7 +354,6 @@ final class WorkshopWindowController: NSWindowController {
         }
         searchField.placeholderString = isInstalled ? "라이브러리에서 찾기" : "창작마당 검색"
         applyButton.isHidden = !isInstalled
-        downloadButton.isHidden = isInstalled
 
         if isInstalled {
             reloadLibrary()
@@ -884,11 +882,7 @@ final class WorkshopWindowController: NSWindowController {
     }
 
     private func updateDownloadButton() {
-        let entry = selectedEntry
-        downloadButton.isEnabled = entry != nil && !isDownloading && tab != .installed
         applyButton.isEnabled = selectedLibraryItem != nil
-        removeButton.isEnabled = (entry?.installed ?? false) && !isDownloading
-        downloadButton.title = (entry?.installed ?? false) ? "다시 받기" : "받아서 추가"
     }
 
     private func present(title: String, message: String) {
