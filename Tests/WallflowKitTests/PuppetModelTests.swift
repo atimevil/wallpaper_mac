@@ -179,6 +179,82 @@ final class PuppetModelTests: XCTestCase {
         XCTAssertThrowsError(try PuppetModel.parse(data.prefix(60)))
     }
 
+    /// 실물 `MDLV0017` 퍼펫(WLOP DOME). 정점 배치는 `MDLV0023`과 같지만
+    /// 뼈대·애니메이션 표식이 `MDLS0002`·`MDLA0004`로 다르다 — 뼈·애니메이션이
+    /// 실제로 읽혀야, 즉 바이트를 맞춰 확인했다는 증거가 된다(그냥 정점만
+    /// 읽고 표식을 못 찾으면 뼈 0개로도 조용히 통과해 버린다).
+    func testRealMDLV0017PuppetParsesSkeletonAndAnimation() throws {
+        guard let root = ProcessInfo.processInfo.environment["WALLFLOW_TEST_SCENES"] else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let url = URL(fileURLWithPath: root).appendingPathComponent("3113287126/scene.pkg")
+        guard let raw = try? Data(contentsOf: url) else { throw XCTSkip("3113287126 없음") }
+        let reader = try PkgReader(data: raw)
+        let model = try PuppetModel.parse(try reader.data(for: "models/WLOP DOME Planet final_puppet.mdl"))
+        XCTAssertEqual(model.materials, ["materials/WLOP DOME Planet final.json"])
+        XCTAssertEqual(model.vertices.count, 3_533)
+        XCTAssertEqual(model.bones.count, 1, "MDLS0002 표식을 못 찾으면 여기가 0으로 조용히 빠진다")
+        XCTAssertEqual(model.animations.count, 1, "MDLA0004 표식을 못 찾으면 여기가 0으로 조용히 빠진다")
+        // 시각 0 = 바인드 자세 → 정점이 제자리.
+        let rest = model.skinnedPositions(model.skinMatrices(
+            animationID: model.animations[0].id, time: 0))
+        for (a, b) in zip(rest, model.vertices.map(\.position)) {
+            XCTAssertEqual(a.x, b.x, accuracy: 0.5)
+            XCTAssertEqual(a.y, b.y, accuracy: 0.5)
+        }
+
+        // 실물 `WLOP DOME GIRL FINAL PARTS_puppet.mdl`은 뼈대 청크(64뼈)와
+        // 애니메이션 청크 사이에 `MDAT0001`(파티클 부착점) 청크가 끼어 있어
+        // `animAt`가 애니메이션 청크를 직접 가리키지 않는다 — 뒤에서 표식을
+        // 다시 찾는 길로 가야 애니메이션이 읽힌다.
+        let girl = try PuppetModel.parse(
+            try reader.data(for: "models/WLOP DOME GIRL FINAL PARTS_puppet.mdl"))
+        XCTAssertEqual(girl.bones.count, 64)
+        XCTAssertGreaterThan(girl.animations.count, 0, "MDAT 청크를 건너뛰고 애니메이션을 찾아야 한다")
+    }
+
+    /// 실물 `MDLV0021` 퍼펫들(fg·光环·六野). 뼈대·애니메이션 표식이 `MDLS0003`이다.
+    func testRealMDLV0021PuppetsParseSkeletonAndAnimation() throws {
+        guard let root = ProcessInfo.processInfo.environment["WALLFLOW_TEST_SCENES"] else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let cases: [(item: String, path: String, bones: Int, vertices: Int)] = [
+            ("3324051356", "models/fg_puppet.mdl", 17, 549),
+            ("3422426571", "models/光环_puppet.mdl", 1, 196),
+            ("3422426571", "models/六野_puppet.mdl", 44, 8_634),
+        ]
+        for (item, path, boneCount, vertexCount) in cases {
+            let url = URL(fileURLWithPath: root).appendingPathComponent("\(item)/scene.pkg")
+            guard let raw = try? Data(contentsOf: url) else { throw XCTSkip("\(item) 없음") }
+            let reader = try PkgReader(data: raw)
+            let model = try PuppetModel.parse(try reader.data(for: path))
+            XCTAssertEqual(model.vertices.count, vertexCount, path)
+            XCTAssertEqual(model.bones.count, boneCount, path)
+            XCTAssertGreaterThan(model.animations.count, 0, path)
+        }
+    }
+
+    /// 실물 `fish2-redraw_puppet.mdl`(`MDLV0023`, 애니메이션 3개). 애니메이션
+    /// 사이 35바이트 여백을 안 건너뛰면 둘째부터 머리를 엉뚱한 자리에서 읽어
+    /// id·fps·트랙 수가 다 깨진다 — `MDLV0021`을 조사하다 걸린, 이미 지원하는
+    /// `MDLV0023`에도 있던 결함이다.
+    func testRealMultiAnimationPuppetSkipsTrailerBetweenAnimations() throws {
+        guard let root = ProcessInfo.processInfo.environment["WALLFLOW_TEST_SCENES"] else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let url = URL(fileURLWithPath: root).appendingPathComponent("3441873795/scene.pkg")
+        guard let raw = try? Data(contentsOf: url) else { throw XCTSkip("3441873795 없음") }
+        let reader = try PkgReader(data: raw)
+        let model = try PuppetModel.parse(try reader.data(for: "models/fish2-redraw_puppet.mdl"))
+        XCTAssertEqual(model.animations.count, 3)
+        // 깨졌을 때는 fps가 0이 되거나 NaN 근처로 튀었다.
+        for animation in model.animations {
+            XCTAssertGreaterThan(animation.fps, 0, animation.name)
+            XCTAssertGreaterThan(animation.frameCount, 0, animation.name)
+            XCTAssertFalse(animation.tracks.isEmpty, animation.name)
+        }
+    }
+
     /// 실물 눈 깜빡임 메시. 뼈 둘, 300프레임 되풀이, 첫 프레임은 바인드와 같다.
     func testRealBlinkPuppetParses() throws {
         guard let root = ProcessInfo.processInfo.environment["WALLFLOW_TEST_SCENES"] else {
