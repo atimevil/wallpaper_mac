@@ -421,6 +421,16 @@ public struct SceneLayer: Equatable, Sendable {
     public let content: LayerContent
     /// 이 레이어에 걸린 이펙트들. 순서대로 이어서 건다.
     public let effects: [LayerEffect]
+    /// 합성 레이어(`.composition`)가 `_rt_FullFrameBuffer`로 그 지점까지 그려진
+    /// 화면을 실제로 받을지. 기본 true(WE 기본값과 같다).
+    ///
+    /// `false`면 이펙트 체인의 입구가 **빈 투명 텍스처**를 받는다 — 화면이 아니다.
+    /// 실물 음반 커버 씬(3299228616)의 "Bar 3"가 이 경우다: 오디오 바 이펙트는
+    /// (스타일이 안 맞아) 꺼져 있고 남은 `scroll` 이펙트는 알파를 전혀 안 건드려
+    /// 입력을 그대로 불투명하게 돌려준다. `copybackground`가 없으면(기본 true)
+    /// 그 입력이 진짜 화면(시계 글자 포함)이라 시계를 통째로 덮어 버린다 —
+    /// `false`를 지키면 입력이 애초에 비어 있어 여전히 투명하게 남는다.
+    public let copyBackground: Bool
     /// `visible`/`alpha`에 붙은 스크립트 본문들. 미디어 위젯이 여기서 스스로 숨는다.
     public let displayScripts: [DisplayScript]
     /// 스크립트가 붙어 있지만 우리가 아직 돌리지 못하는 속성 이름들.
@@ -471,8 +481,10 @@ public struct SceneLayer: Equatable, Sendable {
         parentID: Int? = nil,
         localVisible: Bool? = nil,
         anchorOffset: Vec2 = Vec2(x: 0, y: 0),
-        animations: [String: PropertyAnimation] = [:]
+        animations: [String: PropertyAnimation] = [:],
+        copyBackground: Bool = true
     ) {
+        self.copyBackground = copyBackground
         self.puppet = puppet
         self.parentID = parentID
         self.localVisible = localVisible ?? visible
@@ -510,7 +522,7 @@ public struct SceneLayer: Equatable, Sendable {
             colorBlendMode: colorBlendMode, brightness: brightness,
             scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
             puppet: puppet, parentID: parentID, localVisible: localVisible,
-            anchorOffset: anchorOffset, animations: animations)
+            anchorOffset: anchorOffset, animations: animations, copyBackground: copyBackground)
     }
 
     /// 스크립트와 오브젝트 자체 변환을 붙인 사본. 나머지는 그대로다.
@@ -525,7 +537,7 @@ public struct SceneLayer: Equatable, Sendable {
             colorBlendMode: colorBlendMode, brightness: brightness,
             scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
             puppet: puppet, parentID: parentID, localVisible: localVisible,
-            anchorOffset: anchorOffset, animations: animations)
+            anchorOffset: anchorOffset, animations: animations, copyBackground: copyBackground)
     }
 
     /// 타임라인 애니메이션을 붙인 사본. 나머지는 그대로다.
@@ -538,7 +550,7 @@ public struct SceneLayer: Equatable, Sendable {
             colorBlendMode: colorBlendMode, brightness: brightness,
             scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
             puppet: puppet, parentID: parentID, localVisible: localVisible,
-            anchorOffset: anchorOffset, animations: animations)
+            anchorOffset: anchorOffset, animations: animations, copyBackground: copyBackground)
     }
 }
 

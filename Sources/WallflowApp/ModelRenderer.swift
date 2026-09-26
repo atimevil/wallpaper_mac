@@ -74,7 +74,12 @@ final class ModelRenderer {
         clearColor: SIMD4<Float> = SIMD4(0, 0, 0, 1),
         ambient: SIMD3<Float> = SIMD3(repeating: 0.302),
         skylight: SIMD3<Float> = SIMD3(repeating: 1),
-        lights: [(origin: Vec3, angles: Vec3, info: LightInfo)] = []
+        lights: [(origin: Vec3, angles: Vec3, info: LightInfo)] = [],
+        /// 씬의 `general.hdr`. 켜져 있으면 재질 셰이더의 `HDR` 콤보를 켜고
+        /// (`common_pbr_2.h`의 `CombineLighting` `#if HDR` 분기 — 밝기를 곱하고
+        /// 이미시브 오버브라이트를 더한다), 파이프라인 색 포맷을 `rgba16Float`로
+        /// 만들어 그 값이 1을 넘어도 오프스크린에서 안 잘리게 한다.
+        hdr: Bool = false
     ) throws {
         self.ambient = ambient
         self.skylight = skylight
@@ -144,6 +149,10 @@ final class ModelRenderer {
         let directionalLight = lights.first { $0.info.kind == .directional }
         if pointLight != nil { combos["LIGHTS_POINT"] = 1 }
         if directionalLight != nil { combos["LIGHTS_DIRECTIONAL"] = 1 }
+        // `#define HDR 0`은 절대 넣지 않는다 — `common_blending.h`는 `#ifdef HDR`를
+        // 쓰므로, 0을 정의하면 정의 자체가 있다는 뜻이 되어 비HDR 씬의 동작이
+        // 바뀐다. 값을 안 주는 것과 0을 주는 것이 다르다.
+        if hdr { combos["HDR"] = 1 }
         self.pointLight = pointLight
         self.directionalLight = directionalLight
         let defines = combos.sorted { $0.key < $1.key }
@@ -159,7 +168,7 @@ final class ModelRenderer {
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = vertexFunction
         descriptor.fragmentFunction = fragmentFunction
-        descriptor.colorAttachments[0].pixelFormat = MetalCompositor.colorPixelFormat
+        descriptor.colorAttachments[0].pixelFormat = hdr ? .rgba16Float : MetalCompositor.colorPixelFormat
         descriptor.colorAttachments[0].isBlendingEnabled = true
         descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
         descriptor.colorAttachments[0].destinationRGBBlendFactor =
@@ -332,6 +341,32 @@ final class ModelRenderer {
         return [t.columns.0, t.columns.1, t.columns.2, t.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] }
     }
 
+    private static func linear3x3(_ world: simd_float4x4) -> simd_float3x3 {
+        simd_float3x3(
+            SIMD3(world.columns.0.x, world.columns.0.y, world.columns.0.z),
+            SIMD3(world.columns.1.x, world.columns.1.y, world.columns.1.z),
+            SIMD3(world.columns.2.x, world.columns.2.y, world.columns.2.z))
+    }
+
+    /// `g_NormalModelMatrix`(`mat3`, `generic4.vert`가 `mul(localNormal, ...)`로
+    /// 쓴다). world의 3x3(선형) 부분의 **역행렬**을 준다 — 전치는 안 한다.
+    ///
+    /// 이유: 보통 표기(열벡터 `M*v`)에서 법선은 `(M^-1)^T * n`으로 옮긴다(비균등
+    /// 배율에서 법선이 안 비뚤어지려면 역전치가 필요하다). 그런데 이 셰이더는
+    /// 행벡터 관례라 `n * G`로 곱한다 — `v*G`는 `G^T*v`(열벡터)와 같으므로,
+    /// `G^T = (M^-1)^T`가 되려면 `G = M^-1`이어야 한다. `Self.floats(world)`가
+    /// `g_ModelMatrix`에 전치를 **한 번만** 넣는 것과 같은 이유(같은 행벡터
+    /// 관례)다. 이 유니폼을 빼먹으면(예전에 그랬다) 값이 0인 행렬로 남아
+    /// `normalize(vec3(0))`가 NaN을 내고, 그 NaN이 조명 전체에 번져 구가 텍스처
+    /// 없이 새하얗게 뜬다 — 토성 구가 그렇게 뜬 진짜 원인 중 하나였다(남은
+    /// 밝기 편차는 별개 사안이다. 아래 커밋 메시지 참고).
+    private static func normalMatrixFloats(_ world: simd_float4x4) -> [Float] {
+        let m3 = linear3x3(world)
+        // 특이 행렬(배율 0)은 못 뒤집는다 — 항등으로 물러나 NaN을 안 낸다.
+        let inv = abs(simd_determinant(m3)) > 1e-8 ? simd_inverse(m3) : matrix_identity_float3x3
+        return [inv.columns.0, inv.columns.1, inv.columns.2].flatMap { [$0.x, $0.y, $0.z] }
+    }
+
     func encode(into encoder: MTLRenderCommandEncoder, world: simd_float4x4,
                 viewProjection: simd_float4x4, alpha: Float, time: Float) {
         guard indexCount > 0 else { return }
@@ -339,6 +374,7 @@ final class ModelRenderer {
         let eye = eyeProvider()
         var engine: [String: [Float]] = [
             "g_ModelMatrix": Self.floats(world),
+            "g_NormalModelMatrix": Self.normalMatrixFloats(world),
             "g_ViewProjectionMatrix": Self.floats(viewProjection),
             "g_ModelViewProjectionMatrix": Self.floats(viewProjection * world),
             "g_EyePosition": [eye.x, eye.y, eye.z],

@@ -335,11 +335,14 @@ enum SceneShaders {
     /// 씬의 `general.bloom`. 밝은 자리를 넓게 퍼뜨려 더한다 — WE 실물 재질이
     /// `#if HDR`에서 `saturate(...)`로 자르고 남는 값을 "overbright"로 흘려보내
     /// 블룸이 그걸 받아 퍼뜨리는 두 단계 파이프라인이다(`common_pbr_2.h`의
-    /// `CombineLighting` 참고). 우리는 오프스크린이 8비트라 그 값을 못 들고
-    /// 다니므로, 이미 그려진 화면에서 문턱값(threshold) 위인 자리를 다시 찾아
-    /// 번지게 하는 한 단계짜리로 흉내 낸다 — 여러 번 내려찍고 흐리는 실물
+    /// `CombineLighting` 참고). `general.hdr`인 씬은 오프스크린이 `rgba16Float`라
+    /// (`MetalCompositor.sceneColorFormat`) 그 1 넘는 값을 그대로 들고 다닐 수
+    /// 있다 — 이미 그려진 화면에서 문턱값(threshold) 위인 자리를 다시 찾아
+    /// 번지게 하는 한 단계짜리로 흉내 낸다. 여러 번 내려찍고 흐리는 실물
     /// 파이프라인보다 거칠지만, 텍스처를 새로 여럿 두지 않고 프레임 하나로
-    /// 끝난다.
+    /// 끝난다. HDR이 아닌 씬은 오프스크린이 여전히 8비트라(bgra8Unorm) 문턱값
+    /// 위 색이 이미 1로 잘려 있고, 그 결과 번지는 색이 흰색에 가깝다 — 예전과
+    /// 같은 동작이다.
     fragment float4 bloom_fragment(
         VertexOut in [[stage_in]],
         texture2d<float> tex [[texture(0)]],

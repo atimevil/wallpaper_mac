@@ -188,7 +188,10 @@ final class ParticleRenderer {
         animationMode: ParticleAnimationMode,
         renderKind: ParticleRenderKind = .defaultSprite,
         normalMap: MTLTexture? = nil,
-        refractAmount: Float = 0.05
+        refractAmount: Float = 0.05,
+        /// 그릴 오프스크린(혹은 드로어블)의 색 포맷. `MetalCompositor.sceneColorFormat`과
+        /// 같아야 한다 — 다르면 컴포지터가 이 파이프라인으로 그 첨부물에 못 그린다.
+        colorFormat: MTLPixelFormat = .bgra8Unorm
     ) throws {
         self.normalMap = normalMap
         self.refractAmount = refractAmount
@@ -263,7 +266,7 @@ final class ParticleRenderer {
         // 굴절이면 법선 지도로 화면을 밀어 읽는 프래그먼트를 쓴다.
         descriptor.fragmentFunction = library.makeFunction(
             name: normalMap == nil ? "particle_fragment" : "particle_refract_fragment")
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        descriptor.colorAttachments[0].pixelFormat = colorFormat
         descriptor.colorAttachments[0].isBlendingEnabled = true
         descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
         switch blend {
