@@ -28,7 +28,9 @@ final class WorkshopSidebarView: NSView {
         self.onChanged = onChanged
         super.init(frame: .zero)
 
-        let list = NSStackView()
+        // 뒤집힌 좌표계 — 안 뒤집으면 문서 뷰 원점이 아래쪽이라 스크롤 뷰가
+        // 열리자마자 맨 아래 근처로 스크롤된 채로 뜬다(위쪽 종류·등급이 안 보임).
+        let list = FlippedStackView()
         list.orientation = .vertical
         list.alignment = .leading
         list.spacing = 12
@@ -59,6 +61,7 @@ final class WorkshopSidebarView: NSView {
         scroll.translatesAutoresizingMaskIntoConstraints = false
         list.translatesAutoresizingMaskIntoConstraints = false
         list.widthAnchor.constraint(equalTo: scroll.widthAnchor).isActive = true
+        list.topAnchor.constraint(equalTo: scroll.contentView.topAnchor).isActive = true
 
         hideInstalledCheckbox.target = self
         hideInstalledCheckbox.action = #selector(hideInstalledToggled)
@@ -119,4 +122,9 @@ final class WorkshopSidebarView: NSView {
         refreshControls()
         onChanged(state)
     }
+}
+
+/// 원점을 위로 뒤집은 스택 뷰. 스크롤 뷰 문서로 쓰면 열자마자 맨 위가 보인다.
+private final class FlippedStackView: NSStackView {
+    override var isFlipped: Bool { true }
 }

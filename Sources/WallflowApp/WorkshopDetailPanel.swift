@@ -33,7 +33,10 @@ final class WorkshopDetailPanel: NSView {
     private let primaryButton = NSButton(title: "받기", target: nil, action: nil)
     private let steamButton = NSButton(title: "Steam에서 열기", target: nil, action: nil)
     private let removeButton = NSButton(title: "지우기", target: nil, action: nil)
-    private let emptyLabel = NSTextField(labelWithString: "고른 항목이 없다")
+    private let emptyLabel = NSTextField(wrappingLabelWithString: "")
+    /// 스택 좌우·위아래 여백. `showInstalled`가 편집기를 나중에 끼워 넣을 때도
+    /// 같은 값을 써야 한다.
+    private let contentInset: CGFloat = 16
 
     /// "Steam에서 열기"가 열 주소. 항목을 보여 줄 때마다 채운다.
     private var steamWorkshopID: String?
@@ -112,20 +115,28 @@ final class WorkshopDetailPanel: NSView {
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
 
+        // 아무것도 안 골랐을 때 — 스크롤 칸과 별개로 가운데 고정.
+        emptyLabel.stringValue = "항목을 고르면 여기에 자세한 정보가 나온다"
         emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.alignment = .center
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
 
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        stack.edgeInsets = NSEdgeInsets(
+            top: contentInset, left: contentInset, bottom: contentInset, right: contentInset)
         stack.setHuggingPriority(.defaultLow, for: .horizontal)
         for view in [
             previewContainer, titleLabel, authorRow, ratingRow,
             subscribersRow, sizeRow, createdRow, updatedRow,
-            tagsView, descriptionView, progressBar, buttonRow, emptyLabel,
+            tagsView, descriptionView, progressBar, buttonRow,
         ] {
             stack.addArrangedSubview(view)
-            view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            // 폭을 스택 폭 그대로 두면 edgeInsets의 좌우 여백이 지워진다 —
+            // 여백만큼 빼야 실제로 안쪽에 여백이 남는다.
+            view.widthAnchor.constraint(
+                equalTo: stack.widthAnchor, constant: -contentInset * 2).isActive = true
         }
 
         scrollView.hasVerticalScroller = true
@@ -134,6 +145,7 @@ final class WorkshopDetailPanel: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         scrollView.documentView = stack
         addSubview(scrollView)
+        addSubview(emptyLabel)
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -142,6 +154,13 @@ final class WorkshopDetailPanel: NSView {
             stack.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
             stack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            // 스크롤 칸 전체를 채우는 배경과 별개로 텍스트만 가운데 둔다.
+            emptyLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            emptyLabel.leadingAnchor.constraint(
+                greaterThanOrEqualTo: leadingAnchor, constant: contentInset),
+            emptyLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: trailingAnchor, constant: -contentInset),
         ])
 
         editor.translatesAutoresizingMaskIntoConstraints = false
@@ -154,7 +173,7 @@ final class WorkshopDetailPanel: NSView {
         item: WorkshopItem, preview: NSImage?, page: WorkshopDetailsPage?,
         installed: Bool, progress: Double?
     ) {
-        stack.isHidden = false
+        scrollView.isHidden = false
         emptyLabel.isHidden = true
         steamWorkshopID = item.id
 
@@ -186,7 +205,7 @@ final class WorkshopDetailPanel: NSView {
 
     /// 설치됨 탭. 속성 편집기는 이 배경화면 것으로 채워 버튼 줄 아래 붙인다.
     func showInstalled(item: WallpaperItem, preview: NSImage?) {
-        stack.isHidden = false
+        scrollView.isHidden = false
         emptyLabel.isHidden = true
         steamWorkshopID = nil
 
@@ -209,13 +228,14 @@ final class WorkshopDetailPanel: NSView {
 
         if editor.superview == nil {
             stack.addArrangedSubview(editor)
-            editor.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            editor.widthAnchor.constraint(
+                equalTo: stack.widthAnchor, constant: -contentInset * 2).isActive = true
         }
         editor.show(item: item)
     }
 
     func showEmpty() {
-        stack.isHidden = true
+        scrollView.isHidden = true
         emptyLabel.isHidden = false
         steamWorkshopID = nil
         editor.removeFromSuperview()
