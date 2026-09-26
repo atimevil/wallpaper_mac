@@ -1,33 +1,25 @@
 import AppKit
 import WallflowKit
 
-/// 격자에 그리는 한 칸. 라이브러리 항목과 창작마당 항목을 같은 모양으로 보여 준다.
-struct GridEntry {
-    let id: String
-    let title: String
-    let detail: String
-    let installed: Bool
-}
-
 /// 창을 무엇으로 채우는지.
 enum WorkshopTab: Int, CaseIterable {
     /// 받아 둔 배경화면. 먼저 보이는 것이 맞다 — 매일 쓰는 것은 이쪽이다.
-    case library
-    /// 창작마당 검색.
-    case search
-    /// 창작마당 둘러보기.
+    case installed
+    /// 창작마당 둘러보기·검색(하나로 합쳤다).
     case browse
 
     var label: String {
         switch self {
-        case .library: return "내 라이브러리"
-        case .search: return "검색"
+        case .installed: return "설치됨"
         case .browse: return "창작마당"
         }
     }
 }
 
 /// 배경화면을 고르고, 창작마당에서 받아 라이브러리에 넣는 창.
+///
+/// 세 칸이다: 왼쪽 체크박스 필터 사이드바, 가운데 호버 GIF·무한 스크롤 격자,
+/// 오른쪽 상세 패널(지금은 빈 컨테이너 — T6가 채운다).
 ///
 /// 목록은 스팀에서 읽고, 다운로드는 steamcmd가 한다. 자격 증명은 이 앱이 만지지
 /// 않는다 — steamcmd가 비밀번호와 Steam Guard를 대화식으로만 받으므로, 사용자가
@@ -36,6 +28,9 @@ enum WorkshopTab: Int, CaseIterable {
 final class WorkshopWindowController: NSWindowController {
     /// steamcmd 로그인에 쓸 계정 이름. 비밀번호는 저장하지 않는다.
     private static let accountKey = "wallflow.steamAccount"
+    private static let cellSizeKey = "wallflow.workshop.cellSize"
+    private static let minCellSize: CGFloat = 160
+    private static let maxCellSize: CGFloat = 320
 
     private let client = WorkshopClient()
     private let installer: WorkshopInstaller
@@ -48,49 +43,53 @@ final class WorkshopWindowController: NSWindowController {
     private let tabControl = NSSegmentedControl(
         labels: WorkshopTab.allCases.map(\.label), trackingMode: .selectOne, target: nil, action: nil)
     private let applyButton = NSButton(title: "배경화면으로 지정", target: nil, action: nil)
-    private var tab: WorkshopTab = .library
+    private var tab: WorkshopTab = .installed
     private var localItems: [WallpaperItem] = []
     /// 탭마다 검색어를 따로 기억한다. 라이브러리에서 친 말이 창작마당으로
     /// 넘어가면 엉뚱한 결과가 나온다.
     private var searchTexts: [WorkshopTab: String] = [:]
-    /// 이미 받아 온 페이지. 뒤로 갈 때 다시 요청하지 않는다.
-    private var pageCache: [String: [WorkshopItem]] = [:]
-    /// 미리 받아 두는 작업. 탭이나 검색어가 바뀌면 버린다.
-    private var prefetch: Task<Void, Never>?
+
+    private var sidebar: WorkshopSidebarView!
+    private var filterState = WorkshopFilterState()
 
     private let collectionView = NSCollectionView()
+    private let scrollView = NSScrollView()
     private let searchField = NSSearchField()
     private let sortPopup = NSPopUpButton()
-    private let kindPopup = NSPopUpButton()
-    private let genrePopup = NSPopUpButton()
-    private let resolutionPopup = NSPopUpButton()
-    private let ratingPopup = NSPopUpButton()
-    /// 켜고 끄는 특성들(승인됨·오디오 응답성·커스텀 가능…). 여러 개를 함께 걸 수
-    /// 있어 팝업이 아니라 체크박스다. 실물 창작마당의 "다음만 표시" 상자다.
-    private let flagCheckboxes: [NSButton] = WorkshopTag.flags.map {
-        NSButton(checkboxWithTitle: $0.label, target: nil, action: nil)
-    }
-    private var flagRow: NSStackView?
-    private let hideInstalledCheckbox =
-        NSButton(checkboxWithTitle: "받은 것 숨기기", target: nil, action: nil)
+    private let cellSizeSlider = NSSlider()
+    /// 오른쪽 칸. 지금은 비어 있다 — T6가 `WorkshopDetailPanel`을 여기 넣는다.
+    let detailContainer = NSView()
+
     private let loginButton = NSButton(title: "스팀 로그인", target: nil, action: nil)
-    private let prevButton = NSButton(title: "◀", target: nil, action: nil)
-    private let nextButton = NSButton(title: "▶", target: nil, action: nil)
-    private let pageLabel = NSTextField(labelWithString: "1")
     private let removeButton = NSButton(title: "지우기", target: nil, action: nil)
     private let accountField = NSTextField()
     fileprivate let statusLabel = NSTextField(labelWithString: "")
     private let downloadButton = NSButton(title: "받아서 추가", target: nil, action: nil)
     private let spinner = NSProgressIndicator()
 
+    /// 창작마당 항목 누적 목록. 무한 스크롤이라 페이지를 붙여 나간다
+    /// (`WorkshopPaging.merge`). 탭·필터·검색·정렬이 바뀌면 통째로 비운다.
     fileprivate var items: [WorkshopItem] = []
-    fileprivate var thumbnails: [String: NSImage] = [:]
-    /// 진행 중인 목록 요청. 검색어를 빠르게 바꿀 때 옛 응답이 늦게 도착해
-    /// 새 결과를 덮어쓰는 것을 막는다.
+    /// `NSCache`로 개수 상한을 둔다 — 큰 GIF를 여럿 지나가도 메모리가 안 터진다.
+    private let thumbnails: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 600
+        return cache
+    }()
+    /// 진행 중인 목록 요청 세대. 필터를 빠르게 바꿀 때 늦게 온 옛 페이지가
+    /// 새 결과에 섞이는 것을 막는다.
     private var loadGeneration = 0
     private var isDownloading = false
-    /// 1부터 센다. 스팀 목록의 페이지 번호다.
-    private var page = 1
+    private var isLoadingPage = false
+    /// 다음에 받을 창작마당 페이지 번호. 1부터 센다.
+    private var nextPage = 1
+    /// 스팀이 빈 목록을 준 적이 있으면 끝난 것이다 — 더 요청하지 않는다.
+    private var reachedEnd = false
+    /// 클라이언트 OR 필터에 걸려 새 칸이 0개였던 연속 횟수.
+    private var consecutiveEmptyPages = 0
+    /// 지금 받는 중인 항목과 진행률(0...1). 격자 칸의 진행 막대에 쓴다.
+    private var downloadingID: String?
+    private var downloadFraction: Double = 0
 
     /// 진행률 콜백이 창을 찾기 위한 자리. 창은 한 번에 하나만 뜬다.
     private static weak var current: WorkshopWindowController?
@@ -107,15 +106,16 @@ final class WorkshopWindowController: NSWindowController {
         self.onLibraryChanged = onLibraryChanged
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.title = "Wallflow"
+        window.minSize = NSSize(width: 980, height: 600)
         window.center()
         super.init(window: window)
         window.contentView = makeContentView()
         Self.current = self
-        showTab(.library)
+        showTab(.installed)
     }
 
     required init?(coder: NSCoder) { fatalError("스토리보드를 쓰지 않는다") }
@@ -123,93 +123,120 @@ final class WorkshopWindowController: NSWindowController {
     // MARK: - 화면 구성
 
     private func makeContentView() -> NSView {
+        sidebar = WorkshopSidebarView(initial: filterState) { [weak self] newState in
+            self?.filterChanged(to: newState)
+        }
+
+        let middle = makeMiddleColumn()
+
+        detailContainer.wantsLayer = true
+        detailContainer.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+
+        let splitView = NSSplitView()
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.delegate = self
+        splitView.addArrangedSubview(sidebar)
+        splitView.addArrangedSubview(middle)
+        splitView.addArrangedSubview(detailContainer)
+        splitView.translatesAutoresizingMaskIntoConstraints = false
+
+        for view in [sidebar, middle, detailContainer] {
+            view?.translatesAutoresizingMaskIntoConstraints = false
+        }
+        // 낮은 우선순위로 시작 너비만 제안한다 — required로 두면 NSSplitView가
+        // 드래그·접기 때 스스로 거는 제약과 부딪혀 도로 튕기거나 "동시에
+        // 만족시킬 수 없다"는 경고를 낸다. 실제 고정은 holding priority가 한다.
+        let sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: 220)
+        sidebarWidth.priority = .defaultHigh
+        sidebarWidth.isActive = true
+        let detailWidth = detailContainer.widthAnchor.constraint(equalToConstant: 340)
+        detailWidth.priority = .defaultHigh
+        detailWidth.isActive = true
+        // 사이드바·상세는 창이 늘어나도 그대로다 — 늘어난 자리는 격자가 가져간다.
+        splitView.setHoldingPriority(.dragThatCannotResizeWindow, forSubviewAt: 0)
+        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
+        splitView.setHoldingPriority(.dragThatCannotResizeWindow, forSubviewAt: 2)
+
         let root = NSView()
+        root.addSubview(splitView)
+        NSLayoutConstraint.activate([
+            splitView.topAnchor.constraint(equalTo: root.topAnchor),
+            splitView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+        ])
+        return root
+    }
+
+    private func makeMiddleColumn() -> NSView {
+        tabControl.selectedSegment = 0
+        tabControl.target = self
+        tabControl.action = #selector(tabChanged)
 
         searchField.placeholderString = "검색"
         searchField.target = self
         searchField.action = #selector(searchChanged)
         // 검색은 Enter로만 돈다. 글자마다 요청하면 스팀에 부담이고 결과가 튄다.
         searchField.sendsWholeSearchString = true
+        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         for sort in WorkshopSort.allCases { sortPopup.addItem(withTitle: sort.label) }
         sortPopup.target = self
-        sortPopup.action = #selector(reload)
+        sortPopup.action = #selector(sortChanged)
 
-        // 조건은 **스팀에** 건다. 받아 온 페이지만 거르면 "웹 배경화면"을 골라도
-        // 그 페이지에 든 두어 개만 남아, 다음 페이지에 있는 것은 영영 못 본다.
-        for (popup, choices) in [
-            (kindPopup, WorkshopTag.kinds), (genrePopup, WorkshopTag.genres),
-            (resolutionPopup, WorkshopTag.resolutions), (ratingPopup, WorkshopTag.ratings),
-        ] {
-            for choice in choices { popup.addItem(withTitle: choice.label) }
-            popup.target = self
-            popup.action = #selector(filterChanged)
-        }
-        for checkbox in flagCheckboxes {
-            checkbox.state = .off
-            checkbox.target = self
-            checkbox.action = #selector(filterChanged)
-        }
+        let savedCellSize = UserDefaults.standard.double(forKey: Self.cellSizeKey)
+        cellSizeSlider.minValue = Double(Self.minCellSize)
+        cellSizeSlider.maxValue = Double(Self.maxCellSize)
+        cellSizeSlider.doubleValue = savedCellSize > 0 ? savedCellSize : 220
+        cellSizeSlider.target = self
+        cellSizeSlider.action = #selector(cellSizeChanged)
+        cellSizeSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
 
-        hideInstalledCheckbox.state = .off
-        hideInstalledCheckbox.target = self
-        hideInstalledCheckbox.action = #selector(refreshTable)
+        accountField.placeholderString = "스팀 계정 이름"
+        // 스팀 앱이 이미 로그인해 둔 계정 이름을 미리 채운다. 비밀번호가 아니다.
+        accountField.stringValue = UserDefaults.standard.string(forKey: Self.accountKey)
+            ?? SteamCmdClient.detectAccountName() ?? ""
+        accountField.target = self
+        accountField.action = #selector(saveAccount)
+        accountField.widthAnchor.constraint(equalToConstant: 160).isActive = true
 
-        let refreshButton = NSButton(title: "새로고침", target: self, action: #selector(hardRefresh))
+        loginButton.target = self
+        loginButton.action = #selector(openLoginTerminal)
 
-        prevButton.target = self
-        prevButton.action = #selector(previousPage)
-        nextButton.target = self
-        nextButton.action = #selector(nextPage)
-        pageLabel.alignment = .center
-        pageLabel.widthAnchor.constraint(equalToConstant: 28).isActive = true
-
-        tabControl.selectedSegment = 0
-        tabControl.target = self
-        tabControl.action = #selector(tabChanged)
-
-        let tabRow = NSStackView(views: [
-            tabControl, sortPopup, hideInstalledCheckbox,
-            prevButton, pageLabel, nextButton, refreshButton,
+        // 계정·로그인은 창작마당 탭에서만 뜻이 있다. 위쪽 줄 오른쪽에 둔다.
+        let accountRow = NSStackView(views: [
+            NSTextField(labelWithString: "계정:"), accountField, loginButton,
         ])
-        tabRow.orientation = .horizontal
-        tabRow.spacing = 8
+        accountRow.orientation = .horizontal
+        accountRow.spacing = 8
 
-        // 검색창은 탭 아래 제 줄에 둔다. 위 줄에 끼우면 좁고 눈에 덜 띈다.
-        // 조건 팝업도 같은 줄에 둔다 — 위 줄은 이미 정렬과 쪽 넘김으로 찼다.
-        let searchRow = NSStackView(views: [
-            searchField, kindPopup, genrePopup, resolutionPopup, ratingPopup,
+        let spacer = NSView()
+        // 스택 안에서 늘어날 유일한 뷰가 돼야 한다 — 다른 쪽은 hugging이
+        // 기본값(250)이라 그대로 두면 동률로 tabControl이 대신 늘어난다.
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let topRow = NSStackView(views: [tabControl, spacer, accountRow])
+        topRow.orientation = .horizontal
+        topRow.spacing = 8
+        topRow.distribution = .fill
+
+        let gridToolsRow = NSStackView(views: [
+            searchField, sortPopup,
+            NSTextField(labelWithString: "칸 크기"), cellSizeSlider,
         ])
-        searchRow.orientation = .horizontal
-        searchRow.spacing = 8
-        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        // 팝업이 늘어나면서 검색창을 돋보기만 남게 짓눌렀다. 남는 자리는
-        // 검색창이 가져가되, 팝업이 먼저 제 너비를 갖는다.
-        searchField.setContentCompressionResistancePriority(
-            .defaultHigh, for: .horizontal)
-        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
-        for popup in [kindPopup, genrePopup, resolutionPopup, ratingPopup] {
-            popup.setContentHuggingPriority(.required, for: .horizontal)
-            popup.setContentCompressionResistancePriority(.required, for: .horizontal)
-        }
+        gridToolsRow.orientation = .horizontal
+        gridToolsRow.spacing = 8
 
-        // 특성은 셋째 줄이다. 둘째 줄은 팝업 넷으로 이미 찼다.
-        let flagRow = NSStackView(views: flagCheckboxes)
-        flagRow.orientation = .horizontal
-        flagRow.spacing = 12
-        self.flagRow = flagRow
-
-        let top = NSStackView(views: [tabRow, searchRow, flagRow])
+        let top = NSStackView(views: [topRow, gridToolsRow])
         top.orientation = .vertical
         top.spacing = 8
         top.alignment = .leading
-        searchRow.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
+        topRow.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
+        gridToolsRow.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
 
         // 격자로 보여 준다. 흐름 배치라 창 너비가 바뀌면 한 줄에 들어가는 개수가
         // 알아서 바뀐다. 배경화면은 그림이 본체라 표보다 격자가 맞다.
         let layout = NSCollectionViewFlowLayout()
-        // 배경화면은 대부분 16:9다. 칸을 그 비율로 두면 잘리는 부분이 적다.
-        layout.itemSize = NSSize(width: 248, height: 140)
         layout.minimumInteritemSpacing = 8
         layout.minimumLineSpacing = 8
         layout.sectionInset = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
@@ -223,19 +250,19 @@ final class WorkshopWindowController: NSWindowController {
             WorkshopGridItem.self,
             forItemWithIdentifier: WorkshopGridItem.identifier)
 
-        let scroll = NSScrollView()
-        scroll.documentView = collectionView
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.drawsBackground = false
+        let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(handleDoubleClick))
+        doubleClick.numberOfClicksRequired = 2
+        collectionView.addGestureRecognizer(doubleClick)
 
-        accountField.placeholderString = "스팀 계정 이름"
-        // 스팀 앱이 이미 로그인해 둔 계정 이름을 미리 채운다. 비밀번호가 아니다.
-        accountField.stringValue = UserDefaults.standard.string(forKey: Self.accountKey)
-            ?? SteamCmdClient.detectAccountName() ?? ""
-        accountField.target = self
-        accountField.action = #selector(saveAccount)
-        accountField.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        scrollView.documentView = collectionView
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        // bounds 변화를 지켜봐 무한 스크롤 다음 페이지를 미리 청한다.
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(scrollViewDidScroll),
+            name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
 
         spinner.style = .spinning
         spinner.controlSize = .small
@@ -249,9 +276,6 @@ final class WorkshopWindowController: NSWindowController {
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         statusLabel.textColor = .secondaryLabelColor
 
-        loginButton.target = self
-        loginButton.action = #selector(openLoginTerminal)
-
         removeButton.target = self
         removeButton.action = #selector(removeSelected)
 
@@ -260,17 +284,18 @@ final class WorkshopWindowController: NSWindowController {
         applyButton.keyEquivalent = "\r"
 
         let bottom = NSStackView(views: [
-            NSTextField(labelWithString: "계정:"), accountField, loginButton,
             spinner, statusLabel, removeButton, applyButton, downloadButton,
         ])
         bottom.orientation = .horizontal
         bottom.spacing = 8
 
-        let stack = NSStackView(views: [top, scroll, bottom])
+        let stack = NSStackView(views: [top, scrollView, bottom])
         stack.orientation = .vertical
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let root = NSView()
         root.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: root.topAnchor),
@@ -281,139 +306,10 @@ final class WorkshopWindowController: NSWindowController {
         return root
     }
 
-    // MARK: - 목록
-
-    @objc private func previousPage() {
-        guard page > 1, !isDownloading else { return }
-        page -= 1
-        loadPage()
-    }
-
-    @objc private func nextPage() {
-        guard !isDownloading else { return }
-        page += 1
-        loadPage()
-    }
-
-    /// 검색어나 정렬이 바뀌면 첫 페이지로 돌아간다. 3페이지를 보다가 검색하면
-    /// 결과가 3페이지부터 나오는 것은 사용자가 기대하는 동작이 아니다.
-    @objc private func reload() {
-        page = 1
-        loadPage()
-    }
-
-    /// 새로고침은 캐시를 버리고 다시 받는다. 그러라고 있는 단추다.
-    @objc private func hardRefresh() {
-        pageCache.removeAll()
-        prefetch?.cancel()
-        page = 1
-        loadPage()
-    }
-
-    /// 요청 하나를 가리키는 열쇠. 정렬·검색어·페이지가 같으면 같은 결과다.
-    /// 지금 팝업들이 만드는 조건.
-    private var currentFilter: WorkshopFilter {
-        WorkshopFilter(tags: [
-            (kindPopup, WorkshopTag.kinds), (genrePopup, WorkshopTag.genres),
-            (resolutionPopup, WorkshopTag.resolutions), (ratingPopup, WorkshopTag.ratings),
-        ].map { popup, choices in
-            let index = max(0, popup.indexOfSelectedItem)
-            return index < choices.count ? choices[index].tag : ""
-        } + zip(flagCheckboxes, WorkshopTag.flags).map { checkbox, choice in
-            checkbox.state == .on ? choice.tag : ""
-        })
-    }
-
-    /// 조건이 바뀌면 처음 쪽부터 다시 받는다. 3쪽에서 종류를 바꾸면 그 조건의
-    /// 3쪽이 뜨는데, 사용자는 자기가 못 본 1·2쪽이 있다는 걸 알 수 없다.
-    @objc private func filterChanged() {
-        if tab == .library {
-            refreshTable()
-            return
-        }
-        page = 1
-        loadPage()
-    }
-
-    private func cacheKey(
-        sort: WorkshopSort, filter: WorkshopFilter, text: String, page: Int
-    ) -> String {
-        "\(sort.rawValue)|\(filter.key)|\(text)|\(page)"
-    }
-
-    private func loadPage() {
-        pageLabel.stringValue = "\(page)"
-        prevButton.isEnabled = page > 1
-        loadGeneration += 1
-        let generation = loadGeneration
-        let sort = WorkshopSort.allCases[max(0, sortPopup.indexOfSelectedItem)]
-        let filter = currentFilter
-        let text = searchField.stringValue
-        let requested = page
-        let key = cacheKey(sort: sort, filter: filter, text: text, page: requested)
-
-        // 이미 받아 둔 페이지면 바로 보여 준다. 뒤로 가기와 미리 받아 둔
-        // 다음 페이지가 즉시 뜬다 — 한 페이지에 2초쯤 걸리므로 체감이 크다.
-        if let cached = pageCache[key] {
-            items = cached
-            refreshTable()
-            setBusy(false, status: "\(requested)페이지 · \(cached.count)개")
-            loadThumbnails(generation: loadGeneration)
-            schedulePrefetch(sort: sort, filter: filter, text: text, after: requested)
-            return
-        }
-
-        setBusy(true, status: "목록을 읽는 중…")
-
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let ids = try await client.listIDs(
-                    sort: sort, filter: filter, searchText: text, page: requested)
-                let fetched = try await client.details(ids: ids)
-                // 늦게 도착한 옛 요청이 새 결과를 덮어쓰지 않게 한다.
-                guard generation == self.loadGeneration else { return }
-                self.pageCache[key] = fetched
-                self.items = fetched
-                // 썸네일은 지우지 않는다. 페이지를 오갈 때 이미 받은 그림을
-                // 다시 받는 것은 낭비다.
-                self.refreshTable()
-                // 결과가 없으면 마지막 페이지를 지난 것이다. 되돌려 준다 —
-                // 빈 화면에 갇히면 사용자가 손쓸 방법이 없다.
-                if fetched.isEmpty, requested > 1 {
-                    self.page = requested - 1
-                    self.pageLabel.stringValue = "\(self.page)"
-                    self.setBusy(false, status: "마지막 페이지다")
-                    return
-                }
-                self.setBusy(false, status: fetched.isEmpty ? "결과가 없다"
-                    : "\(requested)페이지 · \(fetched.count)개")
-                self.loadThumbnails(generation: generation)
-                self.schedulePrefetch(
-                    sort: sort, filter: filter, text: text, after: requested)
-            } catch {
-                guard generation == self.loadGeneration else { return }
-                self.items = []
-                self.refreshTable()
-                self.setBusy(false, status: "목록을 읽지 못했다: \(Self.describe(error))")
-            }
-        }
-    }
-
-    /// 종류 필터의 표시 이름. 순서가 곧 팝업 순서다.
-    /// 검색은 탭마다 뜻이 다르다. 라이브러리는 가진 것을 걸러내고,
-    /// 창작마당은 스팀에 새로 요청한다.
-    @objc private func searchChanged() {
-        if tab == .library {
-            refreshTable()
-            setBusy(false, status: "\(visibleEntries.count)개")
-        } else {
-            reload()
-        }
-    }
+    // MARK: - 탭·필터
 
     @objc private func tabChanged() {
-        showTab(WorkshopTab(rawValue: tabControl.selectedSegment) ?? .library)
+        showTab(WorkshopTab(rawValue: tabControl.selectedSegment) ?? .installed)
     }
 
     /// 탭에 따라 무엇을 보여 주고 어떤 조작을 열지 정한다.
@@ -423,71 +319,160 @@ final class WorkshopWindowController: NSWindowController {
         tab = next
         searchField.stringValue = searchTexts[next] ?? ""
         tabControl.selectedSegment = next.rawValue
-        prefetch?.cancel()
 
-        let isLibrary = next == .library
-        // 라이브러리는 내가 가진 것이라 정렬·페이지·계정이 필요 없다.
-        for control in [sortPopup, prevButton, nextButton, pageLabel,
-                        hideInstalledCheckbox, accountField, loginButton] {
-            control.isHidden = isLibrary
+        let isInstalled = next == .installed
+        // 라이브러리는 내가 가진 것이라 정렬·계정이 필요 없다.
+        for control in [sortPopup, accountField, loginButton] {
+            control.isHidden = isInstalled
         }
-        // 특성은 스팀에 거는 조건이라 라이브러리에서는 뜻이 없다.
-        flagRow?.isHidden = isLibrary
-        searchField.isHidden = next == .browse
-        searchField.placeholderString = isLibrary ? "라이브러리에서 찾기" : "창작마당 검색"
-        applyButton.isHidden = !isLibrary
-        downloadButton.isHidden = isLibrary
-        removeButton.isHidden = false
+        searchField.placeholderString = isInstalled ? "라이브러리에서 찾기" : "창작마당 검색"
+        applyButton.isHidden = !isInstalled
+        downloadButton.isHidden = isInstalled
 
-        if isLibrary {
+        if isInstalled {
             reloadLibrary()
         } else {
-            // 검색 탭은 검색어가 있을 때만 요청한다. 빈 검색은 둘러보기와 같다.
-            if next == .search, searchField.stringValue.trimmingCharacters(
-                in: .whitespaces).isEmpty {
-                items = []
-                refreshTable()
-                setBusy(false, status: "검색어를 넣으세요")
-                return
-            }
-            reload()
+            resetAndLoadFirstPage()
         }
     }
 
-    /// 다음 페이지를 미리 받아 둔다. 사용자가 ▶를 누를 때는 이미 와 있다.
-    ///
-    /// 목록 한 페이지에 2초쯤 걸린다(HTML 1.1초 + 메타 0.6초). 누른 뒤에 받으면
-    /// 그 시간이 그대로 기다림이 된다.
-    private func schedulePrefetch(
-        sort: WorkshopSort, filter: WorkshopFilter, text: String, after page: Int
-    ) {
-        let key = cacheKey(sort: sort, filter: filter, text: text, page: page + 1)
-        guard pageCache[key] == nil else { return }
-        prefetch?.cancel()
-        prefetch = Task { [weak self] in
+    /// 사이드바가 바뀌면 필터를 갱신하고 목록을 처음부터 다시 받는다(세대 번호 증가).
+    /// 설치됨 탭은 네트워크가 필요 없다 — 로컬 목록을 다시 거르기만 한다.
+    private func filterChanged(to newState: WorkshopFilterState) {
+        filterState = newState
+        if tab == .installed {
+            refreshTable()
+        } else {
+            resetAndLoadFirstPage()
+        }
+    }
+
+    @objc private func searchChanged() {
+        if tab == .installed {
+            refreshTable()
+            setBusy(false, status: "\(displayedEntries.count)개")
+        } else {
+            resetAndLoadFirstPage()
+        }
+    }
+
+    @objc private func sortChanged() {
+        guard tab == .browse else { return }
+        resetAndLoadFirstPage()
+    }
+
+    @objc private func cellSizeChanged() {
+        UserDefaults.standard.set(cellSizeSlider.doubleValue, forKey: Self.cellSizeKey)
+        collectionView.collectionViewLayout?.invalidateLayout()
+    }
+
+    // MARK: - 목록 (창작마당 · 무한 스크롤)
+
+    /// 필터·검색·정렬·탭이 바뀔 때마다 여기로 온다. 세대 번호를 올려 옛 응답을
+    /// 무효로 만들고, 누적 목록을 비운 뒤 첫 페이지부터 다시 받는다.
+    private func resetAndLoadFirstPage() {
+        loadGeneration += 1
+        // 옛 세대의 in-flight 요청은 위 증가로 이미 무효다 — 그 요청이 끝나도
+        // `guard generation == loadGeneration`에 걸려 되돌아오므로 여기서
+        // 미리 꺼 둬야 한다. 안 그러면 그 요청이 절대 안 꺼서 다음 페이지
+        // 요청이 영원히 무시된다.
+        isLoadingPage = false
+        nextPage = 1
+        reachedEnd = false
+        consecutiveEmptyPages = 0
+        items = []
+        refreshTable()
+        loadNextPage()
+    }
+
+    @objc private func scrollViewDidScroll() {
+        guard tab == .browse, !isLoadingPage, !reachedEnd else { return }
+        let visibleBottom = scrollView.documentVisibleRect.maxY
+        // 흐름 배치의 실측 내용 높이. `collectionView.frame`은 스크롤이 막
+        // 바뀐 직후에는 아직 갱신 전이라 낡은 값을 줄 수 있다.
+        let contentHeight = collectionView.collectionViewLayout?
+            .collectionViewContentSize.height ?? collectionView.frame.height
+        let rowHeight = Double(cellSizeSlider.doubleValue) + 8 + 20 // 칸 + 줄 간격 + 제목 줄
+        guard WorkshopScrollPaging.shouldLoadNextPage(
+            visibleBottom: Double(visibleBottom), contentHeight: Double(contentHeight),
+            rowHeight: rowHeight) else { return }
+        loadNextPage()
+    }
+
+    private func loadNextPage() {
+        guard tab == .browse, !reachedEnd, !isLoadingPage else { return }
+        isLoadingPage = true
+        let generation = loadGeneration
+        let sort = WorkshopSort.allCases[max(0, sortPopup.indexOfSelectedItem)]
+        let filter = filterState.requestFilter
+        let text = searchField.stringValue
+        let requested = nextPage
+        setBusy(true, status: "목록을 읽는 중…")
+
+        Task { [weak self] in
             guard let self else { return }
-            guard let ids = try? await client.listIDs(
-                sort: sort, filter: filter, searchText: text, page: page + 1), !ids.isEmpty,
-                let fetched = try? await client.details(ids: ids) else { return }
-            guard !Task.isCancelled else { return }
-            self.pageCache[key] = fetched
-            // 그림도 미리 받아 둔다. 넘기는 순간 빈 칸이 보이지 않는다.
-            for item in fetched.prefix(12) {
-                guard let url = item.previewURL, self.thumbnails[item.id] == nil else { continue }
-                guard let (data, _) = try? await URLSession.shared.data(from: url),
-                      let image = NSImage(data: data) else { continue }
-                guard !Task.isCancelled else { return }
-                self.thumbnails[item.id] = image
+            do {
+                let ids = try await client.listIDs(
+                    sort: sort, filter: filter, searchText: text, page: requested)
+                guard generation == self.loadGeneration else { return }
+                guard !ids.isEmpty else {
+                    self.reachedEnd = true
+                    self.isLoadingPage = false
+                    self.setBusy(false, status: "\(self.items.count)개 (끝)")
+                    return
+                }
+                let fetched = try await self.client.details(ids: ids)
+                guard generation == self.loadGeneration else { return }
+
+                let existingIDs = Set(self.items.map(\.id))
+                let merged = WorkshopPaging.merge(self.items, fetched)
+                let newlyAdded = merged.filter { !existingIDs.contains($0.id) }
+                self.items = merged
+                self.nextPage = requested + 1
+                self.refreshTable()
+                self.loadThumbnails(generation: generation)
+
+                // 클라이언트 OR 필터 뒤 이 페이지에서 새로 보일 칸이 없으면
+                // 한 번 더 다음 페이지를 청한다(연속 3회까지). 전부 중복이라
+                // `newlyAdded`가 비어도 마찬가지로 빈 페이지 취급한다 — 인기
+                // 정렬은 페이지 사이에 순위가 바뀌어 아예 다 겹칠 수 있다.
+                let passing = newlyAdded.filter { self.itemPassesClientFilter($0) }
+                self.isLoadingPage = false
+                if passing.isEmpty {
+                    self.consecutiveEmptyPages += 1
+                    if WorkshopScrollPaging.shouldRetryAfterEmptyPage(
+                        consecutiveEmptyPages: self.consecutiveEmptyPages) {
+                        self.loadNextPage()
+                        return
+                    }
+                } else {
+                    self.consecutiveEmptyPages = 0
+                }
+                self.setBusy(false, status: "\(self.displayedEntries.count)개")
+                // 화면이 아직 안 찼으면(짧은 결과라 스크롤 막대가 없는 경우)
+                // bounds 변화 알림이 안 와서 다음 페이지 요청이 걸리지 않는다.
+                // 레이아웃이 끝난 다음 지금 상태로 한 번 더 물어본다.
+                DispatchQueue.main.async { [weak self] in self?.scrollViewDidScroll() }
+            } catch {
+                guard generation == self.loadGeneration else { return }
+                self.isLoadingPage = false
+                self.setBusy(false, status: "목록을 읽지 못했다: \(Self.describe(error))")
             }
         }
+    }
+
+    private func itemPassesClientFilter(_ item: WorkshopItem) -> Bool {
+        guard filterState.matches(tags: item.tags) else { return false }
+        if filterState.hideInstalled, installer.isInstalled(id: item.id) { return false }
+        return true
     }
 
     /// 라이브러리 목록을 다시 읽는다.
     private func reloadLibrary() {
         localItems = libraryItems()
-        thumbnails.removeAll()
+        thumbnails.removeAllObjects()
         refreshTable()
-        setBusy(false, status: "\(visibleEntries.count)개")
+        setBusy(false, status: "\(displayedEntries.count)개")
         loadLibraryThumbnails()
     }
 
@@ -495,39 +480,48 @@ final class WorkshopWindowController: NSWindowController {
     private func loadLibraryThumbnails() {
         for item in localItems {
             guard let url = item.previewURL, let image = NSImage(contentsOf: url) else { continue }
-            thumbnails[item.id] = image
+            thumbnails.setObject(image, forKey: item.id as NSString)
         }
         collectionView.reloadData()
     }
 
-    /// 지금 탭에서 보여 줄 칸들.
-    var visibleEntries: [GridEntry] {
-        if tab == .library {
+    /// `refreshTable()`이 마지막으로 계산해 둔 화면 목록. 셀 하나 그릴 때마다
+    /// `installer.isInstalled`(파일 스탯)를 새로 도는 `visibleEntries`를 다시
+    /// 계산하면 무한 스크롤로 쌓인 수백 개에서 셀당 비용이 된다 — 한 번만
+    /// 계산해 두고 선택·다운로드 진행률 갱신은 이 배열을 본다.
+    private var displayedEntries: [GridEntry] = []
+
+    /// 지금 탭에서 보여 줄 칸들. `displayedEntries`를 새로 채울 때만 부른다.
+    private var visibleEntries: [GridEntry] {
+        if tab == .installed {
             let text = searchField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
             return localItems
                 .filter { text.isEmpty || $0.title.lowercased().contains(text) }
-                .map { GridEntry(id: $0.id, title: $0.title,
-                                 detail: $0.type.rawValue, installed: true) }
+                // 해상도는 project.json 어디에도 없다 — 넣은 채로 거르면 하나라도
+                // 고른 순간 설치된 항목이 전부 빠진다.
+                .filter { filterState.matches(tags: $0.filterTags, ignoring: [.resolution]) }
+                .map { GridEntry(id: $0.id, title: $0.title, installed: true) }
         }
-        return visibleItems.map {
-            GridEntry(id: $0.id, title: $0.title,
-                      detail: String(format: "%@ · %.1f MB%@", $0.kind.rawValue,
-                                     Double($0.sizeBytes) / 1_000_000,
-                                     installer.isInstalled(id: $0.id) ? " · 이미 있음" : ""),
-                      installed: installer.isInstalled(id: $0.id))
-        }
+        return items
+            .filter(itemPassesClientFilter)
+            .map { GridEntry(id: $0.id, title: $0.title, installed: installer.isInstalled(id: $0.id)) }
     }
 
     /// 라이브러리에서 고른 배경화면.
     private var selectedLibraryItem: WallpaperItem? {
-        guard tab == .library, let id = selectedEntry?.id else { return nil }
+        guard tab == .installed, let id = selectedEntry?.id else { return nil }
         return localItems.first { $0.id == id }
     }
 
     private var selectedEntry: GridEntry? {
         guard let index = collectionView.selectionIndexPaths.first?.item else { return nil }
-        let list = visibleEntries
-        return index < list.count ? list[index] : nil
+        return index < displayedEntries.count ? displayedEntries[index] : nil
+    }
+
+    /// 지금 고른 창작마당 항목.
+    private var selectedItem: WorkshopItem? {
+        guard tab != .installed, let id = selectedEntry?.id else { return nil }
+        return items.first { $0.id == id }
     }
 
     @objc private func applySelected() {
@@ -536,47 +530,61 @@ final class WorkshopWindowController: NSWindowController {
         setBusy(false, status: "\(item.title) 적용")
     }
 
-    /// 화면에 쓰는 목록. 필터는 화면에서만 건다 — 다시 요청하지 않는다.
-    private var visibleItems: [WorkshopItem] {
-        var list = items
-        switch kindPopup.indexOfSelectedItem {
-        case 1: list = list.filter { $0.kind == .scene }
-        case 2: list = list.filter { $0.kind == .video }
-        case 3: list = list.filter { $0.kind == .web }
-        default: break
-        }
-        if hideInstalledCheckbox.state == .on {
-            list = list.filter { !installer.isInstalled(id: $0.id) }
-        }
-        return list
-    }
-
     @objc private func refreshTable() {
+        displayedEntries = visibleEntries
         collectionView.reloadData()
-        updateDownloadButton()
-    }
-
-    /// 지금 고른 창작마당 항목.
-    private var selectedItem: WorkshopItem? {
-        guard tab != .library, let id = selectedEntry?.id else { return nil }
-        return items.first { $0.id == id }
+        selectionDidChange()
     }
 
     private func loadThumbnails(generation: Int) {
-        for item in items {
+        for item in items where thumbnails.object(forKey: item.id as NSString) == nil {
             guard let url = item.previewURL else { continue }
             Task { [weak self] in
                 guard let (data, _) = try? await URLSession.shared.data(from: url),
                       let image = NSImage(data: data) else { return }
                 guard let self, generation == self.loadGeneration else { return }
-                self.thumbnails[item.id] = image
+                self.thumbnails.setObject(image, forKey: item.id as NSString)
                 // 그 칸만 다시 그린다. 전체 reload는 선택을 잃는다.
-                if let index = self.visibleItems.firstIndex(where: { $0.id == item.id }) {
+                if let index = self.displayedEntries.firstIndex(where: { $0.id == item.id }) {
                     self.collectionView.reloadItems(
                         at: [IndexPath(item: index, section: 0)])
                 }
             }
         }
+    }
+
+    // MARK: - 선택·활성화 (T6가 채운다)
+
+    /// 오른쪽 상세 패널에 지금 고른 항목을 알린다. 지금은 컨테이너가 비어 있어
+    /// 아무것도 안 하지만, T6가 `WorkshopDetailPanel`을 여기 연결한다.
+    private func selectionDidChange() {
+        updateDownloadButton()
+    }
+
+    /// 더블클릭 훅. 창작마당 탭은 이미 설치된 항목이면 적용, 아니면 기존
+    /// 다운로드 흐름을 그대로 부른다. 설치됨 탭은 기존 적용 흐름이다.
+    /// T6가 상세 패널의 "받기/적용" 버튼도 같은 메서드로 연결한다.
+    private func activateSelected() {
+        guard let entry = selectedEntry else { return }
+        switch tab {
+        case .installed:
+            applySelected()
+        case .browse:
+            if entry.installed, let local = libraryItems().first(where: { $0.id == entry.id }) {
+                onApply(local)
+                setBusy(false, status: "\(local.title) 적용")
+            } else {
+                download()
+            }
+        }
+    }
+
+    @objc private func handleDoubleClick(_ sender: NSClickGestureRecognizer) {
+        let point = sender.location(in: collectionView)
+        guard let indexPath = collectionView.indexPathForItem(at: point) else { return }
+        collectionView.selectionIndexPaths = [indexPath]
+        selectionDidChange()
+        activateSelected()
     }
 
     // MARK: - 다운로드
@@ -605,6 +613,8 @@ final class WorkshopWindowController: NSWindowController {
         let steam = SteamCmdClient(
             executable: executable, installDirectory: installer.downloadRoot)
         isDownloading = true
+        downloadingID = item.id
+        downloadFraction = 0
         setBusy(true, status: "\(item.title) 받는 중…")
 
         Task { [weak self] in
@@ -616,8 +626,12 @@ final class WorkshopWindowController: NSWindowController {
                 guard line.contains("%") || line.contains("progress")
                         || line.contains("Downloading") else { return }
                 Task { @MainActor in
-                    WorkshopWindowController.current?.statusLabel.stringValue =
-                        String(line.prefix(70))
+                    guard let controller = WorkshopWindowController.current else { return }
+                    controller.statusLabel.stringValue = String(line.prefix(70))
+                    if let fraction = Self.progressFraction(fromLine: line) {
+                        controller.downloadFraction = fraction
+                        controller.reloadDownloadingItem()
+                    }
                 }
             }
             let installer = self?.installer
@@ -638,13 +652,14 @@ final class WorkshopWindowController: NSWindowController {
 
             guard let self else { return }
             self.isDownloading = false
+            self.downloadingID = nil
             switch result {
             case .success:
                 do {
                     try self.installer.link(id: item.id)
                     self.onLibraryChanged()
                     self.setBusy(false, status: "\(item.title) 추가됨")
-                    if self.tab == .library { self.reloadLibrary() }
+                    if self.tab == .installed { self.reloadLibrary() }
                     self.refreshTable()
                 } catch {
                     self.setBusy(false, status: "받았지만 라이브러리에 넣지 못했다")
@@ -659,6 +674,30 @@ final class WorkshopWindowController: NSWindowController {
                     self.present(title: "받지 못했다", message: Self.describe(error))
                 }
             }
+        }
+    }
+
+    /// 진행률 줄에서 퍼센트를 뽑아 0...1로 돌려준다. 못 읽으면 nil — 상태 글은
+    /// 그래도 보이니 실패해도 사용자에게 손해는 없다.
+    private static func progressFraction(fromLine line: String) -> Double? {
+        guard let range = line.range(of: #"progress: ([\d.]+)"#, options: .regularExpression) else {
+            return nil
+        }
+        let numberPart = line[range].split(separator: " ").last.map(String.init) ?? ""
+        guard let value = Double(numberPart) else { return nil }
+        return min(1, max(0, value / 100))
+    }
+
+    /// 진행률 줄마다 온다 — 칸을 통째로 다시 그리면 깜빡이고 호버 애니메이션도
+    /// 끊긴다. 이미 화면에 있는 칸이면 진행 막대만 고쳐 그린다.
+    private func reloadDownloadingItem() {
+        guard let id = downloadingID,
+              let index = displayedEntries.firstIndex(where: { $0.id == id }) else { return }
+        let indexPath = IndexPath(item: index, section: 0)
+        if let cell = collectionView.item(at: indexPath) as? WorkshopGridItem {
+            cell.updateProgress(downloadFraction)
+        } else {
+            collectionView.reloadItems(at: [indexPath])
         }
     }
 
@@ -759,7 +798,7 @@ final class WorkshopWindowController: NSWindowController {
                 return
             }
             onLibraryChanged()
-            if tab == .library { reloadLibrary() }
+            if tab == .installed { reloadLibrary() }
             refreshTable()
         } catch {
             present(title: "지우지 못했다", message: Self.describe(error))
@@ -768,7 +807,7 @@ final class WorkshopWindowController: NSWindowController {
 
     private func updateDownloadButton() {
         let entry = selectedEntry
-        downloadButton.isEnabled = entry != nil && !isDownloading && tab != .library
+        downloadButton.isEnabled = entry != nil && !isDownloading && tab != .installed
         applyButton.isEnabled = selectedLibraryItem != nil
         removeButton.isEnabled = (entry?.installed ?? false) && !isDownloading
         downloadButton.title = (entry?.installed ?? false) ? "다시 받기" : "받아서 추가"
@@ -795,155 +834,31 @@ final class WorkshopWindowController: NSWindowController {
     }
 }
 
-/// 칸을 꽉 채우는 그림. 비율을 지키고 넘치는 쪽을 자른다.
-///
-/// 레이어에 직접 그리므로 `NSImageView`가 아니다. 그쪽에는 "채우기" 축척이
-/// 없어서, 16:9 배경화면이 정사각형에 가까운 칸에서 위아래로 회색 띠를 남긴다.
-final class PreviewView: NSView {
-    var image: NSImage? {
-        didSet { updateContents() }
-    }
-
-    override func layout() {
-        super.layout()
-        // 화면 배율이 바뀌면 다시 물어봐야 선명하다.
-        updateContents()
-    }
-
-    private func updateContents() {
-        wantsLayer = true
-        layer?.contentsGravity = .resizeAspectFill
-        layer?.masksToBounds = true
-        guard let image else {
-            layer?.contents = nil
-            return
-        }
-        // 칸 비율에 맞춰 CGImage를 꺼낸다. NSImage를 그대로 넣으면 표현이
-        // 여럿일 때(아이콘 등) 어느 것이 쓰일지 정해지지 않는다.
-        var rect = CGRect(origin: .zero, size: bounds.size)
-        layer?.contents = image.cgImage(
-            forProposedRect: &rect, context: nil, hints: nil)
-    }
-}
-
-/// 격자 한 칸.
-///
-/// 실물 Wallpaper Engine처럼 **그림이 칸 전체**이고, 제목은 그 위 아래쪽에
-/// 얹는다. 그림 밑에 이름을 따로 한 줄 두면 같은 자리에 그림이 그만큼 작게
-/// 들어가고, 목록이 글자 반 그림 반이 된다 — 배경화면은 그림이 본체다.
-final class WorkshopGridItem: NSCollectionViewItem {
-    static let identifier = NSUserInterfaceItemIdentifier("WorkshopGridItem")
-
-    /// 미리보기 그림. **칸을 꽉 채운다.**
-    ///
-    /// `NSImageView`에는 "채우기" 축척이 없다 — 비율을 지키면 회색 여백이
-    /// 남고, 늘리면 그림이 찌그러진다. 레이어의 `resizeAspectFill`은 비율을
-    /// 지키면서 넘치는 쪽을 잘라 준다.
-    private let preview = PreviewView()
-    private let nameLabel = NSTextField(labelWithString: "")
-    private let detailLabel = NSTextField(labelWithString: "")
-    private let box = NSView()
-    /// 제목이 밝은 그림 위에서도 읽히게 까는 그늘.
-    private let scrim = CAGradientLayer()
-
-    override func loadView() {
-        box.wantsLayer = true
-        box.layer?.cornerRadius = 8
-        box.layer?.masksToBounds = true
-        box.layer?.borderWidth = 2
-        box.layer?.borderColor = NSColor.clear.cgColor
-        box.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
-
-        preview.wantsLayer = true
-        preview.translatesAutoresizingMaskIntoConstraints = false
-
-        // 그늘은 아래에서 위로 옅어진다. 그림 전체를 덮으면 목록이 어두워진다.
-        scrim.colors = [
-            NSColor.clear.cgColor,
-            NSColor.black.withAlphaComponent(0.75).cgColor,
-        ]
-        scrim.startPoint = CGPoint(x: 0.5, y: 1)
-        scrim.endPoint = CGPoint(x: 0.5, y: 0)
-
-        nameLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        nameLabel.textColor = .white
-        nameLabel.lineBreakMode = .byTruncatingTail
-        nameLabel.maximumNumberOfLines = 1
-        detailLabel.font = .systemFont(ofSize: 10)
-        detailLabel.textColor = NSColor.white.withAlphaComponent(0.75)
-        detailLabel.lineBreakMode = .byTruncatingTail
-        detailLabel.maximumNumberOfLines = 1
-
-        let text = NSStackView(views: [nameLabel, detailLabel])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 1
-        text.translatesAutoresizingMaskIntoConstraints = false
-
-        box.addSubview(preview)
-        box.addSubview(text)
-        NSLayoutConstraint.activate([
-            preview.topAnchor.constraint(equalTo: box.topAnchor),
-            preview.bottomAnchor.constraint(equalTo: box.bottomAnchor),
-            preview.leadingAnchor.constraint(equalTo: box.leadingAnchor),
-            preview.trailingAnchor.constraint(equalTo: box.trailingAnchor),
-            text.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
-            text.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
-            text.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -6),
-        ])
-        // 그늘은 그림 위, 글자 아래에 깔린다.
-        preview.layer?.addSublayer(scrim)
-        view = box
-    }
-
-    override func viewDidLayout() {
-        super.viewDidLayout()
-        // 그늘은 아래 40%만 덮는다. 자동 배치가 없는 레이어라 직접 잡는다.
-        let height = view.bounds.height * 0.4
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        scrim.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: height)
-        CATransaction.commit()
-    }
-
-    func configure(entry: GridEntry, image: NSImage?) {
-        preview.image = image
-        nameLabel.stringValue = entry.title
-        detailLabel.stringValue = entry.detail
-    }
-
-    override var isSelected: Bool {
-        didSet {
-            box.layer?.borderColor = isSelected
-                ? NSColor.controlAccentColor.cgColor : NSColor.clear.cgColor
-        }
-    }
-}
-
 extension WorkshopWindowController: NSCollectionViewDataSource,
                                    NSCollectionViewDelegateFlowLayout {
     func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int)
-        -> Int { visibleEntries.count }
+        -> Int { displayedEntries.count }
 
     func collectionView(
         _ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath
     ) -> NSCollectionViewItem {
         let cell = collectionView.makeItem(
             withIdentifier: WorkshopGridItem.identifier, for: indexPath)
-        let list = visibleEntries
+        let list = displayedEntries
         if let grid = cell as? WorkshopGridItem, indexPath.item < list.count {
             let entry = list[indexPath.item]
-            grid.configure(entry: entry, image: thumbnailImage(for: entry.id))
+            let progress = (entry.id == downloadingID) ? downloadFraction : nil
+            grid.configure(
+                entry: entry, image: thumbnails.object(forKey: entry.id as NSString),
+                downloadProgress: progress)
         }
         return cell
     }
 
-    /// 칸 크기를 창 너비에 맞춰 나눈다.
-    ///
-    /// 흐름 배치는 남는 자리를 **칸 사이 간격**으로 흘려보낸다. 고정 크기로 두면
-    /// 창이 넓어질수록 칸 사이가 벌어져 목록 가운데가 뻥 뚫린다. 한 줄에 몇 개가
-    /// 들어갈지 먼저 정하고 남는 자리를 칸 너비에 나눠 준다 — 실물 창작마당처럼
-    /// 그림이 줄을 꽉 채운다.
+    /// 칸 크기를 슬라이더 값과 창 너비에 맞춰 나눈다. 흐름 배치는 남는 자리를
+    /// **칸 사이 간격**으로 흘려보낸다 — 고정 크기로 두면 창이 넓어질수록 칸
+    /// 사이가 벌어져 목록 가운데가 뻥 뚫린다. 한 줄에 몇 개가 들어갈지 먼저
+    /// 정하고 남는 자리를 칸 너비에 나눠 준다. 칸은 정사각이다.
     func collectionView(
         _ collectionView: NSCollectionView, layout: NSCollectionViewLayout,
         sizeForItemAt indexPath: IndexPath
@@ -951,22 +866,35 @@ extension WorkshopWindowController: NSCollectionViewDataSource,
         let flow = layout as? NSCollectionViewFlowLayout
         let inset = flow?.sectionInset ?? NSEdgeInsets()
         let spacing = flow?.minimumInteritemSpacing ?? 8
+        let target = cellSizeSlider.doubleValue > 0 ? CGFloat(cellSizeSlider.doubleValue) : 220
         let available = collectionView.bounds.width - inset.left - inset.right
-        guard available > 0 else { return NSSize(width: 248, height: 140) }
-        // 한 칸이 260pt쯤 되게 잡되 최소 두 줄은 유지한다.
-        let columns = Swift.max(2, Int((available + spacing) / (260 + spacing)))
+        guard available > 0 else { return NSSize(width: target, height: target + 20) }
+        let columns = Swift.max(1, Int((available + spacing) / (target + spacing)))
         let width = (available - spacing * CGFloat(columns - 1)) / CGFloat(columns)
-        // 배경화면은 대부분 16:9다. 그 비율로 두면 잘리는 부분이 적다.
-        return NSSize(width: floor(width), height: floor(width * 9 / 16))
+        // 정사각 미리보기 + 제목 한 줄만큼 아래로 늘린다.
+        return NSSize(width: floor(width), height: floor(width) + 20)
     }
 
     func collectionView(
         _ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>
-    ) { updateDownloadButton() }
+    ) { selectionDidChange() }
 
     func collectionView(
         _ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>
-    ) { updateDownloadButton() }
+    ) { selectionDidChange() }
+}
 
-    func thumbnailImage(for id: String) -> NSImage? { thumbnails[id] }
+extension WorkshopWindowController: @preconcurrency NSSplitViewDelegate {
+    /// 사이드바는 접을 수 있다(구분선 더블클릭). 상세 칸은 늘 보이는 편이 낫다
+    /// — 아직 선택한 항목이 없다는 안내조차 사라지면 혼란스럽다.
+    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+        subview === splitView.arrangedSubviews.first
+    }
+
+    func splitView(
+        _ splitView: NSSplitView, shouldCollapseSubview subview: NSView,
+        forDoubleClickOnDividerAt dividerIndex: Int
+    ) -> Bool {
+        dividerIndex == 0
+    }
 }
