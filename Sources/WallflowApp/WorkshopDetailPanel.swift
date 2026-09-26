@@ -14,7 +14,9 @@ final class WorkshopDetailPanel: NSView {
     private let editor: PropertyEditorView
 
     private let scrollView = NSScrollView()
-    private let stack = NSStackView()
+    // 뒤집힌 좌표계 — 안 뒤집으면 스크롤 칸이 열릴 때 내용이 가운데로 몰려
+    // 미리보기 위로 빈 띠가 남는다(사이드바와 같은 버릇, WorkshopSidebarView 참고).
+    private let stack = FlippedStackView()
 
     private let previewContainer = NSView()
     private let previewImageView = NSImageView()

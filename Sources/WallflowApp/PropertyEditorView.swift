@@ -17,7 +17,9 @@ final class PropertyEditorView: NSView {
     /// 컨트롤 ↔ 속성 이름. 조건이 바뀌면 보이고 숨기는 데 쓴다.
     private var rows: [(name: String, view: NSView)] = []
 
-    init(store: UserPropertyStore, onChanged: @escaping () -> Void) {
+    /// 창작마당 상세 패널은 자기 제목을 이미 보여 주므로 여기서 또 안 보여 준다
+    /// — 설정 창 속성 탭은 계속 보여 준다(기본값).
+    init(store: UserPropertyStore, onChanged: @escaping () -> Void, showsTitle: Bool = true) {
         self.store = store
         self.onChanged = onChanged
         super.init(frame: .zero)
@@ -27,6 +29,7 @@ final class PropertyEditorView: NSView {
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 20, bottom: 16, right: 20)
         titleLabel.font = .boldSystemFont(ofSize: 13)
+        titleLabel.isHidden = !showsTitle
 
         let outer = NSStackView(views: [titleLabel, stack])
         outer.orientation = .vertical

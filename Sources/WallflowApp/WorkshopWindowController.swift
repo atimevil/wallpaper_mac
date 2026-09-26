@@ -53,6 +53,7 @@ final class WorkshopWindowController: NSWindowController {
     private var filterState = WorkshopFilterState()
 
     private let collectionView = NSCollectionView()
+    private let gridLayout = WorkshopGridLayout()
     private let scrollView = NSScrollView()
     private let searchField = NSSearchField()
     private let sortPopup = NSPopUpButton()
@@ -113,7 +114,7 @@ final class WorkshopWindowController: NSWindowController {
         // 설정 창과 같은 저장소·같은 콜백 — 편집이 같은 곳에 저장되고 켜진
         // 배경화면에 그 즉시 반영된다.
         self.detailPanel = WorkshopDetailPanel(
-            editor: PropertyEditorView(store: store, onChanged: onPropertiesChanged))
+            editor: PropertyEditorView(store: store, onChanged: onPropertiesChanged, showsTitle: false))
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
@@ -263,13 +264,11 @@ final class WorkshopWindowController: NSWindowController {
         topRow.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
         gridToolsRow.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
 
-        // 격자로 보여 준다. 흐름 배치라 창 너비가 바뀌면 한 줄에 들어가는 개수가
-        // 알아서 바뀐다. 배경화면은 그림이 본체라 표보다 격자가 맞다.
-        let layout = NSCollectionViewFlowLayout()
-        layout.minimumInteritemSpacing = 8
-        layout.minimumLineSpacing = 8
-        layout.sectionInset = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
-        collectionView.collectionViewLayout = layout
+        // 격자로 보여 준다. 왼쪽부터 채우는 자체 배치라 창 너비가 바뀌면
+        // 한 줄에 들어가는 개수가 알아서 바뀐다. 배경화면은 그림이 본체라
+        // 표보다 격자가 맞다.
+        gridLayout.targetCellWidth = CGFloat(cellSizeSlider.doubleValue)
+        collectionView.collectionViewLayout = gridLayout
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.isSelectable = true
@@ -389,7 +388,7 @@ final class WorkshopWindowController: NSWindowController {
 
     @objc private func cellSizeChanged() {
         UserDefaults.standard.set(cellSizeSlider.doubleValue, forKey: Self.cellSizeKey)
-        collectionView.collectionViewLayout?.invalidateLayout()
+        gridLayout.targetCellWidth = CGFloat(cellSizeSlider.doubleValue)
     }
 
     // MARK: - 목록 (창작마당 · 무한 스크롤)
@@ -414,11 +413,11 @@ final class WorkshopWindowController: NSWindowController {
     @objc private func scrollViewDidScroll() {
         guard tab == .browse, !isLoadingPage, !reachedEnd else { return }
         let visibleBottom = scrollView.documentVisibleRect.maxY
-        // 흐름 배치의 실측 내용 높이. `collectionView.frame`은 스크롤이 막
+        // 격자의 실측 내용 높이. `collectionView.frame`은 스크롤이 막
         // 바뀐 직후에는 아직 갱신 전이라 낡은 값을 줄 수 있다.
         let contentHeight = collectionView.collectionViewLayout?
             .collectionViewContentSize.height ?? collectionView.frame.height
-        let rowHeight = Double(cellSizeSlider.doubleValue) + 8 + 20 // 칸 + 줄 간격 + 제목 줄
+        let rowHeight = Double(cellSizeSlider.doubleValue) + Double(gridLayout.spacing) + 20 // 칸 + 줄 간격 + 제목 줄
         guard WorkshopScrollPaging.shouldLoadNextPage(
             visibleBottom: Double(visibleBottom), contentHeight: Double(contentHeight),
             rowHeight: rowHeight) else { return }
@@ -913,8 +912,7 @@ final class WorkshopWindowController: NSWindowController {
     }
 }
 
-extension WorkshopWindowController: NSCollectionViewDataSource,
-                                   NSCollectionViewDelegateFlowLayout {
+extension WorkshopWindowController: NSCollectionViewDataSource, NSCollectionViewDelegate {
     func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int)
         -> Int { displayedEntries.count }
 
@@ -932,26 +930,6 @@ extension WorkshopWindowController: NSCollectionViewDataSource,
                 downloadProgress: progress)
         }
         return cell
-    }
-
-    /// 칸 크기를 슬라이더 값과 창 너비에 맞춰 나눈다. 흐름 배치는 남는 자리를
-    /// **칸 사이 간격**으로 흘려보낸다 — 고정 크기로 두면 창이 넓어질수록 칸
-    /// 사이가 벌어져 목록 가운데가 뻥 뚫린다. 한 줄에 몇 개가 들어갈지 먼저
-    /// 정하고 남는 자리를 칸 너비에 나눠 준다. 칸은 정사각이다.
-    func collectionView(
-        _ collectionView: NSCollectionView, layout: NSCollectionViewLayout,
-        sizeForItemAt indexPath: IndexPath
-    ) -> NSSize {
-        let flow = layout as? NSCollectionViewFlowLayout
-        let inset = flow?.sectionInset ?? NSEdgeInsets()
-        let spacing = flow?.minimumInteritemSpacing ?? 8
-        let target = cellSizeSlider.doubleValue > 0 ? CGFloat(cellSizeSlider.doubleValue) : 220
-        let available = collectionView.bounds.width - inset.left - inset.right
-        guard available > 0 else { return NSSize(width: target, height: target + 20) }
-        let columns = Swift.max(1, Int((available + spacing) / (target + spacing)))
-        let width = (available - spacing * CGFloat(columns - 1)) / CGFloat(columns)
-        // 정사각 미리보기 + 제목 한 줄만큼 아래로 늘린다.
-        return NSSize(width: floor(width), height: floor(width) + 20)
     }
 
     func collectionView(
