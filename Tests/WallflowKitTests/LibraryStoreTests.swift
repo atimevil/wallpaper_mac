@@ -99,7 +99,7 @@ final class LibraryStoreTests: XCTestCase {
         )
         let item = try WallpaperItem.load(from: dir)
         XCTAssertNil(item.contentRating)
-        XCTAssertEqual(Set(item.filterTags), ["Video"])
+        XCTAssertEqual(Set(item.filterTags), ["Video", "Everyone"])
     }
 
     func testTitleFallsBackToDirectoryName() throws {

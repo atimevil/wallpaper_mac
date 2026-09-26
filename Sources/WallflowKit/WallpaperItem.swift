@@ -64,7 +64,9 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
         case .scene: out.append("Scene")
         case .unsupported: break
         }
-        if let contentRating { out.append(contentRating) }
+        // 등급을 안 적은 항목은 WE가 전체 이용가로 다룬다 — 빼면 기본 필터(전체 이용가)에
+        // 걸려 설치됨 탭에서 사라진다(실물 4개가 이렇다).
+        out.append(contentRating ?? "Everyone")
         return out
     }
 
