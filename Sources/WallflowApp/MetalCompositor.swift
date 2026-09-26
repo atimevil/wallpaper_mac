@@ -632,7 +632,36 @@ final class MetalCompositor {
         }
         guard var encoder = startEncoder(clear: true) else { return }
 
-        for (quad, source) in layers {
+        // 3D 메시끼리는 화면 안쪽 자리가 아니라 카메라 거리로 그리는 순서를
+        // 정한다. 씬 파일의 레이어 순서(작성 UI의 목록 순서)는 깊이 테스트가
+        // 있는 진짜 WE 렌더러에서는 상관없지만, 이 컴포지터는 원근 씬에서도
+        // 깊이 버퍼 없이 목록 순서 그대로 덮어 그린다(레이어 하나마다 이펙트
+        // 합성을 낄 수 있어 인코더를 자주 끊어야 하므로 깊이 버퍼를 얹기보다
+        // 훨씬 단순하다). 카메라를 감싸는 하늘상자처럼 큰 메시가 목록에서
+        // 작은 전경 메시보다 **뒤**(나중)에 있으면 그 전경을 통째로 덮어
+        // 그려 사라진다(실물 `Three-Body`의 세 항성이 하늘상자에 가려 검은
+        // 원반으로 남았었다). 그래서 `.model` 자리만 따로 모아 경계구의 먼
+        // 쪽 끝(카메라 거리 + 반지름)이 먼 것부터 그리도록 자리를 바꾼다 —
+        // 2D 레이어의 순서·`.composition`이 보는 "지금까지 그린 화면"은
+        // 건드리지 않는다(자리 자체는 그대로 두고 내용만 바꿔치기한다).
+        var orderedLayers = layers
+        let modelSlots = orderedLayers.indices.filter {
+            if case .model = orderedLayers[$0].1 { return true }
+            return false
+        }
+        if modelSlots.count > 1 {
+            let farEdge: (QuadInstance, LayerSource) -> Float = { quad, source in
+                guard case .model(let renderer) = source else { return 0 }
+                let origin = SIMD3(quad.world.columns.3.x, quad.world.columns.3.y, quad.world.columns.3.z)
+                let scale = simd_length(SIMD3(quad.world.columns.0.x, quad.world.columns.0.y, quad.world.columns.0.z))
+                return simd_length(origin - self.cameraEye) + renderer.boundingRadius * scale
+            }
+            let sorted = modelSlots.map { orderedLayers[$0] }
+                .sorted { farEdge($0.0, $0.1) > farEdge($1.0, $1.1) }
+            for (slot, entry) in zip(modelSlots, sorted) { orderedLayers[slot] = entry }
+        }
+
+        for (quad, source) in orderedLayers {
             // 스크립트가 숨긴 레이어. 알파 0으로 그려도 보이지 않지만, 메시·파티클은
             // 알파와 무관하게 그리므로 아예 건너뛴다.
             if quad.color.w <= 0.001 { continue }
