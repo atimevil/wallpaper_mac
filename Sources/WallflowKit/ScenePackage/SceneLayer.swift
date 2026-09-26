@@ -583,8 +583,18 @@ public struct SceneCamera: Equatable, Sendable {
         self.up = up
     }
 
-    /// `general`에서 읽는다. 값은 수이거나 `{"user": …, "value": …}` 객체다.
-    static func parse(_ general: [String: Any]) -> SceneCamera {
+    /// `fov`·`nearz`·`farz`는 `general`에서, 눈·중심·위는 `general.camera`나
+    /// **씬 최상위의 `camera`**(`{"eye":…, "center":…, "up":…}`)에서 읽는다.
+    /// 값은 수이거나 `{"user": …, "value": …}` 객체다.
+    ///
+    /// **실물은 전부 최상위 `camera`를 쓴다** — 코퍼스의 원근 씬 넷(`prism`·
+    /// `space boi`·`Three-Body`·`球体01` 씬) 모두 `general.camera`는 없고
+    /// `scene.camera`만 있다. `general.camera`만 보던 예전 코드는 늘 기본 눈
+    /// (0,0,100)으로 떨어졌다 — Three-Body는 우연히 카메라 오브젝트의 origin으로
+    /// 덮어써져 괜찮아 보였을 뿐, `space boi`처럼 그런 오브젝트가 없는 씬은
+    /// 카메라가 원점 가까이(0,0,100)에 남아 메시 시야 방향(`v_ViewDir`)이
+    /// 어긋났다. 최상위가 있으면 그걸 먼저 쓴다.
+    static func parse(_ general: [String: Any], topLevelCamera: [String: Any]? = nil) -> SceneCamera {
         func number(_ raw: Any?, _ fallback: Double, min lo: Double, max hi: Double) -> Double {
             let value = (raw as? [String: Any])?["value"] ?? raw
             guard let d = (value as? NSNumber)?.doubleValue, d.isFinite else { return fallback }
@@ -594,7 +604,7 @@ public struct SceneCamera: Equatable, Sendable {
         camera.fov = number(general["fov"], 50, min: 1, max: 179)
         camera.nearZ = number(general["nearz"], 0.1, min: 0.0001, max: 1e6)
         camera.farZ = number(general["farz"], 10000, min: camera.nearZ * 1.001, max: 1e9)
-        if let block = general["camera"] as? [String: Any] {
+        for block in [general["camera"] as? [String: Any], topLevelCamera].compactMap({ $0 }) {
             if let eye = (block["eye"] as? String).flatMap(Vec3.parse) { camera.eye = eye }
             if let center = (block["center"] as? String).flatMap(Vec3.parse) { camera.center = center }
             if let up = (block["up"] as? String).flatMap(Vec3.parse) { camera.up = up }

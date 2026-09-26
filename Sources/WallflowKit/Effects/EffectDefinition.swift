@@ -106,6 +106,18 @@ public enum EffectConstant: Equatable, Sendable {
         }
         return nil
     }
+
+    /// 셰이더 주석의 `material` 키로 재질 상수를 찾는다. 정확히 맞는 키가
+    /// 없으면 대소문자를 무시하고 한 번 더 찾는다 — 실물 `space boi`의
+    /// `diffuse_0.json`이 키를 `Alpha`(대문자)로 주는데 셰이더 주석은
+    /// `alpha`(소문자)를 기대한다. 못 찾으면 `g_TintAlpha`가 기본값
+    /// 1(불투명)로 남아, 반투명이어야 할 메시가 화면을 통째로 덮는 판으로
+    /// 그려진다. `ModelRenderer`(3D 메시)·`EffectChain`(2D 이펙트) 둘 다 이
+    /// 자리로 찾는다 — 한쪽만 고치면 나머지 하나는 같은 결함을 그대로 낸다.
+    public static func lookup(materialKey: String, in constants: [String: EffectConstant]) -> EffectConstant? {
+        constants[materialKey]
+            ?? constants.first { $0.key.caseInsensitiveCompare(materialKey) == .orderedSame }?.value
+    }
 }
 
 extension EffectDefinition {

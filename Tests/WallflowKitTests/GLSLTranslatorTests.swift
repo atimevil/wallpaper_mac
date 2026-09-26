@@ -414,6 +414,29 @@ final class GLSLTranslatorTests: XCTestCase {
                       result.source)
     }
 
+    /// `texSample2D(tex, uv)`는 텍스처·샘플러 이름을 붙여 만든다. **직접**
+    /// `tex##Sampler`로 붙이면 C 전처리기 규칙상 `##`의 피연산자는 먼저
+    /// 펼쳐지지 않는다 — 인자가 `GRADIENT_SAMPLER`(실물 `generic3.frag`가
+    /// `#define GRADIENT_SAMPLER g_Texture4`로 미리 붙이는 별명) 같은 매크로
+    /// 이름이면 `g_Texture4`로 안 바뀌고 `GRADIENT_SAMPLERSampler`라는 없는
+    /// 식별자로 그대로 붙어 Metal 컴파일이 깨진다(space boi 씬으로 확인).
+    /// `WF_CAT(a,b)`가 `WF_CAT_(a,b)`(실제 `##` 붙임)를 한 단계 감싸 인자를
+    /// 먼저 펼친 뒤 붙인다 — 이 두 매크로와, `tex##Sampler`를 직접 쓰는
+    /// 자리가 프렐류드에 하나도 안 남았는지가 이 번역기의 결함이 다시
+    /// 생기지 않았다는 증거다. Metal 자체의 매크로 펼침은 Kit에서 못 재므로
+    /// (Metal을 못 부른다) 여기까지가 검증선이다.
+    func testTexSampleMacrosUseTwoLevelTokenPasteNotDirect() throws {
+        let result = try translate("void main() { gl_FragColor = vec4(0.0); }")
+        XCTAssertTrue(result.source.contains("#define WF_CAT_(a, b) a##b"), result.source)
+        XCTAssertTrue(result.source.contains("#define WF_CAT(a, b) WF_CAT_(a, b)"), result.source)
+        XCTAssertTrue(result.source.contains("WF_CAT(tex, Sampler)"), result.source)
+        // 주석 말고 실제 매크로 정의 줄에는 직접 붙임(`tex##Sampler`)이 하나도
+        // 없어야 한다 — 있으면 그 한 자리가 이 결함을 다시 낸다.
+        let codeLines = result.source.split(separator: "\n").map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        XCTAssertFalse(codeLines.contains { $0.contains("tex##Sampler") }, "\(codeLines)")
+    }
+
     /// 이름이 규칙에 안 맞으면 선언 순서로 매긴다. 그때만이다.
     func testUnnamedSamplersFallBackToDeclarationOrder() throws {
         let result = try translate("""
@@ -518,7 +541,7 @@ final class GLSLTranslatorTests: XCTestCase {
     /// `.xy`만 채워 쓰는데 `texSample2D`에 그대로 넘긴다 — `sample()`은 `float2`만
     /// 받아 "no matching member function for call to 'sample'"로 떨어졌었다.
     func testTexSample2DTruncatesWiderCoordinate() throws {
-        XCTAssertTrue(ShaderPrelude.sampling.contains("tex.sample(tex##Sampler, wfTo2(uv))"),
+        XCTAssertTrue(ShaderPrelude.sampling.contains("tex.sample(WF_CAT(tex, Sampler), wfTo2(uv))"),
                       ShaderPrelude.sampling)
         let result = try translate("""
         uniform sampler2D g_Texture0;

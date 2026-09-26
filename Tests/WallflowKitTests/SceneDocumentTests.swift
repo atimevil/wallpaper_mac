@@ -655,6 +655,56 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(doc.camera?.eye, Vec3(x: 0, y: 0, z: 100), "카메라 오브젝트가 없으면 기본값")
     }
 
+    /// 실물 원근 씬 넷(`prism`·`space boi`·`Three-Body`·`球体01`)이 전부 카메라를
+    /// `general.camera`가 아니라 **씬 최상위 `camera`**로 준다. 그걸 놓치면 기본
+    /// 눈 자리(0,0,100)가 남아 — `space boi.mdl`처럼 카메라 오브젝트로 덮어쓸
+    /// 길이 없는 씬은 메시의 시야 방향(`v_ViewDir = g_EyePosition - worldPos`)이
+    /// 어긋나 화면이 통째로 깨진다.
+    func testTopLevelCameraOverridesDefaultEyePosition() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null},
+         "camera": {"eye": "0.49863 0.86117 5.14408", "center": "0.41454 0.69461 4.16164",
+                    "up": "0.00000 1.00000 0.00000"},
+         "objects": []}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        let camera = try XCTUnwrap(doc.camera)
+        XCTAssertEqual(camera.eye, Vec3(x: 0.49863, y: 0.86117, z: 5.14408))
+        XCTAssertEqual(camera.center, Vec3(x: 0.41454, y: 0.69461, z: 4.16164))
+    }
+
+    /// `general.camera`와 씬 최상위 `camera`가 둘 다 있으면(실물엔 없지만) 최상위가
+    /// 이긴다 — 실물 전부가 최상위만 쓰므로 그쪽을 더 믿는다.
+    func testTopLevelCameraWinsOverGeneralCamera() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null,
+                     "camera": {"eye": "1 1 1", "center": "0 0 0", "up": "0 1 0"}},
+         "camera": {"eye": "0 0 38", "center": "0 0 0", "up": "0 1 0"},
+         "objects": []}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.camera?.eye, Vec3(x: 0, y: 0, z: 38))
+    }
+
+    /// 카메라 오브젝트가 있으면 최상위 `camera`의 중심도 안 믿는다. 실물 球体01
+    /// (3589454154) 씬으로 확인한 회귀다 — 최상위 camera는 eye(3.66,1.39,2.30)·
+    /// center(3.30,1.17,1.39)로 씬 콘텐츠(원점 근처)에서 먼 다른 자리를 보는
+    /// 값이고, 카메라 오브젝트(`angles` 없이 origin만)의 origin(0,0,2.3)만
+    /// 눈으로 쓰고 중심을 원점에 둬야 고리 클로즈업이 나온다. 중심까지 최상위
+    /// 값을 남기면(첫 시도가 그랬다) 카메라가 콘텐츠를 비켜 봐 화면이 별
+    /// 몇 점만 남고 거의 새까매졌다.
+    func testCameraObjectResetsCenterEvenWithTopLevelCamera() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null},
+         "camera": {"eye": "3.65928 1.38746 2.29606", "center": "3.30315 1.17151 1.38692",
+                    "up": "0.00000 1.00000 0.00000"},
+         "objects": [{"id": 118, "camera": "default", "origin": "0.00000 0.00000 2.30000"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.camera?.eye, Vec3(x: 0, y: 0, z: 2.3))
+        XCTAssertEqual(doc.camera?.center, Vec3(x: 0, y: 0, z: 0), "중심도 원점으로 되돌아가야 한다")
+    }
+
     /// `general.bloom`은 맨 Bool이거나 `{"user":…, "value":true}`다. 세기·문턱값도
     /// 같이 온다. 직교·원근 둘 다 되는지 본다.
     func testBloomFieldsAreParsedForBothProjections() throws {

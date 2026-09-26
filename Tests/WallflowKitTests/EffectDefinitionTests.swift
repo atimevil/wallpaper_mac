@@ -218,4 +218,17 @@ final class EffectDefinitionTests: XCTestCase {
         let ids = EffectDefinition.referencedLayerIDs(in: [referencing, source, unrelated])
         XCTAssertEqual(ids, [1321])
     }
+
+    /// 실물 `space boi`의 `diffuse_0.json`이 재질 키를 `Alpha`(대문자)로 주는데
+    /// 셰이더 주석은 `alpha`(소문자)를 기대한다 — 정확히 맞는 키가 없으면
+    /// 대소문자 무시하고 한 번 더 찾아야 한다. `ModelRenderer`·`EffectChain`
+    /// 둘 다 이 자리로 찾는다.
+    func testLookupFallsBackCaseInsensitively() {
+        let constants: [String: EffectConstant] = ["Alpha": .scalar(0)]
+        XCTAssertEqual(EffectConstant.lookup(materialKey: "alpha", in: constants), .scalar(0))
+        // 정확히 맞는 키가 있으면 그쪽을 먼저 쓴다.
+        let exact: [String: EffectConstant] = ["alpha": .scalar(1), "Alpha": .scalar(0)]
+        XCTAssertEqual(EffectConstant.lookup(materialKey: "alpha", in: exact), .scalar(1))
+        XCTAssertNil(EffectConstant.lookup(materialKey: "missing", in: constants))
+    }
 }

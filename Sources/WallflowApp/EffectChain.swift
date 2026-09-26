@@ -478,7 +478,8 @@ final class EffectChain {
         var packed: [String: [Float]] = [:]
         for uniform in uniforms {
             guard let field = layout.field(named: uniform.name) else { continue }
-            let constant = uniform.materialKey.flatMap { pass.constants[$0] }
+            // 재질 키 대소문자 어긋남은 `EffectConstant.lookup` 문서 참고.
+            let constant = uniform.materialKey.flatMap { EffectConstant.lookup(materialKey: $0, in: pass.constants) }
                 ?? uniform.defaultValue.flatMap { EffectConstant.parse($0) }
             guard let constant else { continue }
             packed[uniform.name] = constant.components(field.count)
