@@ -19,7 +19,7 @@ enum WorkshopTab: Int, CaseIterable {
 /// 배경화면을 고르고, 창작마당에서 받아 라이브러리에 넣는 창.
 ///
 /// 세 칸이다: 왼쪽 체크박스 필터 사이드바, 가운데 호버 GIF·무한 스크롤 격자,
-/// 오른쪽 상세 패널(지금은 빈 컨테이너 — T6가 채운다).
+/// 오른쪽 상세 패널.
 ///
 /// 목록은 스팀에서 읽고, 다운로드는 steamcmd가 한다. 자격 증명은 이 앱이 만지지
 /// 않는다 — steamcmd가 비밀번호와 Steam Guard를 대화식으로만 받으므로, 사용자가
@@ -57,8 +57,14 @@ final class WorkshopWindowController: NSWindowController {
     private let searchField = NSSearchField()
     private let sortPopup = NSPopUpButton()
     private let cellSizeSlider = NSSlider()
-    /// 오른쪽 칸. 지금은 비어 있다 — T6가 `WorkshopDetailPanel`을 여기 넣는다.
+    /// 오른쪽 칸. `detailPanel`을 꽉 채워 넣는다.
     let detailContainer = NSView()
+    private let detailPanel: WorkshopDetailPanel
+    /// 상세 페이지(평점·작성자) 메모리 캐시. id별로 한 번만 받는다.
+    private var detailsPageCache: [String: WorkshopDetailsPage] = [:]
+    /// 지금 받는 중인 상세 페이지 id들. 다운로드 진행률 줄마다 `refreshDetailPanel`이
+    /// 다시 불려도 같은 id를 두 번 청하지 않는다.
+    private var detailsPageInFlight: Set<String> = []
 
     private let loginButton = NSButton(title: "스팀 로그인", target: nil, action: nil)
     private let removeButton = NSButton(title: "지우기", target: nil, action: nil)
@@ -96,14 +102,20 @@ final class WorkshopWindowController: NSWindowController {
 
     init(
         installer: WorkshopInstaller,
+        store: UserPropertyStore,
         libraryItems: @escaping () -> [WallpaperItem],
         onApply: @escaping (WallpaperItem) -> Void,
-        onLibraryChanged: @escaping () -> Void
+        onLibraryChanged: @escaping () -> Void,
+        onPropertiesChanged: @escaping () -> Void
     ) {
         self.installer = installer
         self.libraryItems = libraryItems
         self.onApply = onApply
         self.onLibraryChanged = onLibraryChanged
+        // 설정 창과 같은 저장소·같은 콜백 — 편집이 같은 곳에 저장되고 켜진
+        // 배경화면에 그 즉시 반영된다.
+        self.detailPanel = WorkshopDetailPanel(
+            editor: PropertyEditorView(store: store, onChanged: onPropertiesChanged))
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
@@ -114,6 +126,8 @@ final class WorkshopWindowController: NSWindowController {
         window.center()
         super.init(window: window)
         window.contentView = makeContentView()
+        detailPanel.onPrimary = { [weak self] in self?.activateSelected() }
+        detailPanel.onRemove = { [weak self] in self?.removeSelected() }
         Self.current = self
         showTab(.installed)
     }
@@ -131,6 +145,14 @@ final class WorkshopWindowController: NSWindowController {
 
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        detailPanel.translatesAutoresizingMaskIntoConstraints = false
+        detailContainer.addSubview(detailPanel)
+        NSLayoutConstraint.activate([
+            detailPanel.topAnchor.constraint(equalTo: detailContainer.topAnchor),
+            detailPanel.bottomAnchor.constraint(equalTo: detailContainer.bottomAnchor),
+            detailPanel.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor),
+            detailPanel.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor),
+        ])
 
         let splitView = NSSplitView()
         splitView.isVertical = true
@@ -531,8 +553,15 @@ final class WorkshopWindowController: NSWindowController {
     }
 
     @objc private func refreshTable() {
+        // `reloadData()`는 선택을 잃는다(무한 스크롤 다음 페이지·다운로드 뒤
+        // 갱신마다 불린다) — 골라 둔 id가 새 목록에도 있으면 되살린다. 안 그러면
+        // 다운로드가 끝나자마자 상세 패널이 "적용"으로 안 바뀌고 빈 채로 간다.
+        let keepID = selectedEntry?.id
         displayedEntries = visibleEntries
         collectionView.reloadData()
+        if let keepID, let index = displayedEntries.firstIndex(where: { $0.id == keepID }) {
+            collectionView.selectionIndexPaths = [IndexPath(item: index, section: 0)]
+        }
         selectionDidChange()
     }
 
@@ -553,17 +582,55 @@ final class WorkshopWindowController: NSWindowController {
         }
     }
 
-    // MARK: - 선택·활성화 (T6가 채운다)
+    // MARK: - 선택·활성화
 
-    /// 오른쪽 상세 패널에 지금 고른 항목을 알린다. 지금은 컨테이너가 비어 있어
-    /// 아무것도 안 하지만, T6가 `WorkshopDetailPanel`을 여기 연결한다.
+    /// 오른쪽 상세 패널에 지금 고른 항목을 알린다.
     private func selectionDidChange() {
         updateDownloadButton()
+        refreshDetailPanel()
+    }
+
+    /// 지금 탭·선택에 맞춰 상세 패널을 다시 그린다. 창작마당 항목이고 상세
+    /// 페이지(평점·작성자)를 아직 못 받았으면 백그라운드로 받아 온다.
+    private func refreshDetailPanel() {
+        switch tab {
+        case .installed:
+            guard let item = selectedLibraryItem else { detailPanel.showEmpty(); return }
+            detailPanel.showInstalled(item: item, preview: thumbnails.object(forKey: item.id as NSString))
+        case .browse:
+            guard let item = selectedItem else { detailPanel.showEmpty(); return }
+            let progress = (item.id == downloadingID) ? downloadFraction : nil
+            detailPanel.showWorkshop(
+                item: item, preview: thumbnails.object(forKey: item.id as NSString),
+                page: detailsPageCache[item.id],
+                installed: installer.isInstalled(id: item.id), progress: progress)
+            if detailsPageCache[item.id] == nil {
+                loadDetailsPage(for: item.id)
+            }
+        }
+    }
+
+    /// 평점·작성자는 목록 API에 없다 — 상세 페이지를 따로 긁는다. 실패해도
+    /// 나머지 패널은 이미 떠 있으니 조용히 넘어간다(Review Focus 3).
+    private func loadDetailsPage(for id: String) {
+        // 다운로드 진행률 줄마다 `refreshDetailPanel`이 다시 부르므로, 이미
+        // 청한 id면 새로 청하지 않는다 — 안 그러면 같은 페이지를 초당 여러 번 받는다.
+        guard detailsPageInFlight.insert(id).inserted else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.detailsPageInFlight.remove(id) }
+            guard let page = try? await self.client.detailsPage(id: id) else { return }
+            // 캐시는 선택이 바뀌었어도 채운다 — 다시 고르면 또 받을 필요가 없다.
+            self.detailsPageCache[id] = page
+            // 받는 사이 다른 항목을 골랐으면 다시 그리지 않는다 — 화면과 안 맞는다.
+            guard self.selectedItem?.id == id else { return }
+            self.refreshDetailPanel()
+        }
     }
 
     /// 더블클릭 훅. 창작마당 탭은 이미 설치된 항목이면 적용, 아니면 기존
     /// 다운로드 흐름을 그대로 부른다. 설치됨 탭은 기존 적용 흐름이다.
-    /// T6가 상세 패널의 "받기/적용" 버튼도 같은 메서드로 연결한다.
+    /// 상세 패널의 "받기/적용" 버튼도 같은 메서드로 연결한다.
     private func activateSelected() {
         guard let entry = selectedEntry else { return }
         switch tab {
@@ -691,13 +758,18 @@ final class WorkshopWindowController: NSWindowController {
     /// 진행률 줄마다 온다 — 칸을 통째로 다시 그리면 깜빡이고 호버 애니메이션도
     /// 끊긴다. 이미 화면에 있는 칸이면 진행 막대만 고쳐 그린다.
     private func reloadDownloadingItem() {
-        guard let id = downloadingID,
-              let index = displayedEntries.firstIndex(where: { $0.id == id }) else { return }
-        let indexPath = IndexPath(item: index, section: 0)
-        if let cell = collectionView.item(at: indexPath) as? WorkshopGridItem {
-            cell.updateProgress(downloadFraction)
-        } else {
-            collectionView.reloadItems(at: [indexPath])
+        guard let id = downloadingID else { return }
+        if let index = displayedEntries.firstIndex(where: { $0.id == id }) {
+            let indexPath = IndexPath(item: index, section: 0)
+            if let cell = collectionView.item(at: indexPath) as? WorkshopGridItem {
+                cell.updateProgress(downloadFraction)
+            } else {
+                collectionView.reloadItems(at: [indexPath])
+            }
+        }
+        // 지금 받는 항목이 고른 항목이면 상세 패널의 진행 막대도 같이 간다.
+        if tab == .browse, selectedItem?.id == id {
+            refreshDetailPanel()
         }
     }
 
