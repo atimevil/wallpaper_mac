@@ -99,9 +99,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         if workshop == nil {
             workshop = WorkshopWindowController(
                 installer: installer,
+                store: SceneRenderer.propertyStore,
                 libraryItems: { [weak self] in (try? self?.library.scan()) ?? [] },
                 onApply: { [weak self] item in self?.select(item) },
-                onLibraryChanged: { [weak self] in self?.refreshLibrary() })
+                onLibraryChanged: { [weak self] in self?.refreshLibrary() },
+                onPropertiesChanged: { [weak self] in self?.displays.reloadCurrent() })
         }
         // 메뉴바 전용 앱이라 창을 띄우려면 앱을 활성화해야 한다.
         NSApp.activate(ignoringOtherApps: true)
