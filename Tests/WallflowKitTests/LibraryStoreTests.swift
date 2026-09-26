@@ -59,6 +59,24 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertNil(try WallpaperItem.load(from: dir).previewURL)
     }
 
+    func testLoadsTags() throws {
+        let dir = try makeItem(
+            id: "666",
+            json: #"{"type":"video","file":"bg.mp4","title":"T","tags":["Anime","Relaxing"]}"#,
+            files: ["bg.mp4"]
+        )
+        XCTAssertEqual(try WallpaperItem.load(from: dir).tags, ["Anime", "Relaxing"])
+    }
+
+    func testMissingTagsIsEmpty() throws {
+        let dir = try makeItem(
+            id: "667",
+            json: #"{"type":"video","file":"bg.mp4","title":"T"}"#,
+            files: ["bg.mp4"]
+        )
+        XCTAssertEqual(try WallpaperItem.load(from: dir).tags, [])
+    }
+
     func testTitleFallsBackToDirectoryName() throws {
         let dir = try makeItem(
             id: "444",

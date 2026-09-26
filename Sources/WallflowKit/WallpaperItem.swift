@@ -30,11 +30,13 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
     public let presetValues: [String: UserPropertyValue]
     /// 프리셋 항목의 폴더. 프리셋이 든 그림·영상(`files/…`)이 여기 있다.
     public let presetDirectory: URL?
+    /// project.json의 `tags`. 사이드바 필터가 라이브러리 항목을 거를 때 쓴다.
+    public let tags: [String]
 
     public init(id: String, title: String, type: WallpaperType, directory: URL,
                 contentURL: URL, previewURL: URL?, unsupportedReason: String? = nil,
                 dependencyID: String? = nil, presetValues: [String: UserPropertyValue] = [:],
-                presetDirectory: URL? = nil) {
+                presetDirectory: URL? = nil, tags: [String] = []) {
         self.id = id
         self.title = title
         self.type = type
@@ -45,6 +47,7 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
         self.dependencyID = dependencyID
         self.presetValues = presetValues
         self.presetDirectory = presetDirectory
+        self.tags = tags
     }
 
     /// 프리셋의 날것 값을 알맹이의 속성 종류에 맞춰 읽는다.
@@ -145,6 +148,7 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
         }
 
         let contentURL = directory.appendingPathComponent(file)
+        let tags = (dict["tags"] as? [String]) ?? []
 
         // webm/mkv처럼 컨테이너 자체를 AVFoundation이 못 여는 것도 여기서는
         // 더 이상 .unsupported로 거르지 않는다. ffmpeg가 있으면 붙일 때
@@ -158,7 +162,8 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
             type: type,
             directory: directory,
             contentURL: contentURL,
-            previewURL: preview
+            previewURL: preview,
+            tags: tags
         )
     }
 }
