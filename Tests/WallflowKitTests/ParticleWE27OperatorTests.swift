@@ -256,6 +256,101 @@ final class ParticleWE27OperatorTests: XCTestCase {
         XCTAssertTrue(moved, "응집력이 있으면 속도가 생겨야 한다")
     }
 
+    /// boids는 공간 격자로 이웃 후보를 좁혀서 계산한다(ParticleSystem.computeBoidForces
+    /// 참고, O(n²) 전수 비교 대신 O(n·k)). 격자가 후보를 놓치면 안 되므로, 파티클을
+    /// 반경(threshold)보다 훨씬 넓게 흩어 여러 칸에 걸치게 한 뒤 결과를 전수
+    /// 비교로 짠 참조 구현과 맞춰 본다 — 같은 이웃 판정(`distSq < thresholdSq`)을
+    /// 쓰는 한 결과가 정확히 같아야 한다(부동소수 합산 순서 차이만 허용).
+    func testBoidsGridMatchesBruteForceReference() throws {
+        let neighborThreshold = 60.0
+        // 반경(threshold)보다 훨씬 넓은 구(반지름 0~400)에 흩어 여러 격자 칸에
+        // 걸치게 만든다 — 격자 도입 전이면 이 정도로도 O(n²) 비교로 충분했지만,
+        // 이 테스트의 목적은 격자가 그 결과를 그대로 재현하는지 확인하는 것이다.
+        let emitter = ParticleEmitter.sphereRandom(
+            rate: 0, origin: Vec3(x: 0, y: 0, z: 0), directions: Vec3(x: 1, y: 1, z: 1),
+            distanceMin: 0, distanceMax: 400,
+            burst: ParticleEmitterBurst(count: 80, speedMin: 0, speedMax: 0))
+        let preset = ParticlePreset(
+            maxCount: 80, startTime: 0, materialPath: "m.json", emitters: [emitter],
+            initializers: [.lifetimeRandom(min: 100, max: 100), .sizeRandom(min: 10, max: 10),
+                           .velocityRandom(min: Vec3(x: 0, y: 0, z: 0), max: Vec3(x: 0, y: 0, z: 0))],
+            operators: [.boids(cohesionFactor: 1.5, separationFactor: 2, alignmentFactor: 0,
+                               neighborThreshold: neighborThreshold)],
+            unsupportedNames: [], controlPoints: [])
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 3))
+        system.update(deltaTime: Self.step)
+
+        // 참조 구현: 원래 있던 전수 비교(O(n²))를 테스트에서 그대로 재현한다.
+        func bruteForceForces(_ particles: [Particle]) -> [Vec3] {
+            var forces = Array(repeating: Vec3(x: 0, y: 0, z: 0), count: particles.count)
+            let thresholdSq = neighborThreshold * neighborThreshold
+            for i in 0..<particles.count {
+                let pi = particles[i]
+                var centerSum = Vec3(x: 0, y: 0, z: 0)
+                var separationSum = Vec3(x: 0, y: 0, z: 0)
+                var neighborCount = 0
+                for j in 0..<particles.count where j != i {
+                    let pj = particles[j]
+                    let delta = Vec3(x: pj.position.x - pi.position.x,
+                                     y: pj.position.y - pi.position.y,
+                                     z: pj.position.z - pi.position.z)
+                    let distSq = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z
+                    guard distSq < thresholdSq, distSq > 1e-9 else { continue }
+                    neighborCount += 1
+                    centerSum = Vec3(x: centerSum.x + pj.position.x, y: centerSum.y + pj.position.y,
+                                     z: centerSum.z + pj.position.z)
+                    let dist = distSq.squareRoot()
+                    separationSum = Vec3(x: separationSum.x - delta.x / dist,
+                                         y: separationSum.y - delta.y / dist,
+                                         z: separationSum.z - delta.z / dist)
+                }
+                guard neighborCount > 0 else { continue }
+                let n = Double(neighborCount)
+                let cohesion = Vec3(x: centerSum.x / n - pi.position.x,
+                                    y: centerSum.y / n - pi.position.y,
+                                    z: centerSum.z / n - pi.position.z)
+                forces[i] = Vec3(x: cohesion.x * 1.5 + separationSum.x * 2,
+                                 y: cohesion.y * 1.5 + separationSum.y * 2,
+                                 z: cohesion.z * 1.5 + separationSum.z * 2)
+            }
+            return forces
+        }
+
+        let particles = system.particles
+        let expectedForces = bruteForceForces(particles)
+        // velocity = 0(초기) + force * dt(움직임 연산자가 없어 위치는 안 바뀐다 —
+        // 힘만 속도로 쌓인다).
+        for (particle, expected) in zip(particles, expectedForces) {
+            XCTAssertEqual(particle.velocity.x, expected.x * Self.step, accuracy: 1e-6)
+            XCTAssertEqual(particle.velocity.y, expected.y * Self.step, accuracy: 1e-6)
+            XCTAssertEqual(particle.velocity.z, expected.z * Self.step, accuracy: 1e-6)
+        }
+    }
+
+    /// 창작마당 프리셋은 `maxcount`로 최대 8192를 준다(신뢰 못 할 값). 공간 격자가
+    /// 없으면 O(n²) = 6700만 쌍 비교가 매 프레임 걸려 프레임 시간을 잡아먹는다
+    /// (DoS). 격자 도입 뒤에는 한 걸음이 넉넉한 시간 안에 끝나야 한다.
+    func testBoidsWith8192ParticlesStepsWithinTimeBudget() throws {
+        let emitter = ParticleEmitter.sphereRandom(
+            rate: 0, origin: Vec3(x: 0, y: 0, z: 0), directions: Vec3(x: 1, y: 1, z: 1),
+            distanceMin: 0, distanceMax: 4000,
+            burst: ParticleEmitterBurst(count: 8192, speedMin: 0, speedMax: 0))
+        let preset = ParticlePreset(
+            maxCount: 8192, startTime: 0, materialPath: "m.json", emitters: [emitter],
+            initializers: [.lifetimeRandom(min: 100, max: 100), .sizeRandom(min: 10, max: 10),
+                           .velocityRandom(min: Vec3(x: 0, y: 0, z: 0), max: Vec3(x: 0, y: 0, z: 0))],
+            operators: [.boids(cohesionFactor: 1, separationFactor: 1, alignmentFactor: 1,
+                               neighborThreshold: 50)],
+            unsupportedNames: [], controlPoints: [])
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 3))
+        let start = Date()
+        system.update(deltaTime: Self.step)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(system.particles.count, 8192)
+        XCTAssertLessThan(elapsed, 3.0,
+                           "파티클 8192개짜리 boids 한 걸음이 \(elapsed)초 걸렸다 — 격자가 빠졌을 수 있다")
+    }
+
     // MARK: colorlist / hsvcolorrandom
 
     /// 실물 `colorlist` 값은 이미 0~1이다 — colorrandom처럼 255로 나누지 않는다.
