@@ -1840,20 +1840,40 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     skipped.append("\(layer.name): 메시에 재질이 없다: \(path)")
                     return
                 }
-                let materialPath = model.materials[min(skin, model.materials.count - 1)]
-                let renderer = try ModelRenderer(
-                    device: context.compositor.device, model: model, materialPath: materialPath,
-                    resolver: context.resolver, includes: context.shaderIncludes,
-                    makeTexture: { try context.compositor.makeTexture(from: $0) },
-                    sampler: context.compositor.sharedSampler,
-                    eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
+                // 서브메시마다 재질·정점·색인만 다르고 나머지 재료(리졸버·조명 등)는
+                // 같아서 그 자리만 받는 얇은 클로저로 묶는다.
+                let makeRenderer = { (mesh: MDLModel, materialPath: String) in
+                    try ModelRenderer(
+                        device: context.compositor.device, model: mesh, materialPath: materialPath,
+                        resolver: context.resolver, includes: context.shaderIncludes,
+                        makeTexture: { try context.compositor.makeTexture(from: $0) },
+                        sampler: context.compositor.sharedSampler,
+                        eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
                         clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight,
                         lights: context.lights)
+                }
+                let materialPath = model.materials[min(skin, model.materials.count - 1)]
+                let renderer = try makeRenderer(model, materialPath)
                 quad.world = Scene3D.world(
                     origin: layer.origin,
                     anglesDegrees: Vec3(x: layer.angles.x, y: layer.angles.y, z: layer.rotation * 180 / .pi),
                     scale: layer.scale)
                 layerList.append((quad, .model(renderer)))
+                // `MDLV0017`은 서브메시가 여럿일 수 있다(실물 space boi가 둘) —
+                // 각자 자기 재질을 들고 있어 첫 서브메시와 다른 셰이더로 그릴 수
+                // 있으므로 렌더러를 따로 세워 같은 쿼드 자리에 겹쳐 그린다.
+                for submesh in model.extraSubmeshes {
+                    let extraModel = MDLModel(
+                        materials: model.materials, boneCount: model.boneCount,
+                        boundsMin: model.boundsMin, boundsMax: model.boundsMax,
+                        vertexData: submesh.vertexData, indices: submesh.indices)
+                    do {
+                        let extraRenderer = try makeRenderer(extraModel, submesh.materialPath)
+                        layerList.append((quad, .model(extraRenderer)))
+                    } catch {
+                        skipped.append("\(layer.name): 서브메시를 그리지 못한다: \(error)")
+                    }
+                }
             } catch {
                 skipped.append("\(layer.name): 3D 메시를 그리지 못한다: \(error)")
             }

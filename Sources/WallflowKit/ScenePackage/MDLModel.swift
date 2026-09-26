@@ -55,17 +55,20 @@ public struct MDLModel: Equatable, Sendable {
     /// 48바이트 정점이 이어진 원본 바이트. 그대로 GPU 버퍼에 올린다.
     public let vertexData: Data
     public let indices: [UInt32]
+    /// `MDLV0017` 둘째 이후 서브메시. 다른 버전은 늘 빈 배열이다.
+    public let extraSubmeshes: [Submesh]
 
     public var vertexCount: Int { vertexData.count / Self.vertexStride }
 
     public init(materials: [String], boneCount: Int, boundsMin: Vec3, boundsMax: Vec3,
-                vertexData: Data, indices: [UInt32]) {
+                vertexData: Data, indices: [UInt32], extraSubmeshes: [Submesh] = []) {
         self.materials = materials
         self.boneCount = boneCount
         self.boundsMin = boundsMin
         self.boundsMax = boundsMax
         self.vertexData = vertexData
         self.indices = indices
+        self.extraSubmeshes = extraSubmeshes
     }
 
     /// 단위 사각형(-0.5..0.5, z=0). 재질 셰이더로 이미지를 그릴 때 메시 대신 쓴다.
@@ -87,13 +90,26 @@ public struct MDLModel: Equatable, Sendable {
     /// 경계 상자 6개 float(24B)가 있는 버전. `MDLV0016`은 이 자리 자체가 없다 —
     /// 실물 `Hollow Cylinder.mdl`을 바이트로 맞춰 확인했다: `boneCount` 바로
     /// 뒤에 (경계 없이) `vertexFormat`이 바로 온다. 없으면 정점 위치에서 직접
-    /// 계산한다.
-    static let versionsWithBounds: Set<String> = ["MDLV0023"]
+    /// 계산한다. `MDLV0017`도 경계가 있다 — 실물 `space boi.mdl`로 확인했다.
+    static let versionsWithBounds: Set<String> = ["MDLV0023", "MDLV0017"]
     /// 지원하는 매직 전부. `MDLV0016`은 경계 상자만 빠지고 나머지 배치는 같다
-    /// (같은 flags=15·정점 48B·꼬리 없음). `MDLV0017`(다중 서브메시)·
-    /// `MDLV0021`(퍼펫 전용 정점 형식, flags가 다르다)은 배치가 통째로 달라
-    /// 아직 지원하지 않는다 — badMagic으로 남는다.
+    /// (같은 flags=15·정점 48B·꼬리 없음). `MDLV0017`은 다중 서브메시다 —
+    /// materialCount·1 자리의 "1"이 사실은 서브메시 수고, 실물 `space boi.mdl`은
+    /// 여기가 2다. 첫 서브메시는 여느 버전과 같은 배치(재질 배열 → boneCount →
+    /// 경계 → 정점 → 색인)지만, 둘째부터는 재질이 배열이 아니라 널 종료 문자열
+    /// 하나씩이고 그 뒤로 boneCount·경계·정점·색인이 되풀이된다(퍼펫이 아닌
+    /// `space boi.mdl`로 바이트를 끝까지 맞춰 확인했다).
     static let supportedMagics: Set<String> = versionsWithBounds.union(["MDLV0016"])
+    /// 서브메시 상한. 실물 최대가 2고, 창작마당 파일의 미친 값에 못 당하게 막는다.
+    static let maxSubmeshes = 64
+
+    /// `MDLV0017`의 둘째 이후 서브메시. 재질이 서로 다를 수 있어 따로 그린다.
+    public struct Submesh: Equatable, Sendable {
+        public let materialPath: String
+        public let vertexData: Data
+        public let indices: [UInt32]
+        public var vertexCount: Int { vertexData.count / MDLModel.vertexStride }
+    }
 
     public static func parse(_ data: Data) throws -> MDLModel {
         var cursor = Cursor(data: data)
@@ -101,17 +117,43 @@ public struct MDLModel: Equatable, Sendable {
         guard Self.supportedMagics.contains(magic) else { throw MDLError.badMagic(magic) }
         _ = try cursor.int32()          // flags(15). 뜻은 모른다 — 정점 형식과 같은 값이다.
         let materialCount = try cursor.int32()
-        _ = try cursor.int32()          // 1. 메시 수로 보이지만 실물이 전부 1이다.
+        // `MDLV0016`·`MDLV0023`은 늘 1이라 메시 수로 보였지만, `MDLV0017`
+        // 실물(`space boi.mdl`)에서 2가 나와 서브메시 수임을 알았다.
+        let submeshCount = try cursor.int32()
         guard materialCount >= 0, materialCount <= 64 else {
             throw MDLError.tooLarge("재질 \(materialCount)개")
+        }
+        guard submeshCount >= 1, submeshCount <= Self.maxSubmeshes else {
+            throw MDLError.tooLarge("서브메시 \(submeshCount)개")
         }
         var materials: [String] = []
         for _ in 0..<materialCount {
             materials.append(try cursor.string(maxLength: 1024))
         }
+        let hasBounds = Self.versionsWithBounds.contains(magic)
+        let first = try readMeshBlock(&cursor, hasBounds: hasBounds)
+
+        var extraSubmeshes: [Submesh] = []
+        for _ in 1..<submeshCount {
+            let materialPath = try cursor.string(maxLength: 1024)
+            let block = try readMeshBlock(&cursor, hasBounds: hasBounds)
+            extraSubmeshes.append(Submesh(
+                materialPath: materialPath, vertexData: block.vertexData, indices: block.indices))
+        }
+
+        return MDLModel(
+            materials: materials, boneCount: first.boneCount,
+            boundsMin: first.boundsMin, boundsMax: first.boundsMax,
+            vertexData: first.vertexData, indices: first.indices, extraSubmeshes: extraSubmeshes)
+    }
+
+    /// boneCount(선택) → 경계(있으면) → 정점 형식·바이트 → 정점 → 색인. 첫
+    /// 서브메시와 둘째 이후 서브메시가 이 자리부터 같은 모양이다.
+    private static func readMeshBlock(
+        _ cursor: inout Cursor, hasBounds: Bool
+    ) throws -> (boneCount: Int, boundsMin: Vec3, boundsMax: Vec3, vertexData: Data, indices: [UInt32]) {
         let boneCount = try cursor.int32()
         guard boneCount >= 0, boneCount <= 4096 else { throw MDLError.tooLarge("뼈 \(boneCount)개") }
-        let hasBounds = Self.versionsWithBounds.contains(magic)
         let bounds = hasBounds ? try (0..<6).map { _ in try cursor.float32() } : nil
         let vertexFormat = try cursor.int32()
         let vertexBytes = try cursor.int32()
@@ -154,10 +196,7 @@ public struct MDLModel: Equatable, Sendable {
         } else {
             (boundsMin, boundsMax) = Self.computedBounds(vertexData)
         }
-        return MDLModel(
-            materials: materials, boneCount: boneCount,
-            boundsMin: boundsMin, boundsMax: boundsMax,
-            vertexData: vertexData, indices: indices)
+        return (boneCount, boundsMin, boundsMax, vertexData, indices)
     }
 
     /// 경계 상자가 파일에 없는 버전(`MDLV0016`)을 위해 정점 위치에서 직접 잰다.

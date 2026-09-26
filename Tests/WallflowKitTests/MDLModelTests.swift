@@ -132,6 +132,28 @@ final class MDLModelTests: XCTestCase {
         XCTAssertEqual(Array(v[10..<12]), [0, 1], "왼쪽 아래 꼭짓점의 uv는 (0,1)")
     }
 
+    /// 실물 `MDLV0017`(space boi, 서브메시 둘). materialCount·1 자리의 "1"이
+    /// 실은 서브메시 수 2다 — 둘째 서브메시는 자기 재질을 따로 들고 온다.
+    func testParsesRealMultiSubmeshMDLV0017() throws {
+        guard let root = ProcessInfo.processInfo.environment["WALLFLOW_TEST_SCENES"] else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let url = URL(fileURLWithPath: root).appendingPathComponent("3047596375/scene.pkg")
+        guard let raw = try? Data(contentsOf: url) else { throw XCTSkip("3047596375 없음") }
+        let reader = try PkgReader(data: raw)
+        let model = try MDLModel.parse(try reader.data(for: "models/space boi/space boi.mdl"))
+        XCTAssertEqual(model.materials, ["materials/models/space boi/diffuse_0.json"])
+        XCTAssertEqual(model.vertexCount, 21_860)
+        XCTAssertEqual(model.indices.count, 98_784)
+        XCTAssertEqual(model.extraSubmeshes.count, 1, "서브메시 수 2 = 첫째 + extraSubmeshes 하나")
+        let extra = model.extraSubmeshes[0]
+        XCTAssertEqual(extra.materialPath, "materials/models/space boi/diffuse_1.json")
+        XCTAssertEqual(extra.vertexCount, 39_436)
+        XCTAssertEqual(extra.indices.count, 143_208)
+        XCTAssertEqual(extra.indices.count % 3, 0, "삼각형 목록이어야 한다")
+        XCTAssertEqual(extra.indices.max().map(Int.init), extra.vertexCount - 1)
+    }
+
     func testRejectsBadMagic() {
         var d = build(); d.replaceSubrange(0..<4, with: Data("XXXX".utf8))
         XCTAssertThrowsError(try MDLModel.parse(d)) { XCTAssertEqual($0 as? MDLError, .badMagic("XXXX0023")) }

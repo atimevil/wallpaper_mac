@@ -255,8 +255,14 @@ final class ModelRenderer {
         var values: [String: [Float]] = [:]
         for uniform in uniforms {
             guard let field = layout.field(named: uniform.name) else { continue }
-            let constant = uniform.materialKey.flatMap { constants[$0] }
-                ?? uniform.defaultValue.flatMap { EffectConstant.parse($0) }
+            // 재질 JSON 키 대소문자가 셰이더 주석의 `material` 키와 어긋나는 실물이
+            // 있다(`space boi`의 `diffuse_0.json`이 `Alpha`, 셰이더 주석은 `alpha`) —
+            // 정확히 맞는 키가 없으면 대소문자 무시하고 한 번 더 찾는다. 못 찾으면
+            // `g_TintAlpha`가 기본값 1(불투명)로 남아, 반투명이어야 할 메시가
+            // 화면을 통째로 덮는 검은 판으로 그려진다.
+            let constant = uniform.materialKey.flatMap { key in
+                constants[key] ?? constants.first { $0.key.caseInsensitiveCompare(key) == .orderedSame }?.value
+            } ?? uniform.defaultValue.flatMap { EffectConstant.parse($0) }
             if let constant { values[uniform.name] = constant.components(field.count) }
         }
         return UniformPacker.pack(values, into: layout)

@@ -35,6 +35,11 @@ public struct PuppetModel: Equatable, Sendable {
     public static let skinnedVertexStride = 80
     public static let maxBones = 1024
     public static let maxKeyframes = 1_000_000
+    /// 실물 퍼펫이 쓰는 매직 전부. `MDLV0017`·`MDLV0021`도 이 배치와 바이트까지
+    /// 같다 — 서브메시 수(`MDLV0017`의 "1" 자리)가 실물 퍼펫에서는 늘 1이라
+    /// `MDLV0023`과 똑같이 읽힌다. `WLOP DOME`(0017)·`fg`·`光环`·`六野`(0021)
+    /// 실물로 끝까지 맞춰 확인했다.
+    public static let supportedMagics: Set<String> = ["MDLV0023", "MDLV0017", "MDLV0021"]
 
     public struct Vertex: Equatable, Sendable {
         public var position: SIMD2<Float>
@@ -107,7 +112,7 @@ public struct PuppetModel: Equatable, Sendable {
     public static func parse(_ data: Data) throws -> PuppetModel {
         var cursor = MDLModel.Cursor(data: data)
         let magic = try cursor.string(maxLength: 16)
-        guard magic == MDLModel.magic else { throw MDLError.badMagic(magic) }
+        guard Self.supportedMagics.contains(magic) else { throw MDLError.badMagic(magic) }
         _ = try cursor.int32()
         let materialCount = try cursor.int32()
         _ = try cursor.int32()
@@ -157,9 +162,15 @@ public struct PuppetModel: Equatable, Sendable {
         }
 
         // 색인 뒤의 꼬리는 길이가 파일마다 다르다(42·26·90B). 뼈대 청크의 표식을 찾는다.
+        // **표식 번호가 매직마다 다르다** — 실물로 맞춰 확인했다: `MDLV0017`은
+        // `MDLS0002`, `MDLV0021`은 `MDLS0003`, `MDLV0023`은 `MDLS0004`.
+        // 애니메이션 표식도 마찬가지다(`MDLV0017`은 `MDLA0004`, 나머지 둘은
+        // `MDLA0006`).
         var bones: [Bone] = []
         var animations: [Animation] = []
-        if let skeletonAt = data.range(of: Data("MDLS0004\0".utf8), in: cursor.offset..<data.count) {
+        let skeletonTag = Data(Self.skeletonTag(for: magic).utf8)
+        let animationTag = Data(Self.animationTag(for: magic).utf8)
+        if let skeletonAt = data.range(of: skeletonTag, in: cursor.offset..<data.count) {
             cursor.offset = skeletonAt.upperBound
             let animationAt = try cursor.int32()
             let boneCount = try cursor.int32()
@@ -176,9 +187,16 @@ public struct PuppetModel: Equatable, Sendable {
                 let safeParent = parent >= 0 && parent < bones.count ? parent : -1
                 bones.append(Bone(name: name, parent: safeParent, bind: Self.transform(from: m)))
             }
-            if animationAt > 0, animationAt + 9 <= data.count,
-               data[animationAt..<animationAt + 9] == Data("MDLA0006\0".utf8) {
-                cursor.offset = animationAt + 9
+            // 정상 자리는 `animationAt`이 바로 가리키지만, 실물 `WLOP DOME GIRL
+            // FINAL PARTS_puppet.mdl`처럼 그 사이에 애니메이션이 아닌 다른
+            // 청크(`MDAT0001` — 파티클 부착점으로 보인다)가 끼는 파일이 있다.
+            // 그럴 땐 뼈대 뒤에서 애니메이션 표식을 직접 찾는다.
+            let directHit = animationAt > 0 && animationAt + animationTag.count <= data.count
+                && data[animationAt..<animationAt + animationTag.count] == animationTag
+            let animationStart = directHit ? animationAt
+                : data.range(of: animationTag, in: cursor.offset..<data.count)?.lowerBound
+            if let animationStart {
+                cursor.offset = animationStart + animationTag.count
                 _ = try cursor.int32()
                 let animationCount = try cursor.int32()
                 guard animationCount >= 0, animationCount <= 256 else {
@@ -215,11 +233,32 @@ public struct PuppetModel: Equatable, Sendable {
                     animations.append(Animation(
                         id: id, name: name, loops: mode != "once",
                         fps: fps.isFinite && fps > 0 ? fps : 30, frameCount: frames, tracks: tracks))
+                    // 애니메이션마다 트랙 뒤에 35바이트 여백이 있다 — 실물 전부 0이라
+                    // 용도는 모른다. 안 건너뛰면 애니메이션이 둘 이상일 때 다음
+                    // 애니메이션의 머리를 엉뚱한 자리에서 읽는다. `fish2-redraw_puppet.mdl`
+                    // (`MDLV0023`, 애니메이션 3개)·`六野_puppet.mdl`(`MDLV0021`, 3개)
+                    // 로 끝까지 맞춰 확인했다 — 마지막 애니메이션 뒤에도 있어
+                    // `MDLA` 청크 끝(`animAt`가 가리키던 종료 오프셋)과 정확히 맞아떨어진다.
+                    cursor.offset = min(cursor.offset + 35, data.count)
                 }
             }
         }
         return PuppetModel(materials: materials, vertices: vertices, indices: indices,
                            bones: bones, animations: animations)
+    }
+
+    /// 뼈대 청크 표식. 매직마다 번호가 다르다(위 `parse` 문서 참고).
+    static func skeletonTag(for magic: String) -> String {
+        switch magic {
+        case "MDLV0017": return "MDLS0002\0"
+        case "MDLV0021": return "MDLS0003\0"
+        default: return "MDLS0004\0"
+        }
+    }
+
+    /// 애니메이션 청크 표식. 매직마다 번호가 다르다.
+    static func animationTag(for magic: String) -> String {
+        magic == "MDLV0017" ? "MDLA0004\0" : "MDLA0006\0"
     }
 
     /// 열 우선 4x4의 2D 부분을 자세로 푼다. 회전은 첫 열의 방향이고 배율은 열의 길이다.
