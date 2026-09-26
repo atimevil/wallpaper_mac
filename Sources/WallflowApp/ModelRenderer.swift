@@ -66,6 +66,9 @@ final class ModelRenderer {
     /// 메시 경계 상자(로컬 공간). 카메라가 안에 있는지 매 프레임 잰다.
     private let boundsMin: SIMD3<Float>
     private let boundsMax: SIMD3<Float>
+    /// 로컬 공간 경계 상자의 대각선 절반 — 화면 그리기 순서를 정할 때 쓰는
+    /// 대략적인 경계구 반지름이다(`MetalCompositor.draw(in:)`의 깊이 정렬 참고).
+    var boundingRadius: Float { simd_length(boundsMax - boundsMin) / 2 }
     /// 씬의 점광·방향광 하나씩(있으면). `PerformLighting_V1`(`generic4` 등)이나
     /// `generic3`의 인라인 광원 루프를 먹인다.
     private let pointLight: (origin: Vec3, angles: Vec3, info: LightInfo)?
