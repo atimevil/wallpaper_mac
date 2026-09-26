@@ -142,7 +142,7 @@ public struct SceneDocument: Sendable {
         let height: Int
         if general.keys.contains("orthogonalprojection"),
            !(general["orthogonalprojection"] is [String: Any]) {
-            camera = SceneCamera.parse(general)
+            camera = SceneCamera.parse(general, topLevelCamera: root["camera"] as? [String: Any])
             width = 1920
             height = 1080
         } else {
@@ -197,6 +197,15 @@ public struct SceneDocument: Sendable {
             let origin = transforms[id]?.origin ?? Vec3(x: 0, y: 0, z: 0)
             if origin.x.isFinite, origin.y.isFinite, origin.z.isFinite {
                 cam.eye = origin
+                // 카메라 오브젝트가 있으면 씬 최상위 `camera`(에디터 마지막 저장
+                // 자리)는 안 믿는다 — 오브젝트의 origin만 눈으로 쓰고 중심은
+                // 원점으로 되돌린다. 실물 球体01(3589454154) 씬으로 확인했다:
+                // 최상위 camera는 eye(3.66,1.39,2.30)·center(3.30,1.17,1.39)로
+                // 씬 콘텐츠(원점 근처)에서 먼 다른 자리를 보고, 카메라 오브젝트
+                // origin(0,0,2.3)만 눈으로 쓰고 중심을 원점에 둬야 고리 클로즈업이
+                // 나온다 — 중심까지 최상위 값을 남기면 카메라가 콘텐츠를 비켜
+                // 본다.
+                cam.center = Vec3(x: 0, y: 0, z: 0)
                 camera = cam
             }
         }
