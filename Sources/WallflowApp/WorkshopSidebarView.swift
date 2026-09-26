@@ -125,6 +125,6 @@ final class WorkshopSidebarView: NSView {
 }
 
 /// 원점을 위로 뒤집은 스택 뷰. 스크롤 뷰 문서로 쓰면 열자마자 맨 위가 보인다.
-private final class FlippedStackView: NSStackView {
+final class FlippedStackView: NSStackView {
     override var isFlipped: Bool { true }
 }
