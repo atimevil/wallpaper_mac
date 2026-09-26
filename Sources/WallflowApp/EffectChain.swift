@@ -74,6 +74,11 @@ final class EffectChain {
     private var defaults: [String: MTLTexture] = [:]
     private let width: Int
     private let height: Int
+    /// 이 체인의 렌더 타깃·파이프라인이 쓰는 색 포맷. HDR 씬(`sceneColorFormat ==
+    /// .rgba16Float`)의 합성/후처리 체인은 이 값을 그대로 받아 과다밝기(1 넘는 값)를
+    /// 안 잘라야 나중 블룸이 정상 작동한다. 이미지 레이어 체인은 원본이 8비트라
+    /// 기본값(rgba8Unorm)을 그대로 쓴다 — HDR로 만들어도 얻을 게 없다.
+    private let colorFormat: MTLPixelFormat
 
     /// 이 체인이 그린 마지막 그림. 레이어가 이걸 텍스처로 쓴다.
     var texture: MTLTexture { output }
@@ -116,9 +121,11 @@ final class EffectChain {
           source: MTLTexture, resolver: ReferenceResolver, includes: [String: String],
           makeTexture: (TextureData) throws -> MTLTexture,
           diagnostics: inout [String],
-          layerTexture: @escaping (Int) -> MTLTexture? = { _ in nil }) {
+          layerTexture: @escaping (Int) -> MTLTexture? = { _ in nil },
+          colorFormat: MTLPixelFormat = .rgba8Unorm) {
         self.device = device
         self.layerTexture = layerTexture
+        self.colorFormat = colorFormat
         guard source.width > 0, source.height > 0 else { return nil }
         // 긴 변을 상한에 맞춰 줄인다. 비율은 지킨다 — 안 지키면 이펙트가
         // 늘어난 좌표계에서 돌아 무늬가 찌그러진다.
@@ -141,7 +148,7 @@ final class EffectChain {
                 do {
                     effectPasses.append(try Self.compile(
                         pass, base: base, device: device,
-                        resolver: resolver, includes: includes))
+                        resolver: resolver, includes: includes, colorFormat: colorFormat))
                 } catch {
                     // 한 패스가 안 되면 그 이펙트는 반쪽이 된다. 이 이펙트만
                     // 버린다 — 절반만 적용한 그림은 원본보다 나쁘지만, 다른
@@ -159,9 +166,12 @@ final class EffectChain {
         self.isAnimated = compiled.contains { $0.isAnimated }
         self.usesAudio = compiled.contains { $0.usesAudio }
 
-        guard let output = Self.makeTarget(device: device, width: width, height: height),
-              let bufferA = Self.makeTarget(device: device, width: width, height: height),
-              let bufferB = Self.makeTarget(device: device, width: width, height: height)
+        guard let output = Self.makeTarget(
+                device: device, width: width, height: height, pixelFormat: colorFormat),
+              let bufferA = Self.makeTarget(
+                device: device, width: width, height: height, pixelFormat: colorFormat),
+              let bufferB = Self.makeTarget(
+                device: device, width: width, height: height, pixelFormat: colorFormat)
         else { return nil }
         self.output = output
         self.bufferA = bufferA
@@ -177,7 +187,7 @@ final class EffectChain {
             let descriptor = MTLRenderPipelineDescriptor()
             descriptor.vertexFunction = vertexFunction
             descriptor.fragmentFunction = fragment
-            descriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
+            descriptor.colorAttachments[0].pixelFormat = colorFormat
             return try? device.makeRenderPipelineState(descriptor: descriptor)
         }
         guard let clean = makePipeline(cleanFunction),
@@ -250,7 +260,8 @@ final class EffectChain {
             guard let texture = Self.makeTarget(
                 device: device,
                 width: Swift.max(1, width / divisor),
-                height: Swift.max(1, height / divisor)) else { return nil }
+                height: Swift.max(1, height / divisor),
+                pixelFormat: colorFormat) else { return nil }
             targets[name] = texture
         }
     }
@@ -283,10 +294,10 @@ final class EffectChain {
     }
 
     private static func makeTarget(
-        device: MTLDevice, width: Int, height: Int
+        device: MTLDevice, width: Int, height: Int, pixelFormat: MTLPixelFormat
     ) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+            pixelFormat: pixelFormat, width: width, height: height, mipmapped: false)
         descriptor.usage = [.shaderRead, .renderTarget]
         descriptor.storageMode = .private
         return device.makeTexture(descriptor: descriptor)
@@ -349,7 +360,7 @@ final class EffectChain {
 
     private static func compile(
         _ pass: EffectPass, base: String, device: MTLDevice,
-        resolver: ReferenceResolver, includes: [String: String]
+        resolver: ReferenceResolver, includes: [String: String], colorFormat: MTLPixelFormat
     ) throws -> CompiledPass {
         let paths = EffectDefinition.shaderPaths(for: pass.shaderName, base: base)
         guard let vertexSource = firstText(of: paths.vertex, resolver: resolver),
@@ -399,7 +410,7 @@ final class EffectChain {
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = vertexFunction
         descriptor.fragmentFunction = fragmentFunction
-        descriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
+        descriptor.colorAttachments[0].pixelFormat = colorFormat
         // 전체 화면 사각형을 위치와 uv만으로 그린다. 셰이더가 선언한 attribute
         // 순서는 번역기가 정한 것과 같다(`a_Position`, `a_TexCoord`).
         let vertexDescriptor = MTLVertexDescriptor()
