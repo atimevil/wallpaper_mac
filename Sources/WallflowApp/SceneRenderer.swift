@@ -59,6 +59,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// dt를 쓴다 — 멈췄다 재개할 때 `lastFrameTime`이 끊겨(`apply(.paused)`) dt가
     /// 0으로 시작하므로, 여기도 한 번에 몰아 튀지 않는다.
     private var animationClock: Double = 0
+    /// 레이어마다 파일이 정한 로컬(부모 기준) origin/angles/scale. 씬을 열 때 한 번
+    /// 채운다 — 타임라인 애니메이션이 조상을 움직였을 때 그 자식(스스로는 안 움직이는
+    /// 평범한 레이어)이 여전히 부모 기준으로 어디 있어야 하는지 알아야 한다.
+    /// `applyPropertyAnimations`가 부모 사슬을 다시 합칠 때 이 값을 쓴다.
+    private var baseLocalTransform: [Int: (origin: Vec3, angles: Vec3, scale: Vec3)] = [:]
     /// 텍스트 레이어마다 스크립트와 구운 글자. 값이 바뀔 때만 다시 굽는다.
     private var texts: [TextState] = []
     /// 씬의 스크립트 전부를 돌리는 호스트. 스크립트가 없는 씬이면 nil이다.
@@ -931,8 +936,18 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private func applyPropertyAnimations(elapsed: Double) {
         guard !animatedLayers.isEmpty, let context = buildContext else { return }
         var changed = false
+
+        // 1단계: 애니메이션 레이어마다 이 프레임의 로컬(부모 기준) 값을 먼저
+        // 구해 둔다. 쿼드는 아직 안 만진다 — 2단계가 부모 사슬을 다시 합치려면
+        // "이 조상이 이번 프레임에 어디 있는지"를 먼저 다 알아야 한다(그래야 조상도
+        // 애니메이션이고 그 조상의 조상도 애니메이션인 경우가 순서에 안 흔들린다).
+        struct Local {
+            var origin: Vec3; var angles: Vec3; var scale: Vec3
+            var alpha: Double; var tint: Vec3; var brightness: Double
+            var touchesTransform: Bool; var touchesColor: Bool
+        }
+        var locals: [Int: Local] = [:]
         for (id, layer) in animatedLayers {
-            guard let target = scriptTargets[id] else { continue }
             let transformScripted = layer.scripts.contains { ["origin", "angles", "scale"].contains($0.property) }
             let colorScripted = layer.scripts.contains { ["alpha", "color"].contains($0.property) }
 
@@ -965,71 +980,136 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             if let a = layer.animations["brightness"] {
                 brightness = a.scalar(atSeconds: elapsed, base: brightness); touchesColor = true
             }
-
             guard touchesTransform || touchesColor else { continue }
-            let world = target.composed(origin: origin, angles: angles, scale: scale)
+            locals[id] = Local(origin: origin, angles: angles, scale: scale,
+                                alpha: alpha, tint: tint, brightness: brightness,
+                                touchesTransform: touchesTransform, touchesColor: touchesColor)
+        }
+        guard !locals.isEmpty else { return }
 
-            // 글자는 T4가 구운 크기를 여기서 다시 재지 않는다 — 상자 중심(boxCenter)만
-            // 옮기고, 처음 세울 때 정해진 정렬 오프셋(origin - boxCenter)을 그대로
-            // 얹는다. 그래야 매 프레임 다시 굽지 않고도 자리만 움직인다(T4 회귀 금지).
-            if touchesTransform, let ti = target.textIndex, ti < texts.count {
-                let text = texts[ti]
-                let alignOffset = SIMD2(text.origin.x - text.boxCenter.x, text.origin.y - text.boxCenter.y)
-                text.boxCenter = SIMD2(Float(world.origin.x), Float(world.origin.y))
-                text.origin = text.boxCenter + alignOffset
-                text.worldOrigin = world.origin
-                text.worldAngles = world.anglesDegrees
-            }
-            // 파티클은 자기 draw가 커서 계산에 쓰는 layerOrigin을 따로 들고 있다
-            // (스크립트가 미는 자리와 같다 — `applyScriptState`의 particleIndex 분기 참고).
-            if touchesTransform, let pi = target.particleIndex, pi < particles.count {
-                particles[pi].layerOrigin = SIMD2(Float(world.origin.x), Float(world.origin.y))
-            }
-            // 파티클 알파는 스크립트가 미는 것과 같은 자리(`instanceoverride.alpha`)를 쓴다.
-            if touchesColor, let pi = target.particleIndex, pi < particles.count {
-                var instance = particles[pi].system.instance
-                if abs(instance.alpha - alpha) > 1e-9 {
-                    instance.alpha = alpha
-                    particles[pi].system.instance = instance
+        // 2단계: 실제로 옮은(touchesTransform) 조상의 자식·손자까지 부모 사슬을
+        // 다시 합쳐 parentOrigin/Scale/Rotation을 새로 굽는다. 스크립트가 그룹을
+        // 드래그할 때 `apply()`가 쓰는 것과 똑같은 식(`composeLiveTransform`)이다 —
+        // 안 그러면 타임라인으로 움직인 그룹은 자기만 움직이고 안의 시계·막대는
+        // 원래 자리에 그대로 남는다.
+        let movedAncestors = locals.filter { $0.value.touchesTransform }.mapValues {
+            SceneDocument.LayerTransform(
+                origin: $0.origin, scale: $0.scale, rotation: $0.angles.z * .pi / 180,
+                alpha: 1, visible: true)
+        }
+        var descendantsToRedraw: Set<Int> = []
+        if !movedAncestors.isEmpty {
+            for id in scriptTargets.keys {
+                guard let parentID = parentOf[id] else { continue }
+                let live = SceneDocument.composeLiveTransform(
+                    of: parentID, parentOf: parentOf
+                ) { [movedAncestors, baseLocalTransform] ancestorID in
+                    if let moved = movedAncestors[ancestorID] { return moved }
+                    guard let base = baseLocalTransform[ancestorID] else { return nil }
+                    return SceneDocument.LayerTransform(
+                        origin: base.origin, scale: base.scale,
+                        rotation: base.angles.z * .pi / 180, alpha: 1, visible: true)
                 }
-            }
-
-            for index in target.indices where index < layerList.count {
-                var quad = layerList[index].0
-                if touchesColor {
-                    let b = Float(brightness)
-                    quad.color = SIMD4(
-                        Float(tint.x) * b, Float(tint.y) * b, Float(tint.z) * b,
-                        layer.visible ? Float(alpha) : 0)
-                }
-                if touchesTransform {
-                    if let ti = target.textIndex, ti < texts.count {
-                        let text = texts[ti]
-                        if context.isPerspective {
-                            quad.world = Scene3D.world(
-                                origin: world.origin, anglesDegrees: world.anglesDegrees,
-                                scale: Vec3(x: 1, y: 1, z: 1),
-                                size: Vec2(x: Double(text.size.x), y: Double(text.size.y)))
-                        } else {
-                            quad.origin = text.origin
-                            quad.size = text.size
-                        }
-                    } else if context.isPerspective {
-                        quad.world = Scene3D.world(
-                            origin: world.origin, anglesDegrees: world.anglesDegrees, scale: world.scale,
-                            size: target.unitWorld ? Vec2(x: 1, y: 1) : target.baseSize)
-                    } else {
-                        quad.origin = SIMD2(Float(world.origin.x), Float(world.origin.y))
-                        quad.size = SIMD2(Float(target.baseSize.x * world.scale.x),
-                                          Float(target.baseSize.y * world.scale.y))
-                        quad.rotation = Float(world.anglesDegrees.z * .pi / 180)
-                    }
-                }
-                layerList[index].0 = quad
-                changed = true
+                guard let target = scriptTargets[id],
+                      target.parentOrigin != live.origin || target.parentScale != live.scale
+                        || target.parentRotation != live.rotation
+                else { continue }
+                scriptTargets[id]?.parentOrigin = live.origin
+                scriptTargets[id]?.parentScale = live.scale
+                scriptTargets[id]?.parentRotation = live.rotation
+                // 자기 애니메이션이 있는 레이어는 3단계에서 어차피 다시 그린다 —
+                // 여기서 또 그리면 같은 프레임에 두 번 손대는 것뿐이다.
+                if locals[id] == nil { descendantsToRedraw.insert(id) }
             }
         }
+
+        // 3단계: 갱신된 parentOrigin으로 쿼드(+글자·파티클 자리)를 그린다.
+        for (id, local) in locals {
+            guard let target = scriptTargets[id], let layer = animatedLayers[id] else { continue }
+            if local.touchesTransform {
+                let world = target.composed(origin: local.origin, angles: local.angles, scale: local.scale)
+                if applyAnimatedWorldTransform(world, target: target, context: context) { changed = true }
+            }
+            if local.touchesColor {
+                if let pi = target.particleIndex, pi < particles.count {
+                    var instance = particles[pi].system.instance
+                    if abs(instance.alpha - local.alpha) > 1e-9 {
+                        instance.alpha = local.alpha
+                        particles[pi].system.instance = instance
+                    }
+                }
+                for index in target.indices where index < layerList.count {
+                    var quad = layerList[index].0
+                    let b = Float(local.brightness)
+                    quad.color = SIMD4(
+                        Float(local.tint.x) * b, Float(local.tint.y) * b, Float(local.tint.z) * b,
+                        layer.visible ? Float(local.alpha) : 0)
+                    layerList[index].0 = quad
+                    changed = true
+                }
+            }
+        }
+        // 자기 애니메이션 없이 부모만 움직여 따라가야 하는 자식. 부모 기준 자리는
+        // 파일 값(`baseLocalTransform`) 그대로다 — 스스로는 안 움직였다.
+        for id in descendantsToRedraw {
+            guard let target = scriptTargets[id], let base = baseLocalTransform[id] else { continue }
+            let world = target.composed(origin: base.origin, angles: base.angles, scale: base.scale)
+            if applyAnimatedWorldTransform(world, target: target, context: context) { changed = true }
+        }
         if changed { compositor?.setLayers(layerList) }
+    }
+
+    /// 세계 변환 하나를 쿼드와(있으면) 글자·파티클 자리에 반영한다.
+    /// `applyPropertyAnimations`가 애니메이션 레이어 자신과, 부모가 움직여 따라가야
+    /// 하는 자식 양쪽에 같은 식으로 쓴다.
+    private func applyAnimatedWorldTransform(
+        _ world: (origin: Vec3, anglesDegrees: Vec3, scale: Vec3),
+        target: ScriptTarget, context: BuildContext
+    ) -> Bool {
+        var changed = false
+        // 글자는 T4가 구운 크기를 여기서 다시 재지 않는다 — 상자 중심(boxCenter)만
+        // 옮기고, 처음 세울 때 정해진 정렬 오프셋(origin - boxCenter)을 그대로
+        // 얹는다. 그래야 매 프레임 다시 굽지 않고도 자리만 움직인다(T4 회귀 금지).
+        if let ti = target.textIndex, ti < texts.count {
+            let text = texts[ti]
+            let alignOffset = SIMD2(text.origin.x - text.boxCenter.x, text.origin.y - text.boxCenter.y)
+            text.boxCenter = SIMD2(Float(world.origin.x), Float(world.origin.y))
+            text.origin = text.boxCenter + alignOffset
+            text.worldOrigin = world.origin
+            text.worldAngles = world.anglesDegrees
+        }
+        // 파티클은 자기 draw가 커서 계산에 쓰는 layerOrigin을 따로 들고 있다
+        // (스크립트가 미는 자리와 같다 — `applyScriptState`의 particleIndex 분기 참고).
+        if let pi = target.particleIndex, pi < particles.count {
+            particles[pi].layerOrigin = SIMD2(Float(world.origin.x), Float(world.origin.y))
+        }
+        for index in target.indices where index < layerList.count {
+            var quad = layerList[index].0
+            if let ti = target.textIndex, ti < texts.count {
+                let text = texts[ti]
+                if context.isPerspective {
+                    quad.world = Scene3D.world(
+                        origin: world.origin, anglesDegrees: world.anglesDegrees,
+                        scale: Vec3(x: 1, y: 1, z: 1),
+                        size: Vec2(x: Double(text.size.x), y: Double(text.size.y)))
+                } else {
+                    quad.origin = text.origin
+                    quad.size = text.size
+                }
+            } else if context.isPerspective {
+                quad.world = Scene3D.world(
+                    origin: world.origin, anglesDegrees: world.anglesDegrees, scale: world.scale,
+                    size: target.unitWorld ? Vec2(x: 1, y: 1) : target.baseSize)
+            } else {
+                quad.origin = SIMD2(Float(world.origin.x), Float(world.origin.y))
+                quad.size = SIMD2(Float(target.baseSize.x * world.scale.x),
+                                  Float(target.baseSize.y * world.scale.y))
+                quad.rotation = Float(world.anglesDegrees.z * .pi / 180)
+            }
+            layerList[index].0 = quad
+            changed = true
+        }
+        return changed
     }
 
     /// 스크립트가 `createLayer(asset)`으로 만든 레이어를 세운다.
@@ -1230,7 +1310,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     return try compositor.makeTexture(from: $0)
                 },
                 diagnostics: &ignored,
-                layerTexture: { [weak self] otherID in self?.layerOutputs[otherID]?() }) else {
+                layerTexture: { [weak self] otherID in self?.layerOutputs[otherID]?() },
+                // HDR 씬은 화면이 rgba16Float다 — 합성 체인이 rgba8로 굳으면
+                // 이 시점에서 과다밝기가 잘려 나중 블룸이 죽는다(MetalCompositor.sceneColorFormat).
+                colorFormat: source.pixelFormat) else {
                 // 한 번 실패하면 매 프레임 다시 시도하지 않는다.
                 compositionLayers[id] = nil
                 FileHandle.standardError.write(Data(
@@ -1299,7 +1382,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     return try compositor.makeTexture(from: $0)
                 },
                 diagnostics: &ignored,
-                layerTexture: { [weak self] otherID in self?.layerOutputs[otherID]?() })
+                layerTexture: { [weak self] otherID in self?.layerOutputs[otherID]?() },
+                // HDR 씬은 화면이 rgba16Float다 — 후처리 체인도 같은 포맷을 써야
+                // 그 안의 블룸·톤매핑까지 과다밝기가 안 잘린 채로 온다.
+                colorFormat: frame.pixelFormat)
             if postEffects != nil { updateAudioNeed() }
             if postEffects == nil {
                 // 한 번 실패하면 매 프레임 다시 시도하지 않는다.
@@ -2120,8 +2206,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         // 원근 씬의 카메라·프리즘 로직이 거기 산다. 첫 틱은 여기서 바로 돌려
         // 첫 프레임부터 스크립트가 정한 자리에 그린다.
         parentOf = [:]
+        baseLocalTransform = [:]
         for layer in document.layers {
             if let parent = layer.parentID, parent != layer.id { parentOf[layer.id] = parent }
+            baseLocalTransform[layer.id] = (layer.localOrigin, layer.angles, layer.localScale)
         }
         let seeds = document.layers.map { layer -> SceneScriptHost.LayerSeed in
             var seed = SceneScriptHost.LayerSeed(layer)
@@ -2219,6 +2307,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         spriteSheetImages.removeAll()
         animatedLayers.removeAll()
         animationClock = 0
+        baseLocalTransform.removeAll()
         texts.removeAll()
         puppets.removeAll()
         puppetStartTime = nil

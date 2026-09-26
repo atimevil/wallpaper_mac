@@ -53,6 +53,19 @@ final class ModelRenderer {
     /// 씬의 `ambientcolor`·`skylightcolor`.
     private let ambient: SIMD3<Float>
     private let skylight: SIMD3<Float>
+    /// WE `cullmode`. 카메라가 메시 경계 상자 **안**에 있으면(하늘상자처럼 안에서
+    /// 보는 볼록 메시) `encode(into:)`에서 이 값 대신 `.none`을 준다 — 아래 문서
+    /// 참고.
+    private let cullMode: MTLCullMode
+    /// 정점 감기 방향. 실물 전부(DirectX 툴체인에서 나온 메시) 이 방향으로
+    /// 저장된 법선과 어긋나 Metal 기본(반시계=앞면)과 반대다 — `.clockwise`가
+    /// 맞다(Saturn 몸체·space boi·`Three-Body`의 하늘상자까지 실측: 평균
+    /// 삼각형 수백 개로 기하 법선과 저장 법선의 내적을 재 봐도 전부 같은
+    /// 방향이다 — 메시마다 다르지 않다).
+    private let frontFacing: MTLWinding = .clockwise
+    /// 메시 경계 상자(로컬 공간). 카메라가 안에 있는지 매 프레임 잰다.
+    private let boundsMin: SIMD3<Float>
+    private let boundsMax: SIMD3<Float>
     /// 씬의 점광·방향광 하나씩(있으면). `PerformLighting_V1`(`generic4` 등)이나
     /// `generic3`의 인라인 광원 루프를 먹인다.
     private let pointLight: (origin: Vec3, angles: Vec3, info: LightInfo)?
@@ -120,6 +133,15 @@ final class ModelRenderer {
         }
         let sceneTextures = (pass["textures"] as? [Any] ?? []).map { $0 as? String }
         let blending = pass["blending"] as? String ?? "normal"
+        let cullMode: MTLCullMode
+        switch (pass["cullmode"] as? String ?? "normal").lowercased() {
+        case "none": cullMode = .none
+        case "reverse": cullMode = .front
+        default: cullMode = .back
+        }
+        self.cullMode = cullMode
+        self.boundsMin = SIMD3(Float(model.boundsMin.x), Float(model.boundsMin.y), Float(model.boundsMin.z))
+        self.boundsMax = SIMD3(Float(model.boundsMax.x), Float(model.boundsMax.y), Float(model.boundsMax.z))
 
         // 셰이더 짝. 이펙트와 같은 자리 규칙이다.
         let paths = EffectDefinition.shaderPaths(for: shaderName, base: "")
@@ -399,6 +421,25 @@ final class ModelRenderer {
             engine["g_LDirectional_Direction"] = [Float(d.x), Float(d.y), Float(d.z), 0]
         }
         encoder.setRenderPipelineState(pipeline)
+        // 카메라가 메시 경계 상자 안에 있으면(하늘상자처럼 안에서 보는 볼록
+        // 메시) 뒷면 컬링을 끈다 — 오목한 쪽이 아니라 볼록한 껍질 안에서 보는
+        // 한 화면의 한 점은 늘 삼각형 하나만 지나므로(광선이 볼록체 표면을
+        // 두 번 다시 지나지 않는다) 양면을 다 그려도 겹쳐 잘못 그릴 일이 없다
+        // — 카메라 밖에서 볼 때 필요한 뒷면 제거만 빠질 뿐이다. 실물
+        // `Three-Body`의 하늘상자(반지름 8~12, 카메라가 원점 근처라 안이다)가
+        // 이 컬링 때문에 통째로 사라졌었다(실측: `cullMode=.none`으로 강제하면
+        // 별밭·성운이 돌아온다) — Saturn 몸체도 카메라가 안이지만 그쪽은 이미
+        // `.clockwise`(뒤집힌 정점 감기)로 안쪽 면이 "앞면"이 되어 정상 컬링이
+        // 먹는다(2a10c59). 여기서는 컬링 자체를 끄는 쪽이 메시마다 감기를
+        // 다시 재는 것보다 더 단순하고 안전하다(정점 감기는 실물 전부 같음을
+        // 확인했다 — 위 `frontFacing` 문서 참고).
+        let localEye4 = world.inverse * SIMD4(eye.x, eye.y, eye.z, 1)
+        let localEye = SIMD3(localEye4.x, localEye4.y, localEye4.z)
+        let insideBounds = boundsMin.x <= localEye.x && localEye.x <= boundsMax.x
+            && boundsMin.y <= localEye.y && localEye.y <= boundsMax.y
+            && boundsMin.z <= localEye.z && localEye.z <= boundsMax.z
+        encoder.setCullMode(insideBounds ? .none : cullMode)
+        encoder.setFrontFacing(frontFacing)
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 1)
         encoder.setVertexBuffer(zeroBuffer, offset: 0, index: 2)
         for (layout, bytes, isVertex) in [(vertexLayout, vertexBytes, true),

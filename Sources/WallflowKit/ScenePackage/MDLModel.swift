@@ -43,9 +43,13 @@ public struct MDLModel: Equatable, Sendable {
     public static let magic = "MDLV0023"
     /// 정점 하나의 바이트. pos3 + normal3 + tangent4 + uv2 = 12 float.
     public static let vertexStride = 48
-    /// 정점 버퍼 상한. 실물 최대가 26KB이고, 1GB짜리 창작마당 파일이 와도
-    /// 메모리를 통째로 잡지 않게 한다.
-    public static let maxVertexBytes = 64 * 1024 * 1024
+    /// 정점 버퍼 상한. 실물 `陨石.mdl`(3589454154 씬의 운석밭, 정점 3,144,456개 ×
+    /// 48B ≈ 144MiB)이 진짜로 이만큼 크다 — 색인 12.8MB·꼬리 7B까지 파일 끝과
+    /// 정확히 맞아떨어져 misparse가 아님을 확인했다. 총 GPU 메모리는 버텍스+색인
+    /// 합쳐 160MB 안팎으로, Apple Silicon 통합 메모리에서 메시 하나로는 무리가
+    /// 아니다. 200MiB로 올려 이 실물에 여유를 두면서도, 창작마당의 지어낸 값(예:
+    /// 1GB)은 여전히 막는다.
+    public static let maxVertexBytes = 200 * 1024 * 1024
     public static let maxIndexBytes = 64 * 1024 * 1024
 
     public let materials: [String]
@@ -55,7 +59,9 @@ public struct MDLModel: Equatable, Sendable {
     /// 48바이트 정점이 이어진 원본 바이트. 그대로 GPU 버퍼에 올린다.
     public let vertexData: Data
     public let indices: [UInt32]
-    /// `MDLV0017` 둘째 이후 서브메시. 다른 버전은 늘 빈 배열이다.
+    /// 다중 서브메시(`MDLV0017`·`MDLV0023` 둘 다 있을 수 있다 — 실물 `scene.mdl`은
+    /// `MDLV0023`인데 서브메시 5개다)의 둘째 이후. 서브메시가 하나뿐인 파일은
+    /// 늘 빈 배열이다.
     public let extraSubmeshes: [Submesh]
 
     public var vertexCount: Int { vertexData.count / Self.vertexStride }
@@ -93,17 +99,19 @@ public struct MDLModel: Equatable, Sendable {
     /// 계산한다. `MDLV0017`도 경계가 있다 — 실물 `space boi.mdl`로 확인했다.
     static let versionsWithBounds: Set<String> = ["MDLV0023", "MDLV0017"]
     /// 지원하는 매직 전부. `MDLV0016`은 경계 상자만 빠지고 나머지 배치는 같다
-    /// (같은 flags=15·정점 48B·꼬리 없음). `MDLV0017`은 다중 서브메시다 —
-    /// materialCount·1 자리의 "1"이 사실은 서브메시 수고, 실물 `space boi.mdl`은
-    /// 여기가 2다. 첫 서브메시는 여느 버전과 같은 배치(재질 배열 → boneCount →
-    /// 경계 → 정점 → 색인)지만, 둘째부터는 재질이 배열이 아니라 널 종료 문자열
-    /// 하나씩이고 그 뒤로 boneCount·경계·정점·색인이 되풀이된다(퍼펫이 아닌
-    /// `space boi.mdl`로 바이트를 끝까지 맞춰 확인했다).
+    /// (같은 flags=15·정점 48B·꼬리 없음). `materialCount·1` 자리의 "1"이 사실은
+    /// 서브메시 수다(`MDLV0017`인 `space boi.mdl`은 2, `MDLV0023`인 `scene.mdl`은
+    /// 5) — 둘 다 다중 서브메시일 수 있다. 첫 서브메시는 여느 버전과 같은 배치
+    /// (재질 배열 → boneCount → 경계 → 정점 → 색인)지만, 둘째부터는 재질이
+    /// 배열이 아니라 널 종료 문자열 하나씩이고 그 뒤로 boneCount·경계·정점·
+    /// 색인이 되풀이된다. **`MDLV0023`은 그 재질 문자열 앞에 0으로 채운
+    /// 6바이트 여백이 더 낀다**(`MDLV0017`은 없다) — `readMeshBlock` 주석 참고.
     static let supportedMagics: Set<String> = versionsWithBounds.union(["MDLV0016"])
-    /// 서브메시 상한. 실물 최대가 2고, 창작마당 파일의 미친 값에 못 당하게 막는다.
+    /// 서브메시 상한. 실물 최대가 5고, 창작마당 파일의 미친 값에 못 당하게 막는다.
     static let maxSubmeshes = 64
 
-    /// `MDLV0017`의 둘째 이후 서브메시. 재질이 서로 다를 수 있어 따로 그린다.
+    /// 둘째 이후 서브메시(`MDLV0017`·`MDLV0023` 둘 다 있을 수 있다). 재질이 서로
+    /// 다를 수 있어 따로 그린다.
     public struct Submesh: Equatable, Sendable {
         public let materialPath: String
         public let vertexData: Data
@@ -133,8 +141,17 @@ public struct MDLModel: Equatable, Sendable {
         let hasBounds = Self.versionsWithBounds.contains(magic)
         let first = try readMeshBlock(&cursor, hasBounds: hasBounds)
 
+        // 둘째 이후 서브메시 앞의 여백. `MDLV0023`은 재질 문자열 앞에 0으로 채운
+        // 6바이트가 끼어 있다(실물 `scene.mdl`, 서브메시 5개 — 이 여백을 안
+        // 건너뛰면 빈 문자열을 재질로 읽고 그 뒤로 커서가 통째로 밀려, 다음
+        // 필드 자리에서 문자열 조각이 `vertexFormat`으로 읽힌다 — 로그의
+        // `tooLarge("정점 …바이트 (형식 1702125933)")`가 그 증거다: 1702125933을
+        // 리틀엔디언 4바이트로 풀면 "mate"다). `MDLV0017`은 이 여백이 없다
+        // (실물 `space boi.mdl`로 확인). 뜻은 모른다 — 6바이트 전부 0이다.
+        let submeshGap = magic == "MDLV0023" ? 6 : 0
         var extraSubmeshes: [Submesh] = []
         for _ in 1..<submeshCount {
+            if submeshGap > 0 { _ = try cursor.bytes(submeshGap) }
             let materialPath = try cursor.string(maxLength: 1024)
             let block = try readMeshBlock(&cursor, hasBounds: hasBounds)
             extraSubmeshes.append(Submesh(

@@ -992,9 +992,15 @@ public final class ParticleSystem {
         }
     }
 
-    /// 이웃(半threshold 안) 파티클과의 응집·분리·정렬 힘. O(n²) — ponytail: 실물
-    /// `maxcount`가 수백 단위라 문제없지만, 수천 단위 프리셋이 나오면 공간
-    /// 격자로 이웃만 추려야 한다.
+    /// 이웃(threshold 안) 파티클과의 응집·분리·정렬 힘.
+    ///
+    /// 창작마당 프리셋의 `maxcount`는 신뢰할 수 없는 값이라(최대 8192까지 받는다)
+    /// 모든 쌍을 비교하면(O(n²)) 그 수만큼 프레임 시간이 뛴다. 대신 칸 크기를
+    /// 이웃 반경(`neighborThreshold`)과 같은 균일 격자에 파티클을 던져 넣는다 —
+    /// 반경 안의 상대는 반드시 같은 칸이거나 3x3x3 이웃 칸 안에 있으므로, 그
+    /// 칸들만 훑으면 된다(O(n·k), k는 칸 하나의 평균 밀도). 결과는 전수 비교와
+    /// 정확히 같아야 한다 — 이웃 판정 자체(`distSq < thresholdSq`)는 그대로 두고
+    /// 후보를 줄이기만 한다.
     private func computeBoidForces(
         cohesionFactor: Double, separationFactor: Double, alignmentFactor: Double,
         neighborThreshold: Double
@@ -1002,6 +1008,25 @@ public final class ParticleSystem {
         var forces = Array(repeating: Vec3(x: 0, y: 0, z: 0), count: particleBuffer.count)
         guard neighborThreshold > 0 else { return forces }
         let thresholdSq = neighborThreshold * neighborThreshold
+
+        // 칸 좌표. 칸 크기 = neighborThreshold라 3x3x3 이웃이면 반경 전체를 덮는다.
+        func cell(of position: Vec3) -> (Int, Int, Int) {
+            (Int((position.x / neighborThreshold).rounded(.down)),
+             Int((position.y / neighborThreshold).rounded(.down)),
+             Int((position.z / neighborThreshold).rounded(.down)))
+        }
+        // 세 좌표를 한 정수 키로 접는다. 21비트씩(±백만 칸) 주면 반경 수천짜리
+        // 씬도 거뜬하다 — 실물 좌표 범위를 훨씬 넘는다.
+        func key(_ c: (Int, Int, Int)) -> Int64 {
+            let mask: Int64 = (1 << 21) - 1
+            return (Int64(c.0) & mask) | ((Int64(c.1) & mask) << 21) | ((Int64(c.2) & mask) << 42)
+        }
+        var grid: [Int64: [Int]] = [:]
+        grid.reserveCapacity(particleBuffer.count)
+        for i in 0..<particleBuffer.count where particleBuffer[i].isAlive {
+            grid[key(cell(of: particleBuffer[i].position)), default: []].append(i)
+        }
+
         for i in 0..<particleBuffer.count {
             guard particleBuffer[i].isAlive else { continue }
             let pi = particleBuffer[i]
@@ -1009,17 +1034,24 @@ public final class ParticleSystem {
             var separationSum = Vec3(x: 0, y: 0, z: 0)
             var velocitySum = Vec3(x: 0, y: 0, z: 0)
             var neighborCount = 0
-            for j in 0..<particleBuffer.count where j != i {
-                guard particleBuffer[j].isAlive else { continue }
-                let pj = particleBuffer[j]
-                let delta = Self.subtract(pj.position, pi.position)
-                let distSq = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z
-                guard distSq < thresholdSq, distSq > 1e-9 else { continue }
-                neighborCount += 1
-                centerSum = Self.add(centerSum, pj.position)
-                velocitySum = Self.add(velocitySum, pj.velocity)
-                let dist = distSq.squareRoot()
-                separationSum = Self.subtract(separationSum, Self.scale(delta, 1 / dist))
+            let (cx, cy, cz) = cell(of: pi.position)
+            for dx in -1...1 {
+                for dy in -1...1 {
+                    for dz in -1...1 {
+                        guard let bucket = grid[key((cx + dx, cy + dy, cz + dz))] else { continue }
+                        for j in bucket where j != i {
+                            let pj = particleBuffer[j]
+                            let delta = Self.subtract(pj.position, pi.position)
+                            let distSq = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z
+                            guard distSq < thresholdSq, distSq > 1e-9 else { continue }
+                            neighborCount += 1
+                            centerSum = Self.add(centerSum, pj.position)
+                            velocitySum = Self.add(velocitySum, pj.velocity)
+                            let dist = distSq.squareRoot()
+                            separationSum = Self.subtract(separationSum, Self.scale(delta, 1 / dist))
+                        }
+                    }
+                }
             }
             guard neighborCount > 0 else { continue }
             let n = Double(neighborCount)

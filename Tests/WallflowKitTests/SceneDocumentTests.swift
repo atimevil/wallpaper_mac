@@ -1074,6 +1074,43 @@ extension SceneDocumentTests {
         XCTAssertEqual(afterDrag.origin, Vec3(x: 50, y: -30, z: 0),
                        "그룹을 드래그하면 자식이 물려받을 부모 자리도 따라가야 한다")
     }
+
+    /// 스크립트가 아니라 **타임라인 키프레임 애니메이션**이 그룹을 옮기는 경우도
+    /// 같은 식으로 자식에 내려가야 한다(`SceneRenderer.applyPropertyAnimations`가
+    /// 매 프레임 이 계산으로 부모 사슬을 다시 굽는다). 스크립트와 달리 애니메이션은
+    /// 그룹 자신의 값만 바뀌고 나머지 조상은 파일 값 그대로다 — `local` 클로저가
+    /// "이번 프레임에 움직인 조상"과 "파일 값 그대로인 조상"을 섞어 줘도
+    /// `composeLiveTransform`이 같은 결과를 내야 한다.
+    func testComposeLiveTransformFollowsAnimatedParent() {
+        // 210(그룹)이 246(조부모) 밑에 있고, 312(자식)이 210 밑에 있다.
+        let parentOf: [Int: Int] = [210: 246, 312: 210]
+        // 파일이 정한 로컬 값(애니메이션이 없으면 이 값 그대로).
+        let fileLocal: [Int: SceneDocument.LayerTransform] = [
+            246: .identity,
+            210: SceneDocument.LayerTransform(
+                origin: Vec3(x: 0, y: 0, z: 0), scale: Vec3(x: 1, y: 1, z: 1),
+                rotation: 0, alpha: 1, visible: true),
+        ]
+        func local(_ id: Int, animatedGroupOrigin: Vec3?) -> SceneDocument.LayerTransform? {
+            if id == 210, let animated = animatedGroupOrigin {
+                return SceneDocument.LayerTransform(
+                    origin: animated, scale: Vec3(x: 1, y: 1, z: 1),
+                    rotation: 0, alpha: 1, visible: true)
+            }
+            return fileLocal[id]
+        }
+        let atOpen = SceneDocument.composeLiveTransform(of: 210, parentOf: parentOf) {
+            local($0, animatedGroupOrigin: nil)
+        }
+        XCTAssertEqual(atOpen.origin, Vec3(x: 0, y: 0, z: 0))
+        // 키프레임이 이번 프레임에 그룹을 옮긴 뒤 — 312가 물려받을 부모 자리
+        // (`composeLiveTransform(of: 312의 parent, ...)`)도 같이 옮겨져야 한다.
+        let afterAnimation = SceneDocument.composeLiveTransform(of: 210, parentOf: parentOf) {
+            local($0, animatedGroupOrigin: Vec3(x: 50, y: -30, z: 0))
+        }
+        XCTAssertEqual(afterAnimation.origin, Vec3(x: 50, y: -30, z: 0),
+                       "그룹을 애니메이션으로 옮기면 자식이 물려받을 부모 자리도 따라가야 한다")
+    }
 }
 
 extension SceneDocumentTests {
