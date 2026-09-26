@@ -53,6 +53,10 @@ final class ModelRenderer {
     /// 씬의 `ambientcolor`·`skylightcolor`.
     private let ambient: SIMD3<Float>
     private let skylight: SIMD3<Float>
+    /// WE `cullmode`. DirectX 툴체인에서 나온 메시라 정점 감기가 Metal 기본
+    /// (반시계=앞면)과 반대다 — `encode(into:)`에서 `.clockwise`로 함께 준다
+    /// (Saturn·Starscape 실측으로 확인함).
+    private let cullMode: MTLCullMode
     /// 씬의 점광·방향광 하나씩(있으면). `PerformLighting_V1`(`generic4` 등)이나
     /// `generic3`의 인라인 광원 루프를 먹인다.
     private let pointLight: (origin: Vec3, angles: Vec3, info: LightInfo)?
@@ -120,6 +124,13 @@ final class ModelRenderer {
         }
         let sceneTextures = (pass["textures"] as? [Any] ?? []).map { $0 as? String }
         let blending = pass["blending"] as? String ?? "normal"
+        let cullMode: MTLCullMode
+        switch (pass["cullmode"] as? String ?? "normal").lowercased() {
+        case "none": cullMode = .none
+        case "reverse": cullMode = .front
+        default: cullMode = .back
+        }
+        self.cullMode = cullMode
 
         // 셰이더 짝. 이펙트와 같은 자리 규칙이다.
         let paths = EffectDefinition.shaderPaths(for: shaderName, base: "")
@@ -399,6 +410,8 @@ final class ModelRenderer {
             engine["g_LDirectional_Direction"] = [Float(d.x), Float(d.y), Float(d.z), 0]
         }
         encoder.setRenderPipelineState(pipeline)
+        encoder.setCullMode(cullMode)
+        encoder.setFrontFacing(.clockwise)
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 1)
         encoder.setVertexBuffer(zeroBuffer, offset: 0, index: 2)
         for (layout, bytes, isVertex) in [(vertexLayout, vertexBytes, true),

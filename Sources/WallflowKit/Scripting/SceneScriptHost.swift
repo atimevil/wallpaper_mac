@@ -271,7 +271,16 @@ public final class SceneScriptHost: @unchecked Sendable {
                      cursorScreen: Vec2? = nil,
                      audio: [Int: (left: [Float], right: [Float])] = [:]) -> Snapshot {
         guard fatalFailure == nil else { return .empty }
-        let dt = frametime.isFinite ? Swift.max(0, frametime) : 0
+        // 0은 절대 안 준다. 실물 스크립트가 흔히 쓰는 정규화 관용구
+        // `engine.frametime * (1 / engine.frametime)`(늘 1이어야 하는 식)가
+        // frametime==0에서 `0 * Infinity = NaN`을 낸다 — 첫 틱(`SceneRenderer`가
+        // `tick(frametime: 0)`으로 미리 한 번 돌린다)에서 그 NaN이 카메라 값에
+        // 번지고, `setCameraTransforms`가 객체를 다시 `new Vec3(...)`로 감쌀 때
+        // 그 생성자의 `__wfNum(x) || 0`이 NaN을 조용히 0으로 굳혀 버린다(WE
+        // 실물 "3D Camera" 스크립트로 확인함 — 카메라가 원점에 박혀 메시 안쪽이
+        // 화면을 뒤덮었다). 실물 WE가 첫 틱에 진짜 0을 준다고 믿을 근거가 없다 —
+        // 아주 작은 양수로 바닥을 깐다.
+        let dt = frametime.isFinite ? Swift.max(1.0 / 600.0, frametime) : 1.0 / 600.0
         runtime += dt
         let cw = cursorWorld ?? Vec3(x: 0, y: 0, z: 0)
         let cs = cursorScreen ?? Vec2(x: 0, y: 0)
