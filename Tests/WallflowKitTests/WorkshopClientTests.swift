@@ -58,6 +58,44 @@ final class WorkshopClientTests: XCTestCase {
         XCTAssertEqual(items.map(\.id), ["2"])
     }
 
+    /// 확장 필드: 설명·날짜·구독 수·작성자 ID. 구독 수는 문자열로도 온다.
+    func testParsesExtendedFields() throws {
+        let json = """
+        {"response": {"publishedfiledetails": [
+          {"result": 1, "publishedfileid": "1", "title": "제목", "file_size": 1,
+           "description": "설명입니다", "time_created": 1700000000, "time_updated": 1700100000,
+           "subscriptions": "12345", "favorited": 678, "views": 999, "creator": "76561198000000001"}
+        ]}}
+        """
+        let items = try WorkshopClient.parseDetails(Data(json.utf8))
+        XCTAssertEqual(items.count, 1)
+        let item = items[0]
+        XCTAssertEqual(item.description, "설명입니다")
+        XCTAssertEqual(item.createdAt, Date(timeIntervalSince1970: 1700000000))
+        XCTAssertEqual(item.updatedAt, Date(timeIntervalSince1970: 1700100000))
+        XCTAssertEqual(item.subscriptions, 12345)
+        XCTAssertEqual(item.favorites, 678)
+        XCTAssertEqual(item.views, 999)
+        XCTAssertEqual(item.creatorID, "76561198000000001")
+    }
+
+    /// 확장 필드가 하나도 없어도 기본값으로 채워지고 기존 호출부는 그대로 컴파일된다.
+    func testExtendedFieldsDefaultWhenMissing() throws {
+        let json = """
+        {"response": {"publishedfiledetails": [
+          {"result": 1, "publishedfileid": "1", "title": "제목", "file_size": 1}
+        ]}}
+        """
+        let item = try WorkshopClient.parseDetails(Data(json.utf8))[0]
+        XCTAssertEqual(item.description, "")
+        XCTAssertNil(item.createdAt)
+        XCTAssertNil(item.updatedAt)
+        XCTAssertEqual(item.subscriptions, 0)
+        XCTAssertEqual(item.favorites, 0)
+        XCTAssertEqual(item.views, 0)
+        XCTAssertNil(item.creatorID)
+    }
+
     func testMalformedPayloadThrows() {
         XCTAssertThrowsError(try WorkshopClient.parseDetails(Data("쓰레기".utf8)))
         XCTAssertThrowsError(try WorkshopClient.parseDetails(Data("{}".utf8)))

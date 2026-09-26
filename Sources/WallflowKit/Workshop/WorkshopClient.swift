@@ -7,6 +7,13 @@ public struct WorkshopItem: Equatable, Sendable, Identifiable {
     public let sizeBytes: Int
     public let previewURL: URL?
     public let tags: [String]
+    public let description: String
+    public let createdAt: Date?
+    public let updatedAt: Date?
+    public let subscriptions: Int
+    public let favorites: Int
+    public let views: Int
+    public let creatorID: String?
 
     /// 태그에서 읽은 종류. Wallpaper Engine이 `Scene`/`Video`/`Web`/`Application`을 붙인다.
     public var kind: WallpaperType {
@@ -21,12 +28,23 @@ public struct WorkshopItem: Equatable, Sendable, Identifiable {
         return .unsupported
     }
 
-    public init(id: String, title: String, sizeBytes: Int, previewURL: URL?, tags: [String]) {
+    public init(
+        id: String, title: String, sizeBytes: Int, previewURL: URL?, tags: [String],
+        description: String = "", createdAt: Date? = nil, updatedAt: Date? = nil,
+        subscriptions: Int = 0, favorites: Int = 0, views: Int = 0, creatorID: String? = nil
+    ) {
         self.id = id
         self.title = title
         self.sizeBytes = sizeBytes
         self.previewURL = previewURL
         self.tags = tags
+        self.description = description
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.subscriptions = subscriptions
+        self.favorites = favorites
+        self.views = views
+        self.creatorID = creatorID
     }
 }
 
@@ -274,27 +292,55 @@ public struct WorkshopClient: Sendable {
         return bounded.compactMap { byID[$0] }
     }
 
+    /// 상세 페이지(평점·작성자)를 읽는다. 목록 API에는 없는 정보라 페이지를 긁는다.
+    public func detailsPage(id: String) async throws -> WorkshopDetailsPage {
+        guard id.allSatisfy(\.isNumber), !id.isEmpty else { return WorkshopDetailsPage() }
+        var request = URLRequest(
+            url: URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)")!)
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 20
+
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            throw WorkshopError.badResponse(http.statusCode)
+        }
+        return WorkshopDetailsPage.parse(html: String(decoding: data, as: UTF8.self))
+    }
+
     static func parseDetails(_ data: Data) throws -> [WorkshopItem] {
         guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let response = root["response"] as? [String: Any],
               let files = response["publishedfiledetails"] as? [[String: Any]] else {
             throw WorkshopError.malformedPayload
         }
-        return files.compactMap { file in
+        return files.compactMap { file -> WorkshopItem? in
             // result 1이 아니면 삭제됐거나 비공개다. 제목이 없는 항목을 목록에
             // 남기면 사용자가 눌렀을 때 실패한다.
             guard (file["result"] as? Int) == 1,
                   let id = file["publishedfileid"] as? String,
                   let title = file["title"] as? String else { return nil }
-            // file_size는 문자열로 올 때와 수로 올 때가 둘 다 있다.
-            let size = (file["file_size"] as? Int)
-                ?? Int(file["file_size"] as? String ?? "") ?? 0
+            // file_size·subscriptions 등은 문자열로 올 때와 수로 올 때가 둘 다 있다.
+            let size = intValue(file["file_size"]) ?? 0
             let tags = (file["tags"] as? [[String: Any]])?
                 .compactMap { $0["tag"] as? String } ?? []
             return WorkshopItem(
                 id: id, title: title, sizeBytes: max(0, size),
                 previewURL: (file["preview_url"] as? String).flatMap(URL.init(string:)),
-                tags: tags)
+                tags: tags,
+                description: file["description"] as? String ?? "",
+                createdAt: intValue(file["time_created"]).map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                updatedAt: intValue(file["time_updated"]).map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                subscriptions: intValue(file["subscriptions"]) ?? 0,
+                favorites: intValue(file["favorited"]) ?? 0,
+                views: intValue(file["views"]) ?? 0,
+                creatorID: file["creator"] as? String)
         }
+    }
+
+    /// 숫자 필드가 Int·String 어느 쪽으로 와도 읽는다. 스팀 API가 둘을 섞어 준다.
+    private static func intValue(_ raw: Any?) -> Int? {
+        if let n = raw as? Int { return n }
+        if let s = raw as? String { return Int(s) }
+        return nil
     }
 }
