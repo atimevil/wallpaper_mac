@@ -80,6 +80,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         if let open = ProcessInfo.processInfo.environment["WALLFLOW_OPEN_WORKSHOP"] {
             showWorkshop()
             if open == "browse" { workshop?.selectTab(.browse) }
+            if let id = ProcessInfo.processInfo.environment["WALLFLOW_WORKSHOP_SELECT"] {
+                workshop?.selectItem(id: id)
+            }
         }
     }
 

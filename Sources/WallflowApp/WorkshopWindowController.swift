@@ -556,6 +556,13 @@ final class WorkshopWindowController: NSWindowController {
         setBusy(false, status: "\(item.title) 적용")
     }
 
+    /// 밖에서 항목을 고른다(확인용 환경 변수가 쓴다). 목록에 없으면 아무것도 안 한다.
+    func selectItem(id: String) {
+        guard let index = displayedEntries.firstIndex(where: { $0.id == id }) else { return }
+        collectionView.selectionIndexPaths = [IndexPath(item: index, section: 0)]
+        selectionDidChange()
+    }
+
     @objc private func refreshTable() {
         // `reloadData()`는 선택을 잃는다(무한 스크롤 다음 페이지·다운로드 뒤
         // 갱신마다 불린다) — 골라 둔 id가 새 목록에도 있으면 되살린다. 안 그러면
