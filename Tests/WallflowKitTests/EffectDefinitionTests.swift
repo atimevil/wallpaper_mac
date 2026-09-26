@@ -120,6 +120,32 @@ final class EffectDefinitionTests: XCTestCase {
         XCTAssertEqual(effect.passes[0].constants["speed"], .scalar(0.75))
     }
 
+    /// 재질 경로 후보 두 철자 다 pkg를 먼저 훑어야 한다. Assets에 이펙트 폴더
+    /// 기준 철자로 같은 이름의(그러나 다른 내용의) 표준판이 있어도, pkg가
+    /// 루트 기준 철자로 자기 사본을 들고 있으면 그게 이겨야 한다(실물
+    /// 1493910771 — 셰이더 쪽과 같은 사고 유형).
+    func testMaterialPathPrefersPkgAcrossCandidatesOverAssetsFirstCandidate() throws {
+        let pkg = try PkgReader(data: buildPkg(version: "PKGV0023", entries: [
+            ("effects/x/effect.json",
+             Data(#"{"passes": [{"material": "materials/shared.json"}]}"#.utf8)),
+            ("materials/shared.json",
+             Data(#"{"passes": [{"shader": "effects/from-pkg"}]}"#.utf8)),
+        ]))
+        let assetsRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wallflow-effdef-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: assetsRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: assetsRoot) }
+        let assetPath = assetsRoot.appendingPathComponent("effects/x/materials/shared.json")
+        try FileManager.default.createDirectory(
+            at: assetPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"passes": [{"shader": "effects/from-assets"}]}"#.utf8).write(to: assetPath)
+
+        let resolver = ReferenceResolver(pkg: pkg, assets: AssetsStore(root: assetsRoot))
+        let effect = try XCTUnwrap(EffectDefinition.load(
+            path: "effects/x/effect.json", scenePasses: [], resolver: resolver))
+        XCTAssertEqual(effect.passes[0].shaderName, "effects/from-pkg")
+    }
+
     func testShaderPathsPreferTheEffectFolder() {
         let paths = EffectDefinition.shaderPaths(for: "effects/iris", base: "effects/iris")
         XCTAssertEqual(paths.fragment.first, "effects/iris/shaders/effects/iris.frag")
@@ -147,5 +173,62 @@ final class EffectDefinitionTests: XCTestCase {
         XCTAssertNil(textures[0])
         XCTAssertEqual(textures[1], "masks/blur_mask")
         XCTAssertNil(textures[2])
+    }
+
+    /// `_rt_imageLayerComposite_<id>_a`/`_b`는 다른 이미지 레이어의 합성 결과를
+    /// 가리키는 이름이다 — 실물 음반 커버 씬(2938612768)의 `blend` 이펙트가
+    /// 다른 "音频封面" 레이어를 이 이름으로 참조한다.
+    func testImageLayerCompositeIDParsesSuffixAOrB() {
+        XCTAssertEqual(EffectDefinition.imageLayerCompositeID(for: "_rt_imageLayerComposite_1174_a"), 1174)
+        XCTAssertEqual(EffectDefinition.imageLayerCompositeID(for: "_rt_imageLayerComposite_890_b"), 890)
+    }
+
+    func testImageLayerCompositeIDRejectsUnrelatedNames() {
+        // 화면 전체 버퍼처럼 아예 다른 렌더 타깃은 걸리면 안 된다.
+        XCTAssertNil(EffectDefinition.imageLayerCompositeID(for: "_rt_FullFrameBuffer"))
+        // 접미가 없거나 id가 숫자가 아니면 참조로 보지 않는다.
+        XCTAssertNil(EffectDefinition.imageLayerCompositeID(for: "_rt_imageLayerComposite_1174"))
+        XCTAssertNil(EffectDefinition.imageLayerCompositeID(for: "_rt_imageLayerComposite_abc_a"))
+        XCTAssertNil(EffectDefinition.imageLayerCompositeID(for: "masks/blur_mask"))
+    }
+
+    /// 실물 음반 커버 씬(2938612768)처럼, 다른 레이어의 이펙트가 이 레이어를
+    /// `_rt_imageLayerComposite_<id>_a/_b`로 참조하면 — 그 레이어 자신은
+    /// `visible: false`라도(화면 밖에 둔 순수 텍스처 소스) — 목록에 잡혀야
+    /// 렌더러가 "안 보이면 건너뛴다" 최적화의 예외로 세울 수 있다.
+    func testReferencedLayerIDsFindsCrossLayerReferences() {
+        let blend = EffectDefinition(name: "blend", passes: [
+            EffectPass(shaderName: "effects/blend", target: nil, bindings: [],
+                       combos: [:], constants: [:],
+                       textures: [nil, "_rt_imageLayerComposite_1321_a"], blending: "normal"),
+        ])
+        let referencing = SceneLayer(
+            id: 1509, name: "16比9", visible: true,
+            origin: Vec3(x: 0, y: 0, z: 0), size: Vec2(x: 1920, y: 1080),
+            content: .image(texturePath: "materials/16比9.tex"),
+            effects: [LayerEffect(definition: blend, base: "effects/blend")])
+        let source = SceneLayer(
+            id: 1321, name: "默认音频封面azb", visible: false,
+            origin: Vec3(x: -417, y: -572, z: 0), size: Vec2(x: 1000, y: 1000),
+            content: .image(texturePath: "materials/默认音频封面azb.tex"))
+        let unrelated = SceneLayer(
+            id: 42, name: "다른 레이어", visible: false,
+            origin: Vec3(x: 0, y: 0, z: 0), size: Vec2(x: 10, y: 10),
+            content: .image(texturePath: "materials/x.tex"))
+        let ids = EffectDefinition.referencedLayerIDs(in: [referencing, source, unrelated])
+        XCTAssertEqual(ids, [1321])
+    }
+
+    /// 실물 `space boi`의 `diffuse_0.json`이 재질 키를 `Alpha`(대문자)로 주는데
+    /// 셰이더 주석은 `alpha`(소문자)를 기대한다 — 정확히 맞는 키가 없으면
+    /// 대소문자 무시하고 한 번 더 찾아야 한다. `ModelRenderer`·`EffectChain`
+    /// 둘 다 이 자리로 찾는다.
+    func testLookupFallsBackCaseInsensitively() {
+        let constants: [String: EffectConstant] = ["Alpha": .scalar(0)]
+        XCTAssertEqual(EffectConstant.lookup(materialKey: "alpha", in: constants), .scalar(0))
+        // 정확히 맞는 키가 있으면 그쪽을 먼저 쓴다.
+        let exact: [String: EffectConstant] = ["alpha": .scalar(1), "Alpha": .scalar(0)]
+        XCTAssertEqual(EffectConstant.lookup(materialKey: "alpha", in: exact), .scalar(1))
+        XCTAssertNil(EffectConstant.lookup(materialKey: "missing", in: constants))
     }
 }

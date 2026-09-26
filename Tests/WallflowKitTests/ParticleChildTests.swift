@@ -280,4 +280,142 @@ final class ParticleChildTests: XCTestCase {
         system.update(deltaTime: 1.0 / 60)
         XCTAssertEqual(system.renderableGroups().map(\.key), ["0", "0.0", "0.1"])
     }
+
+    // MARK: inheritInitialValueFromEvent / inheritValueFromEvent (WE 2.7)
+
+    /// 실물 창작마당 미리보기 그대로 — `eventdeath` 자식이
+    /// `inheritinitialvaluefromevent`로 부모가 죽는 순간의 색·크기·알파·속도를
+    /// **한 번** 그대로 받는다.
+    func testEventDeathChildInheritsInitialValueFromParent() throws {
+        let parentJSON = """
+        {"maxcount": 1, "material": "materials/parent.json",
+         "emitter": [{"name": "sphererandom", "rate": 0, "instantaneous": 1,
+                      "distancemin": 0, "distancemax": 0}],
+         "initializer": [{"name": "lifetimerandom", "min": 0.05, "max": 0.05},
+                         {"name": "sizerandom", "min": 77, "max": 77},
+                         {"name": "alpharandom", "min": 0.5, "max": 0.5},
+                         {"name": "colorrandom", "min": "255 0 0", "max": "255 0 0"},
+                         {"name": "velocityrandom", "min": "40 0 0", "max": "40 0 0"}],
+         "children": [{"name": "particles/child.json", "type": "eventdeath",
+                       "maxcount": 1, "origin": "0 0 0"}]}
+        """
+        let childJSON = """
+        {"maxcount": 1, "material": "materials/spark.json",
+         "emitter": [{"name": "sphererandom", "rate": 0, "instantaneous": 1,
+                      "distancemin": 0, "distancemax": 0}],
+         "initializer": [{"name": "lifetimerandom", "min": 2, "max": 2},
+                         {"name": "inheritinitialvaluefromevent"}]}
+        """
+        let parentObject = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(parentJSON.utf8)) as? [String: Any])
+        let childObject = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(childJSON.utf8)) as? [String: Any])
+        let child = ParticleChild(
+            reference: ParticleChildReference(
+                name: "particles/child.json", trigger: .onDeath,
+                maxCount: 1, origin: Vec3(x: 0, y: 0, z: 0)),
+            preset: try XCTUnwrap(ParticlePreset.parse(childObject)),
+            texturePath: "materials/c.tex", blend: .additive)
+        let preset = try XCTUnwrap(ParticlePreset.parse(parentObject)).withChildren([child])
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 7))
+        // 부모 수명 0.05초를 넘긴다.
+        for _ in 0..<10 { system.update(deltaTime: 1.0 / 60) }
+        let groups = system.renderableGroups()
+        XCTAssertEqual(groups.count, 2)
+        let childParticle = try XCTUnwrap(groups[1].particles.first)
+        XCTAssertEqual(childParticle.color, Vec3(x: 1, y: 0, z: 0))
+        XCTAssertEqual(childParticle.size, 77, accuracy: 0.01)
+        XCTAssertEqual(childParticle.alpha, 0.5, accuracy: 0.01)
+        XCTAssertEqual(childParticle.velocity.x, 40, accuracy: 0.01)
+    }
+
+    /// 실물 창작마당 미리보기 그대로 — `eventfollow` 자식이
+    /// `inheritvaluefromevent`로 **매 프레임** 부모의 지금 색을 따라간다.
+    /// 부모 색이 `colorchange`로 바뀌는 도중에 자식도 같이 바뀌어야 한다.
+    func testFollowChildInheritsValueContinuously() throws {
+        let parentJSON = """
+        {"maxcount": 1, "material": "materials/parent.json",
+         "emitter": [{"name": "sphererandom", "rate": 0, "instantaneous": 1,
+                      "distancemin": 0, "distancemax": 0}],
+         "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100},
+                         {"name": "colorrandom", "min": "255 255 255", "max": "255 255 255"},
+                         {"name": "velocityrandom", "min": "10 0 0", "max": "10 0 0"}],
+         "operator": [{"name": "colorchange", "starttime": 0, "endtime": 1,
+                       "startvalue": "1 1 1", "endvalue": "0 0 0"}],
+         "children": [{"name": "particles/child.json", "type": "eventfollow",
+                       "maxcount": 1, "origin": "0 0 0"}]}
+        """
+        // 자식은 제 이미터로 사방(speedmax:200)에 뿌린다 — follow 자식은
+        // 부모 위치를 이미 따라가므로(originOffset), 속도까지 부모 것으로
+        // 덮으면 이 이미터 속도가 매 프레임 지워져 자식이 한 점으로 뭉친다.
+        let childJSON = """
+        {"maxcount": 20, "material": "materials/spark.json",
+         "emitter": [{"name": "sphererandom", "rate": 100, "distancemin": 0,
+                      "distancemax": 0, "speedmin": 50, "speedmax": 200}],
+         "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100}],
+         "operator": [{"name": "movement"}, {"name": "inheritvaluefromevent"}]}
+        """
+        let parentObject = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(parentJSON.utf8)) as? [String: Any])
+        let childObject = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(childJSON.utf8)) as? [String: Any])
+        let child = ParticleChild(
+            reference: ParticleChildReference(
+                name: "particles/child.json", trigger: .follow,
+                maxCount: 1, origin: Vec3(x: 0, y: 0, z: 0)),
+            preset: try XCTUnwrap(ParticlePreset.parse(childObject)),
+            texturePath: "materials/c.tex", blend: .additive)
+        let preset = try XCTUnwrap(ParticlePreset.parse(parentObject)).withChildren([child])
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 7))
+        // 절반쯤(수명 100초 중 50초) 굴린다. 한 걸음은 `maxTimeStep`(0.1초)로
+        // 잘리므로 그 상한만큼 나눠 부른다.
+        for _ in 0..<500 { system.update(deltaTime: 0.1) }
+        let parent = try XCTUnwrap(system.particles.first)
+        let groups = system.renderableGroups()
+        let childParticles = groups[1].particles.filter(\.isAlive)
+        XCTAssertFalse(childParticles.isEmpty)
+        for childParticle in childParticles {
+            XCTAssertEqual(childParticle.color.x, parent.color.x, accuracy: 0.02, "색은 옮겨야 한다")
+        }
+        XCTAssertLessThan(parent.color.x, 0.9, "이 시점엔 부모 색이 이미 바뀌어 있어야 검증 의미가 있다")
+        // 속도는 부모 것으로 안 덮여야 한다 — 자식마다 제 이미터가 준 서로
+        // 다른(사방으로 뿌린) 속도를 지켜야 한다.
+        let velocitiesMatchParent = childParticles.allSatisfy {
+            abs($0.velocity.x - parent.velocity.x) < 0.5 && abs($0.velocity.y - parent.velocity.y) < 0.5
+        }
+        XCTAssertFalse(velocitiesMatchParent, "속도는 부모 것으로 덮이면 안 된다 — 제 이미터 속도를 지켜야 한다")
+    }
+
+    // MARK: inheritControlPointVelocity (WE 2.7)
+
+    /// 제어점을 스크립트로 계속 옮기면(프레임마다 같은 방향으로) 그 프레임 간
+    /// 이동으로 낸 속도를 새로 나는 파티클이 그대로 받아야 한다.
+    func testInheritControlPointVelocityFollowsScriptedMotion() throws {
+        let json = """
+        {"maxcount": 50, "material": "materials/parent.json",
+         "controlpoint": [{"id": 1, "offset": "0 0 0", "flags": 0}],
+         "emitter": [{"name": "sphererandom", "rate": 100, "controlpoint": 1,
+                      "distancemin": 0, "distancemax": 0}],
+         "initializer": [{"name": "lifetimerandom", "min": 100, "max": 100},
+                         {"name": "inheritcontrolpointvelocity", "controlpoint": 1,
+                          "min": 1, "max": 1}]}
+        """
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(json.utf8)) as? [String: Any])
+        let preset = try XCTUnwrap(ParticlePreset.parse(object))
+        let system = ParticleSystem(preset: preset, random: SeededRandom(seed: 3))
+        // 첫 프레임 — 지난 자리가 없어 속도가 0이어야 한다.
+        system.update(deltaTime: 1.0 / 60)
+        for particle in system.particles {
+            XCTAssertEqual(particle.velocity.x, 0, accuracy: 0.01)
+        }
+        // 제어점을 초당 300 x축으로 옮긴다(1/60초마다 5씩).
+        for i in 1...10 {
+            system.instance.controlPoints[1] = Vec3(x: Double(i) * 5, y: 0, z: 0)
+            system.update(deltaTime: 1.0 / 60)
+        }
+        // 가장 최근에 태어난 파티클이 그 순간의 제어점 속도(≈300)를 받아야 한다.
+        let newest = try XCTUnwrap(system.particles.min(by: { $0.age < $1.age }))
+        XCTAssertEqual(newest.velocity.x, 300, accuracy: 30)
+    }
 }

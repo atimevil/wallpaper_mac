@@ -156,6 +156,64 @@ final class RealScenesTests: XCTestCase {
         XCTAssertEqual(state.textureAnimationFrame, 1)
     }
 
+    /// 워크숍 3147346398(Minecraft Lo-Fi Fireplace)의 화면 전체를 덮는 검은
+    /// 페이드 오버레이("Solid Placeholder")가 4초(120프레임/30fps)에 걸쳐
+    /// alpha 1→0으로 빠진다. 예전 지름길("정착값")은 재생하지 않고 늘 끝값(0)만
+    /// 줬다 — 이 시험은 실제로 시간이 지남에 따라 논다는 것을 real JSON으로 본다.
+    func testFireplaceFadeOverlayPlaysAlphaOverFourSeconds() throws {
+        guard let reader = try scenePkg("3147346398") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader)
+        guard let layer = doc.layers.first(where: { $0.name == "Solid Placeholder" }) else {
+            return XCTFail("페이드 오버레이 레이어를 찾을 수 없다")
+        }
+        let anim = try XCTUnwrap(layer.animations["alpha"], "alpha에 재생 가능한 커브가 있어야 한다")
+        XCTAssertEqual(anim.mode, .single)
+        XCTAssertEqual(anim.scalar(atSeconds: 0, base: layer.alpha), 1, accuracy: 1e-6)
+        XCTAssertLessThan(anim.scalar(atSeconds: 2, base: layer.alpha), 1,
+                          "재생 중간에는 시작값보다 옅어야 한다")
+        XCTAssertEqual(anim.scalar(atSeconds: 4, base: layer.alpha), 0, accuracy: 1e-6,
+                       "4초 뒤에는 완전히 투명해야 한다")
+    }
+
+    /// 같은 씬(3147346398)의 "Clock"·"Date"는 글자 레이어인데 origin이 애니메이션이다.
+    /// 라운드 1은 글자·파티클 레이어를 렌더러에서 통째로 건너뛰었다(T4 굽기를
+    /// 건드릴까 봐) — 이 시험은 Kit 파싱 단계가 콘텐츠 종류와 무관하게 커브를
+    /// 주웠는지만 본다(실제 재생은 SceneRenderer 쪽이라 여기서 보지 않는다).
+    func testTextLayerOriginAnimationParsesRegardlessOfContentKind() throws {
+        guard let reader = try scenePkg("3147346398") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader)
+        for name in ["Clock", "Date"] {
+            guard let layer = doc.layers.first(where: { $0.name == name }) else {
+                XCTFail("\(name) 레이어를 찾을 수 없다"); continue
+            }
+            guard case .text = layer.content else {
+                XCTFail("\(name)는 글자 레이어여야 한다"); continue
+            }
+            let anim = try XCTUnwrap(layer.animations["origin"], "\(name)의 origin에 커브가 있어야 한다")
+            XCTAssertTrue(anim.relative, "origin 커브는 기준 좌표에 더하는 오프셋이다")
+        }
+    }
+
+    /// 워크숍 2597392171 "Fog 1"은 파티클 레이어인데 origin이 애니메이션이다.
+    func testParticleLayerOriginAnimationParses() throws {
+        guard let reader = try scenePkg("2597392171") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let doc = try SceneDocument.load(from: reader)
+        guard let layer = doc.layers.first(where: { $0.name == "Fog 1" }) else {
+            return XCTFail("Fog 1 레이어를 찾을 수 없다")
+        }
+        guard case .particle = layer.content else {
+            return XCTFail("Fog 1은 파티클 레이어여야 한다")
+        }
+        let anim = try XCTUnwrap(layer.animations["origin"])
+        XCTAssertEqual(anim.mode, .loop)
+    }
+
     /// 226MB 텍스처 두 개가 MP4였다. 이 판정이 틀리면 두 씬이 통째로 깨진다.
     func testLargeTexturesAreDetectedAsVideo() throws {
         let cases = [
@@ -488,6 +546,36 @@ final class RealScenesTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(emitterCount, 1,
                                        "dust_motes_0 레이어의 이미터가 없다")
         }
+    }
+    /// "Cat and bee"(3444535389): 배경 전체를 덮는 레이어(id 57, 모델
+    /// `"solidlayer": true`)가 `.image`가 아니라 `.solidColor`로 읽혀야 한다.
+    /// 그래야 렌더러가 텍스처 디코딩 없이 곧장 칠해 clearcolor(회색 0.7)가
+    /// 비쳐 보이지 않는다. 같은 재질을 쓰는 고양이 눈꺼풀(97/100)도 함께 본다 —
+    /// 배경이 검정이면 이 검정 눈꺼풀도 바탕에 묻혀 안 보여야 정상이다.
+    func testSolidLayerModelResolvesToSolidColorNotImage() throws {
+        guard let reader = try scenePkg("3444535389") else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let store = try assetsStore()
+        let doc = try SceneDocument.load(from: reader, assets: store)
+        let byID = Dictionary(uniqueKeysWithValues: doc.layers.map { ($0.id, $0) })
+        for id in [57, 97, 100] {
+            guard let layer = byID[id] else {
+                XCTFail("레이어 \(id)를 찾을 수 없다")
+                continue
+            }
+            guard case .solidColor(let color) = layer.content else {
+                XCTFail("레이어 \(id)는 solidlayer 모델인데 \(layer.content)로 읽혔다")
+                continue
+            }
+            XCTAssertEqual(color, Vec3(x: 0, y: 0, z: 0))
+        }
+        // 배경 레이어는 캔버스 전체를 덮어야 한다(부호는 뒤집힘을 나타낼 뿐
+        // 크기는 절댓값이다).
+        let background = try XCTUnwrap(byID[57])
+        XCTAssertTrue(background.visible)
+        XCTAssertGreaterThanOrEqual(abs(background.size.x), Double(doc.orthoWidth))
+        XCTAssertGreaterThanOrEqual(abs(background.size.y), Double(doc.orthoHeight))
     }
 }
 

@@ -48,7 +48,22 @@ final class LayerBlendModeTests: XCTestCase {
         XCTAssertEqual(try layer(#""colorBlendMode": 99"#).colorBlendMode, 99)
     }
 
+    /// `Sources/WallflowApp/SceneShaders.swift`의 `wfBlend`가 실제로 구현한 번호.
+    ///
+    /// WallflowKitTests는 WallflowApp(Metal)을 의존할 수 없어(Kit은 순수 로직이어야
+    /// 한다) 셰이더의 `switch (mode)` 케이스를 여기 손으로 옮겨 둔다. 1부터 32까지
+    /// 전부 있고, 0과 모르는 번호는 셰이더가 보통 합성으로 처리한다(`default`).
+    /// 셰이더에 케이스를 더하거나 빼면 이 집합도 같이 고쳐야 한다.
+    private static let rendererImplementsBlendModes = Set(1...32)
+
     /// 실물 씬에서 쓰는 번호들. 하나라도 못 읽으면 그 씬의 시계가 잘못 뜬다.
+    ///
+    /// 예전에는 측정된 집합이 정확히 `[6, 7, 11, 15, 22]`인지 봤다. 창작마당
+    /// 코퍼스를 늘리면 다른 실물 씬이 다른 번호를 더 쓰는데(9·28·31 확인),
+    /// 그때마다 이 시험이 깨지면 "늘어난 것"과 "파서가 망가진 것"을 구별 못 한다.
+    /// 그래서 지금은 ① 예전에 확인한 다섯이 **여전히** 나오는지(파서 퇴행 감지),
+    /// ② 측정된 모든 번호를 렌더러가 실제로 그릴 수 있는지(모르는 번호를 읽어
+    /// 놓고 셰이더가 조용히 보통으로 뭉개는 것을 감지)만 본다.
     func testRealScenesUseTheseModes() throws {
         let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
             "Library/Application Support/Wallflow/workshop/steamapps/workshop/content/431960")
@@ -73,8 +88,15 @@ final class LayerBlendModeTests: XCTestCase {
             }
         }
         try XCTSkipIf(loaded == 0, "창작마당 씬이 설치되어 있지 않다")
-        // 측정해 둔 값이다. 파서가 조용히 망가지면 이 집합이 비거나 줄어든다.
-        XCTAssertEqual(found, [6, 7, 11, 15, 22])
+        let previouslyMeasured: Set<Int> = [6, 7, 11, 15, 22]
+        XCTAssertTrue(
+            previouslyMeasured.isSubset(of: found),
+            "예전에 확인한 번호가 이제 안 나온다 — 파서가 뭔가 놓쳤다: "
+                + "\(previouslyMeasured.subtracting(found))")
+        let unimplemented = found.subtracting(Self.rendererImplementsBlendModes)
+        XCTAssertTrue(
+            unimplemented.isEmpty,
+            "실물 씬이 렌더러가 모르는 섞기 번호를 쓴다: \(unimplemented)")
         XCTAssertGreaterThan(brightest, 5, "밝기가 큰 레이어를 못 읽었다")
     }
 }

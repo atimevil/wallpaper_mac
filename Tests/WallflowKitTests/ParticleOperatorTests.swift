@@ -233,7 +233,7 @@ extension ParticleOperatorTests {
             with: Data(json.utf8)) as? [String: Any])
         let preset = try XCTUnwrap(ParticlePreset.parse(object))
         XCTAssertEqual(preset.operators.count, 2)
-        guard case .remapValue(let output, _, let scale, let lo, let hi) = preset.operators[0]
+        guard case .remapValue(let output, _, let scale, let lo, let hi, _) = preset.operators[0]
         else { return XCTFail("remapvalue여야 한다") }
         XCTAssertEqual(output, .velocity)
         XCTAssertEqual(scale, 10)
@@ -242,7 +242,7 @@ extension ParticleOperatorTests {
 
         // 실물 rain_screen*.json이 4곳에서 쓰는 두 번째 연산자. `output: "speed"`는
         // 속도의 크기만 바꾸는 출력이고, 이제 넣었으니 더 이상 못 넣는 목록에 없다.
-        guard case .remapValue(let output2, _, let scale2, let lo2, let hi2) = preset.operators[1]
+        guard case .remapValue(let output2, _, let scale2, let lo2, let hi2, _) = preset.operators[1]
         else { return XCTFail("remapvalue여야 한다") }
         XCTAssertEqual(output2, .speed)
         XCTAssertEqual(scale2, 8)
@@ -264,7 +264,7 @@ extension ParticleOperatorTests {
                                            max: Vec3(x: 3, y: 4, z: 0))],
             operators: [.remapValue(output: .speed, transform: .noise, inputScale: 8,
                                     outputMin: Vec3(x: 10, y: 10, z: 10),
-                                    outputMax: Vec3(x: 10, y: 10, z: 10))],
+                                    outputMax: Vec3(x: 10, y: 10, z: 10), input: .none)],
             burst: 8)
         system.update(deltaTime: 1.0 / 60)
         XCTAssertFalse(system.particles.isEmpty)
@@ -285,7 +285,7 @@ extension ParticleOperatorTests {
             operators: [.movement(gravity: Vec3(x: 0, y: 0, z: 0), drag: 0),
                         .remapValue(output: .velocity, transform: .noise, inputScale: 10,
                                     outputMin: Vec3(x: -200, y: -100, z: 0),
-                                    outputMax: Vec3(x: 200, y: -1000, z: 0))],
+                                    outputMax: Vec3(x: 200, y: -1000, z: 0), input: .none)],
             burst: 16)
         system.update(deltaTime: 1.0 / 60)
         let speeds = system.particles.map(\.velocity.y)
@@ -592,6 +592,60 @@ extension ParticleOperatorTests {
         for particle in system.particles {
             XCTAssertTrue(particle.position.x.isFinite && particle.position.y.isFinite)
         }
+    }
+
+    // MARK: alphachange
+
+    /// 실물 `fireworks2stars.json` 그대로 — `starttime:0.5, endtime:0.6,
+    /// startvalue:0, endvalue:1`(수명 50~60% 구간에 0→1로 나타난다).
+    /// 알파는 곱한다 — `alpharandom`이 정한 값을 지켜야 한다.
+    func testParsesRealFireworksAlphaChange() throws {
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data("""
+        {"material":"m.json","maxcount":10,
+         "operator":[{"endtime":0.6,"endvalue":1,"id":12,"name":"alphachange",
+                      "starttime":0.5,"startvalue":0}]}
+        """.utf8)) as? [String: Any])
+        let preset = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertEqual(
+            preset.operators,
+            [.alphaChange(startTime: 0.5, endTime: 0.6, startValue: 0, endValue: 1)])
+        XCTAssertTrue(preset.unsupportedNames.isEmpty)
+    }
+
+    /// 실물 `Rain_Splash_Drops_copy1.json` 그대로 — 필드가 하나도 없다. `sizechange`와
+    /// 같은 기본값(1→0, 수명 내내 옅어지다 0)을 쓴다.
+    func testBareAlphaChangeDefaultsLikeSizeChange() throws {
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data("""
+        {"material":"m.json","maxcount":10,
+         "operator":[{"id":10,"name":"alphachange"}]}
+        """.utf8)) as? [String: Any])
+        let preset = try XCTUnwrap(ParticlePreset.parse(json))
+        XCTAssertEqual(
+            preset.operators,
+            [.alphaChange(startTime: 0, endTime: 1, startValue: 1, endValue: 0)])
+    }
+
+    /// 알파는 곱한다 — `alpharandom`으로 정한 반투명을 지켜야 한다(`colorchange`의
+    /// 알파 판과 같은 규칙).
+    func testAlphaChangeMultipliesBaseAlpha() throws {
+        let system = self.system(
+            initializers: [.alphaRandom(min: 0.5, max: 0.5)],
+            operators: [.alphaChange(startTime: 0, endTime: 1, startValue: 1, endValue: 0)])
+        advance(system, seconds: 50)
+        let particle = try XCTUnwrap(system.particles.first)
+        XCTAssertEqual(particle.alpha, 0.25, accuracy: 0.02, "0.5(바탕) * 0.5(절반 지점) = 0.25")
+    }
+
+    /// `alphaFade`와 함께 쓰이면(실물엔 없지만) `sizeChange`가 여러 개 겹치는
+    /// 것과 같은 규칙으로 곱해져야 한다.
+    func testAlphaChangeStacksWithAlphaFade() throws {
+        let system = self.system(
+            initializers: [.alphaRandom(min: 1, max: 1)],
+            operators: [.alphaFade(fadeInTime: 0, fadeOutTime: 1),
+                        .alphaChange(startTime: 0, endTime: 1, startValue: 1, endValue: 0.5)])
+        advance(system, seconds: 50)
+        let particle = try XCTUnwrap(system.particles.first)
+        XCTAssertEqual(particle.alpha, 0.75, accuracy: 0.02, "1(alphaFade 중간) * 0.75(alphaChange 절반)")
     }
 
     /// `stop()`은 살아 있는 파티클을 거두고 더 뿌리지 않는다. `play()`면 다시 뿌린다.

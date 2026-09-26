@@ -44,6 +44,20 @@ public struct SceneDocument: Sendable {
     /// `general.zoom`. 저자가 편집기에서 정해 둔 확대율 — 화면 맞춤(`CanvasFit`)이
     /// 배율에 곱한다. 0 이하이거나 유한하지 않거나 없으면 1(확대 없음)이다.
     public let zoom: Double
+    /// `general.bloom`. 켰으면 밝은 자리를 퍼뜨려 더한다. 직교·원근 둘 다에서
+    /// 온다 — `general`은 투영 종류를 가리기 전에 읽는 한 딕셔너리라 둘 다 같은
+    /// 자리에서 얻는다.
+    public let bloom: Bool
+    /// `general.bloomstrength`. 퍼뜨린 값에 곱하는 배율. 없으면 1.
+    public let bloomStrength: Double
+    /// `general.bloomthreshold`. 이 밝기(0~1) 위인 자리만 퍼뜨린다. 없으면 1
+    /// (거의 다 안 퍼짐 — WE 편집기 기본값과 같다).
+    public let bloomThreshold: Double
+    /// `general.hdr`. 켜면 `MetalCompositor`가 이 씬을 `rgba16Float` 오프스크린에
+    /// 그려 메시 재질의 밝기(`HDR` 콤보, `common_pbr_2.h`의 `CombineLighting`)가
+    /// 1을 넘어도 블룸까지 안 잘리고 살아남는다. 최종 드로어블은 여전히
+    /// bgra8Unorm이라 화면에 옮길 때 자동으로 0~1로 잘린다.
+    public let hdr: Bool
 
     /// 도형(`shape: quad`) 레이어의 기준 한 변. 파일에는 크기가 없다.
     /// 근거는 `presets/lightshafts/`의 미리보기 씬(256x256 캔버스)과
@@ -123,12 +137,12 @@ public struct SceneDocument: Sendable {
         // 원근 씬에는 직교 크기가 없다. 좌표가 픽셀이 아니라 세계 단위이고
         // 화면 비율은 그릴 때 정해진다. 글자·파티클처럼 직교 크기를 쓰는
         // 경로를 위해 이름뿐인 1920x1080을 둔다.
-        let camera: SceneCamera?
+        var camera: SceneCamera?
         let width: Int
         let height: Int
         if general.keys.contains("orthogonalprojection"),
            !(general["orthogonalprojection"] is [String: Any]) {
-            camera = SceneCamera.parse(general)
+            camera = SceneCamera.parse(general, topLevelCamera: root["camera"] as? [String: Any])
             width = 1920
             height = 1080
         } else {
@@ -153,6 +167,14 @@ public struct SceneDocument: Sendable {
         // 0 이하나 NaN, 아예 없으면 확대 없음(1)로 본다 — 깨진 값이 화면을 통째로
         // 밀어내면 안 된다.
         let zoom = doubleValue(general["zoom"]).map { $0 > 0 ? $0 : 1 } ?? 1
+        // `bloom`은 맨 Bool이거나 `{"user":…, "value":true}`다. 세기·문턱값은
+        // 거기 더해 스크립트가 붙기도 한다(실물 오디오 반응 블룸) — `doubleValue`가
+        // `value`만 읽어 정착값으로 그린다. 직교·원근 둘 다 `general`을 그대로
+        // 읽으므로 이 자리 하나면 둘 다 된다.
+        let bloom = boolValue(general["bloom"]) ?? false
+        let bloomStrength = doubleValue(general["bloomstrength"]) ?? 1
+        let bloomThreshold = doubleValue(general["bloomthreshold"]) ?? 1
+        let hdr = boolValue(general["hdr"]) ?? false
 
         let resolver = ReferenceResolver(pkg: reader, assets: assets)
 
@@ -163,6 +185,30 @@ public struct SceneDocument: Sendable {
         // 부모-자식 변환을 먼저 푼다. 자식의 origin과 scale은 부모 기준 상대값이라,
         // 무시하면 시계가 화면 밖에 그려지고 글자 크기가 어긋난다(실물에서 확인).
         let transforms = resolveTransforms(objects)
+        // 원근 씬의 카메라 자리는 `general.camera`가 아니라 `"camera"` 키를 가진
+        // 오브젝트로 올 수도 있다(실물 3509243656 Three-Body: general엔 camera
+        // 블록이 없고, 대신 `{"camera":"default","origin":"0 0 6",...}` 오브젝트가
+        // 있다). 그걸 놓치면 기본 눈 자리(0,0,100)를 그대로 쓰는데, 이 씬의
+        // 하늘상자(반지름 8~12)보다 훨씬 멀어 안이 아니라 밖에서 작은 공 하나만
+        // 보게 된다. 부모 사슬까지 합친 자리를 눈으로 쓴다 — 카메라 경로 스크립트
+        // (`path`)는 아직 못 돌리니 정지 좌표가 최선이다.
+        if var cam = camera, let cameraObject = objects.first(where: { $0["camera"] is String }) {
+            let id = cameraObject["id"] as? Int ?? -1
+            let origin = transforms[id]?.origin ?? Vec3(x: 0, y: 0, z: 0)
+            if origin.x.isFinite, origin.y.isFinite, origin.z.isFinite {
+                cam.eye = origin
+                // 카메라 오브젝트가 있으면 씬 최상위 `camera`(에디터 마지막 저장
+                // 자리)는 안 믿는다 — 오브젝트의 origin만 눈으로 쓰고 중심은
+                // 원점으로 되돌린다. 실물 球体01(3589454154) 씬으로 확인했다:
+                // 최상위 camera는 eye(3.66,1.39,2.30)·center(3.30,1.17,1.39)로
+                // 씬 콘텐츠(원점 근처)에서 먼 다른 자리를 보고, 카메라 오브젝트
+                // origin(0,0,2.3)만 눈으로 쓰고 중심을 원점에 둬야 고리 클로즈업이
+                // 나온다 — 중심까지 최상위 값을 남기면 카메라가 콘텐츠를 비켜
+                // 본다.
+                cam.center = Vec3(x: 0, y: 0, z: 0)
+                camera = cam
+            }
+        }
         let rawLayers = objects.enumerated().map { index, object -> SceneLayer in
             let id = object["id"] as? Int ?? index
             let layer = makeLayer(isPerspective: camera != nil, object, fallbackID: index, resolver: resolver,
@@ -179,6 +225,7 @@ public struct SceneDocument: Sendable {
                     ?? Vec3(x: 1, y: 1, z: 1),
                 parentID: object["parent"] as? Int,
                 localVisible: boolValue(object["visible"]) ?? true)
+                .attachingAnimations(layerAnimations(of: object))
         }
         let layers = applyingParticleBudget(rawLayers)
         let scriptModules = loadScriptModules(objects: objects, resolver: resolver)
@@ -193,7 +240,8 @@ public struct SceneDocument: Sendable {
             layers: layers,
             scriptModules: scriptModules,
             parallaxAmount: parallaxOn && amount.isFinite ? Swift.min(Swift.max(amount, 0), 2) : 0,
-            zoom: zoom
+            zoom: zoom, bloom: bloom, bloomStrength: bloomStrength, bloomThreshold: bloomThreshold,
+            hdr: hdr
         )
     }
 
@@ -240,6 +288,23 @@ public struct SceneDocument: Sendable {
     /// 오브젝트 자체의 회전(도). 부모를 합치지 않는다.
     static func ownAngles(of object: [String: Any]) -> Vec3 {
         scalarOrScripted(object["angles"]).flatMap(Vec3.parse) ?? Vec3(x: 0, y: 0, z: 0)
+    }
+
+    /// 애니메이션이 걸릴 수 있는 레이어 속성 키. `SceneLayer.animations`의 키와 같다.
+    static let animatableProperties = ["alpha", "color", "brightness", "origin", "scale", "angles"]
+
+    /// 오브젝트의 타임라인 애니메이션 전부. `{"<key>": {"animation": {...}, "value": ...}}`
+    /// 모양인 자리마다 `PropertyAnimation.parse`를 건다 — 못 읽으면(옵션이 없거나
+    /// 손상됐으면) 그 속성은 그냥 정적 값으로 그린다.
+    static func layerAnimations(of object: [String: Any]) -> [String: PropertyAnimation] {
+        var animations: [String: PropertyAnimation] = [:]
+        for key in animatableProperties {
+            guard let holder = object[key] as? [String: Any],
+                  let animation = PropertyAnimation.parse(holder["animation"])
+            else { continue }
+            animations[key] = animation
+        }
+        return animations
     }
 
     /// 스크립트가 `thisScene.createLayer(asset)`으로 만든 레이어.
@@ -332,20 +397,89 @@ public struct SceneDocument: Sendable {
     }
 
     /// 레이어 하나의 최종 배치. 부모 사슬을 이미 합쳐 놓은 값이다.
-    struct LayerTransform {
-        var origin: Vec3
-        var scale: Vec3
+    ///
+    /// `public`이다 — 파일을 열 때(`resolveTransforms`)뿐 아니라, 스크립트가 그룹의
+    /// origin을 틱마다 옮길 때도 같은 합성식이 필요하다(`composeLiveTransform`,
+    /// `SceneRenderer.apply`가 쓴다). App은 WallflowKit을 보통 import로 쓰므로
+    /// 여기 노출돼야 재사용할 수 있다 — 안 그러면 같은 삼각함수 식을 App에 다시
+    /// 베껴 적어야 하고, 그러면 둘이 갈라질 때 아무도 못 알아챈다.
+    public struct LayerTransform: Equatable, Sendable {
+        public var origin: Vec3
+        public var scale: Vec3
         /// 화면 평면 회전(라디안). 실물에서 z 말고는 쓰이지 않는다.
-        var rotation: Double
+        public var rotation: Double
         /// 부모의 투명도가 곱해진 값.
-        var alpha: Double
+        public var alpha: Double
         /// 부모가 하나라도 숨겨져 있으면 false.
-        var visible: Bool
+        public var visible: Bool
 
-        static let identity = LayerTransform(
+        public init(origin: Vec3, scale: Vec3, rotation: Double, alpha: Double, visible: Bool) {
+            self.origin = origin; self.scale = scale; self.rotation = rotation
+            self.alpha = alpha; self.visible = visible
+        }
+
+        public static let identity = LayerTransform(
             origin: Vec3(x: 0, y: 0, z: 0),
             scale: Vec3(x: 1, y: 1, z: 1),
             rotation: 0, alpha: 1, visible: true)
+
+        /// 부모 변환 안에 놓인 자식의 화면 변환. 파일을 열 때와 틱마다 스크립트
+        /// 결과를 합칠 때가 정확히 같은 식을 써야 한다 — 갈라지면 스크립트가
+        /// 그룹을 움직인 프레임에서만 자식이 다른 자리로 튄다.
+        public static func compose(parent: LayerTransform, child: LayerTransform) -> LayerTransform {
+            let scaledX = child.origin.x * parent.scale.x
+            let scaledY = child.origin.y * parent.scale.y
+            let cosR = cos(parent.rotation), sinR = sin(parent.rotation)
+            return LayerTransform(
+                origin: Vec3(
+                    x: parent.origin.x + scaledX * cosR - scaledY * sinR,
+                    y: parent.origin.y + scaledX * sinR + scaledY * cosR,
+                    z: parent.origin.z + child.origin.z * parent.scale.z),
+                scale: Vec3(
+                    x: parent.scale.x * child.scale.x,
+                    y: parent.scale.y * child.scale.y,
+                    z: parent.scale.z * child.scale.z),
+                rotation: parent.rotation + child.rotation,
+                // **투명도는 부모에게서 물려받지 않는다.** 실물 픽셀 씬이 alpha 0인
+                // `solidlayer`를 닻으로 삼아 글자·달력 숫자를 그 밑에 매다는데,
+                // 곱해 버리면 그 패널이 전부 빈 채로 남는다(미리보기에는 다 보인다).
+                // 한때 곱했던 근거였던 음악 재생기 UI는 자식마다 자기 스크립트로 숨는다.
+                // 보임은 물려받는다 — 창을 숨기면 그 안의 글자도 사라진다.
+                alpha: child.alpha,
+                visible: parent.visible && child.visible)
+        }
+    }
+
+    /// `resolveTransforms`와 같은 사슬-합성이지만, 파일이 아니라 **지금** 값(스크립트가
+    /// 방금 옮겼을 수 있는 로컬 변환)을 받는다. 실물 "Clock Layer 1"(3299228616)처럼
+    /// 그룹 자체가 드래그 스크립트로 `thisLayer.origin`을 바꾸는 씬이 있다 — 그
+    /// 그룹의 화면 자리가 파일을 열 때 한 번 굳어 버리면 드래그해도 자식(시계
+    /// 숫자·막대)이 안 따라간다. `SceneRenderer.apply`가 틱마다 이걸 불러 스크립트
+    /// 대상의 `parentOrigin`/`parentScale`/`parentRotation`을 다시 굽는다.
+    ///
+    /// - Parameters:
+    ///   - id: 화면 자리를 구할 레이어.
+    ///   - parentOf: 자식 id → 부모 id.
+    ///   - local: 그 id의 **로컬**(부모 기준) 변환. 스크립트가 안 건드렸으면 파일의
+    ///     값과 같다 — 호출자가 스냅샷에서 가져온다. 없으면(끊긴 참조) identity로 본다.
+    public static func composeLiveTransform(
+        of id: Int, parentOf: [Int: Int], local: (Int) -> LayerTransform?
+    ) -> LayerTransform {
+        var chain: [Int] = [id]
+        var seen: Set<Int> = [id]
+        var current = id
+        // 파일 쪽과 같은 상한이다 — 고리 있는 parent를 돌다 멈추지 않는 사고를 막는다.
+        for _ in 0..<32 {
+            guard let parentID = parentOf[current], !seen.contains(parentID) else { break }
+            seen.insert(parentID)
+            chain.append(parentID)
+            current = parentID
+        }
+        var transform = LayerTransform.identity
+        for ancestorID in chain.reversed() {
+            transform = LayerTransform.compose(parent: transform, child: local(ancestorID) ?? .identity)
+        }
+        return transform
     }
 
     /// 오브젝트마다 부모 사슬을 따라 올라가며 변환을 합친다.
@@ -374,30 +508,6 @@ public struct SceneDocument: Sendable {
                 visible: boolValue(object["visible"]) ?? true)
         }
 
-        /// 부모 변환 안에 놓인 자식의 화면 변환.
-        func compose(parent: LayerTransform, child: LayerTransform) -> LayerTransform {
-            let scaledX = child.origin.x * parent.scale.x
-            let scaledY = child.origin.y * parent.scale.y
-            let cosR = cos(parent.rotation), sinR = sin(parent.rotation)
-            return LayerTransform(
-                origin: Vec3(
-                    x: parent.origin.x + scaledX * cosR - scaledY * sinR,
-                    y: parent.origin.y + scaledX * sinR + scaledY * cosR,
-                    z: parent.origin.z + child.origin.z * parent.scale.z),
-                scale: Vec3(
-                    x: parent.scale.x * child.scale.x,
-                    y: parent.scale.y * child.scale.y,
-                    z: parent.scale.z * child.scale.z),
-                rotation: parent.rotation + child.rotation,
-                // **투명도는 부모에게서 물려받지 않는다.** 실물 픽셀 씬이 alpha 0인
-                // `solidlayer`를 닻으로 삼아 글자·달력 숫자를 그 밑에 매다는데,
-                // 곱해 버리면 그 패널이 전부 빈 채로 남는다(미리보기에는 다 보인다).
-                // 한때 곱했던 근거였던 음악 재생기 UI는 자식마다 자기 스크립트로 숨는다.
-                // 보임은 물려받는다 — 창을 숨기면 그 안의 글자도 사라진다.
-                alpha: child.alpha,
-                visible: parent.visible && child.visible)
-        }
-
         var resolved: [Int: LayerTransform] = [:]
         for (id, object) in byID {
             // 사슬을 위로 모은 뒤 부모부터 차례로 합친다.
@@ -419,7 +529,7 @@ public struct SceneDocument: Sendable {
             }
             var transform = LayerTransform.identity
             for object in chain.reversed() {
-                transform = compose(parent: transform, child: local(object))
+                transform = LayerTransform.compose(parent: transform, child: local(object))
             }
             resolved[id] = transform
         }
@@ -473,6 +583,12 @@ public struct SceneDocument: Sendable {
         // origin이 **없는 것**과 **읽히지 않는 것**은 다르다. 부모가 있는데 origin이
         // 없으면 "부모와 같은 자리"라는 뜻이고, 부모 사슬을 합친 값이 이미 그 좌표다.
         // 둘을 같이 버려서 실물 음악 위젯의 진행 막대가 통째로 사라졌다.
+        //
+        // 부모가 **없는데** origin도 없는 이미지 레이어는 계속 버린다
+        // (`testMissingOriginWithoutParentIsRejected`) — 화면 구석에 정체불명의
+        // 상자가 뜨는 것보다 안 그리는 쪽이 정직하다. 텍스트는 다르다 — 최상위
+        // origin 없는 텍스트가 실물에 있다("RST文字"). 그건 텍스트 분기에서
+        // 따로 구제한다.
         let originIsRelativeToParent = object["origin"] == nil && object["parent"] != nil
         let ownOriginParsed = originIsRelativeToParent
             || Self.scalarOrScripted(object["origin"]).flatMap(Vec3.parse) != nil
@@ -481,7 +597,20 @@ public struct SceneDocument: Sendable {
             && transform.scale.x.isFinite && transform.scale.y.isFinite
         let origin = ownOriginParsed && composedIsFinite ? transform.origin : nil
         // 크기에도 scale이 곱해진다. 무시하면 실물 시계가 67% 크게 나온다.
-        let size = Self.scalarOrScripted(object["size"]).flatMap(Vec2.parse).map {
+        //
+        // 오브젝트에 size가 아예 없는데 모델 JSON 자체가 `width`/`height`를 박아
+        // 두는 경우가 있다(실물 833227004·820654165의 "Background" — 둘 다
+        // `models/background.json`이 `{"width": 1920, "height": 1080, ...}`다).
+        // 이걸 놓치면 이미지가 origin/size를 못 읽는 레이어로 버려진다 — 배경이
+        // 통째로 사라진다.
+        let modelDeclaredSize: Vec2? = (object["image"] as? String).flatMap { path in
+            guard let model = resolver.json(for: path),
+                  let w = (model["width"] as? NSNumber)?.doubleValue,
+                  let h = (model["height"] as? NSNumber)?.doubleValue,
+                  w > 0, h > 0 else { return nil }
+            return Vec2(x: w, y: h)
+        }
+        let size = (Self.scalarOrScripted(object["size"]).flatMap(Vec2.parse) ?? modelDeclaredSize).map {
             Vec2(x: $0.x * transform.scale.x, y: $0.y * transform.scale.y)
         }
         // 스크립트가 붙어 있는데 우리가 못 돌리는 경우를 사용자에게 알린다.
@@ -521,6 +650,45 @@ public struct SceneDocument: Sendable {
                 origin: origin ?? Vec3(x: 0, y: 0, z: 0),
                 size: size ?? Vec2(x: 0, y: 0),
                 content: .unsupported(reason: reason), unrunScripts: unrun,
+                alpha: alpha, tint: tint, rotation: rotation,
+                displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
+                colorBlendMode: blendMode, brightness: brightness
+            )
+        }
+
+        // 자기 그림이 없는 오브젝트(그룹·solid·light·카메라). 자식이 부모 변환을
+        // 쓰도록 트리에는 남기되, 조용히 넘어간다 — `unsupported`로 두면 실물 씬마다
+        // 이런 오브젝트가 수십 개라 로그가 진짜 결함을 파묻는다.
+        func group() -> SceneLayer {
+            SceneLayer(
+                id: id, name: name, visible: visible,
+                origin: origin ?? Vec3(x: 0, y: 0, z: 0),
+                size: size ?? Vec2(x: 0, y: 0),
+                content: .group, unrunScripts: unrun,
+                alpha: alpha, tint: tint, rotation: rotation,
+                displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
+                colorBlendMode: blendMode, brightness: brightness
+            )
+        }
+
+        // 광원(`"light": "lpoint"` 등). 위치는 다른 오브젝트와 똑같이 부모 사슬을
+        // 합친 `origin`을 쓴다 — 못 읽으면(스크립트뿐이면) 그냥 그룹으로 둔다.
+        if let lightType = object["light"] as? String, let kind = LightInfo.Kind(rawValue: lightType) {
+            guard let origin else { return group() }
+            let color = Self.scalarOrScripted(object["color"]).flatMap(Vec3.parse)
+                ?? Vec3(x: 1, y: 1, z: 1)
+            let angles = Self.scalarOrScripted(object["angles"]).flatMap(Vec3.parse)
+                ?? Vec3(x: 0, y: 0, z: 0)
+            let info = LightInfo(
+                kind: kind, color: color,
+                intensity: doubleValue(object["intensity"]) ?? 1,
+                radius: doubleValue(object["radius"]) ?? 0,
+                exponent: doubleValue(object["exponent"]) ?? 1,
+                angles: angles)
+            return SceneLayer(
+                id: id, name: name, visible: visible,
+                origin: origin, size: size ?? Vec2(x: 0, y: 0),
+                content: .light(info), unrunScripts: unrun,
                 alpha: alpha, tint: tint, rotation: rotation,
                 displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
                 colorBlendMode: blendMode, brightness: brightness
@@ -567,7 +735,16 @@ public struct SceneDocument: Sendable {
             let textObject: [String: Any]? = (object["text"] as? [String: Any])
                 ?? (object["text"] as? String).map { ["value": $0] }
             if let text = textObject {
-                guard let origin else {
+                // 텍스트는 최상위(부모 없음)에서도 origin이 아예 없을 수 있다(실물
+                // "RST文字"). 부모가 없으면 "부모와 같은 자리"가 곧 화면 원점이라,
+                // `resolveTransforms`가 이미 그렇게 계산해 둔 값(대개 0,0,0)을 쓴다.
+                // origin 키가 **있는데 못 읽는** 경우는 여전히 버린다 — 이미지
+                // 레이어와 같은 이유다(`testUnparsableOriginIsStillRejected`).
+                let ownOriginMissingEntirely = object["origin"] == nil
+                let composedIsFinite = transform.origin.x.isFinite && transform.origin.y.isFinite
+                guard let origin = origin
+                    ?? (ownOriginMissingEntirely && composedIsFinite ? transform.origin : nil)
+                else {
                     return unsupported("텍스트 레이어의 origin에 좌표가 없다")
                 }
                 // 텍스트 전용 `anchor`는 문서상 "화면(캔버스) 닻"이다 — 레이어 자기
@@ -634,7 +811,11 @@ public struct SceneDocument: Sendable {
                     scale: transform.scale, parallaxDepth: depth,
                     colorBlendMode: blendMode, brightness: brightness)
             }
-            return unsupported("알 수 없는 레이어 종류")
+            // 여기까지 왔으면 image·model·particle·text·sound·shape 중 아무 키도
+            // 없다 — 실물에서 전부 그룹(자식만 있는 폴더)·`solid`(파티클 충돌
+            // 경계)·`light`(광원)·카메라 경로점이었다. 그릴 그림이 없을 뿐 씬이
+            // 깨진 게 아니다.
+            return group()
         }
         // 원근 씬의 이미지 레이어는 origin이 없는 것이 보통이다 — 원점에 놓인
         // 세계 단위의 판이다(실물 배경 구름). 직교 씬에서는 원점이 화면 왼쪽
@@ -647,10 +828,21 @@ public struct SceneDocument: Sendable {
             // 말하면 사용자를 엉뚱한 원인으로 보낸다.
             // 화면 전체에 거는 후처리 레이어. `fullscreenlayer` 모델을 쓰고
             // origin도 size도 없다 — 화면이 곧 그 크기다.
-            if object["origin"] == nil, object["size"] == nil, object["effects"] != nil {
-                guard !effects.isEmpty else {
-                    return unsupported("후처리 레이어인데 걸 이펙트가 없다")
-                }
+            //
+            // 모델 JSON 자체가 `"fullscreen": true`를 선언하기도 한다(실물
+            // `models/util/fullscreenlayer.json` — 재질이 그 자리에서 방금 합성된
+            // 화면(`_rt_FullFrameBuffer`)을 그대로 읽는 통과 셰이더다). effects 키가
+            // 아예 없는 오브젝트도 있다(실물 "光标旋转后处理"는 커서 이벤트만 듣고
+            // 그림은 안 만든다, 로파이 카페 씬의 구분선 7개도 마찬가지) — 켤 이펙트가
+            // 영영 없으니 그룹처럼 조용히 넘긴다. 반대로 effects 키는 있는데 전부
+            // 꺼져 있으면(편집기에서 visible false) 버리지 않는다 — 후처리는 이펙트가
+            // 없으면 화면을 그대로 내는 것이 WE에서도 맞는 동작이고
+            // (`SceneRenderer.renderPostProcess`), 여기서 버리면 "그리지 못한
+            // 레이어"로 잘못 보고된다.
+            let isFullscreenPassthrough = resolver.json(for: modelPath)?["fullscreen"] as? Bool == true
+            if object["origin"] == nil, object["size"] == nil,
+               object["effects"] != nil || isFullscreenPassthrough {
+                if object["effects"] == nil { return group() }
                 return SceneLayer(
                     id: id, name: name, visible: visible,
                     origin: Vec3(x: 0, y: 0, z: 0),
@@ -685,13 +877,16 @@ public struct SceneDocument: Sendable {
         if let puppetPath = resolver.json(for: modelPath)?["puppet"] as? String, !puppetPath.isEmpty {
             puppet = PuppetSpec.parse(path: puppetPath, animationLayers: object["animationlayers"])
         }
+        // 합성 레이어(`_rt_FullFrameBuffer`)가 실제로 화면을 받을지. 기본 true.
+        // 실물 음반 커버 씬의 "Bar 3"가 false다 — SceneLayer.copyBackground 문서 참고.
+        let copyBackground = boolValue(object["copybackground"]) ?? true
         return SceneLayer(
             id: id, name: name, visible: visible,
             origin: drawOrigin, size: size,
             content: content, unrunScripts: unrun, effects: effects, alpha: alpha, tint: tint,
             rotation: rotation, displayScripts: displayScripts, scale: transform.scale, parallaxDepth: depth,
                 colorBlendMode: blendMode, brightness: brightness, puppet: puppet,
-                anchorOffset: anchor
+                anchorOffset: anchor, copyBackground: copyBackground
         )
     }
 
@@ -740,9 +935,20 @@ public struct SceneDocument: Sendable {
 
     /// 수이거나 `{"value": ...}` 객체면 그 값. 비유한값은 없는 것으로 본다 —
     /// NaN 알파가 셰이더까지 흘러가면 레이어가 통째로 사라진다.
+    ///
+    /// `{"animation": {...}, "value": ...}` 모양이어도 여기서는 `value`(첫 프레임
+    /// 스냅숏)만 본다 — 실제 재생은 `layerAnimations(of:)`가 따로 뽑아
+    /// `SceneLayer.animations`에 실어 렌더러가 매 프레임 시간에 맞춰 논다
+    /// (`PropertyAnimation`). 한때 여기서 "단발이면 마지막 값"으로 지름길을
+    /// 냈었지만, 그러면 애니메이션이 재생되지 않고 늘 끝값에 멈춘 것처럼
+    /// 보인다 — 재생 중간 값(실물 3147346398의 페이드가 반쯤 진행된 순간)이
+    /// 아예 나오지 않는다.
     private static func doubleValue(_ raw: Any?) -> Double? {
-        let value = (raw as? [String: Any])?["value"] ?? raw
-        guard let d = value as? Double, d.isFinite else { return nil }
+        if let dict = raw as? [String: Any] {
+            guard let d = dict["value"] as? Double, d.isFinite else { return nil }
+            return d
+        }
+        guard let d = raw as? Double, d.isFinite else { return nil }
         return d
     }
 
@@ -1000,6 +1206,21 @@ public struct SceneDocument: Sendable {
            let property = userSlots.first as? String,
            let file = userTextures[property], !file.isEmpty {
             return .image(texturePath: ReferenceResolver.externalPrefix + file)
+        }
+        // 모델 JSON이 스스로 `"solidlayer": true`라고 선언하면 그게 가장 확실한
+        // 근거다 — 실물 "纯色占位符"(고양이 눈꺼풀·시계 판·배경색)이 전부
+        // `materials/util/solidlayer_instance[_3|_4][_depthtest].json`(셰이더
+        // `genericimage2/3/4` + 텍스처 `util/white`)을 쓰는데, 이 재질은 아래
+        // `plainImageShaders`에 걸려 그냥 이미지 레이어로 읽혔다. 흰 텍스처를
+        // 실제로 읽어 칠하나 셰이더로 채우나 눈에는 같아 보이지만, 색이 사용자
+        // 속성(`bgcolor`)에 물린 경우 이미지 경로는 그 값을 받되 여전히 텍스처
+        // 디코딩·샘플링을 거친다 — 단색이라고 선언된 레이어는 굳이 그럴 이유가
+        // 없다. 씬 3444535389의 배경 전체를 덮는 레이어(id 57)가 이 값을
+        // 놓치면 검게 칠해야 할 바탕이 통째로 비어 회색 clearcolor가 비친다.
+        if model["solidlayer"] as? Bool == true {
+            let color = Self.scalarOrScripted(object["color"]).flatMap(Vec3.parse)
+                ?? Vec3(x: 1, y: 1, z: 1)
+            return .solidColor(color)
         }
         // 셰이더 flat이면서 텍스처가 없을 때만 단색이다. 실물 solidlayer가 그 모양이다.
         // OR로 쓰면 flat + _rt_ 조합이 렌더 타깃 검사에 닿지 못하고 삼켜지고,

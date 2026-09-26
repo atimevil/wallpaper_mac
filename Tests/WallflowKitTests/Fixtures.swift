@@ -31,26 +31,37 @@ func nullTerminated(_ s: String) -> Data { Data(s.utf8) + Data([0]) }
 
 /// 실물 레이아웃대로 .tex를 합성한다.
 /// mips는 (width, height, isLZ4, decompressedSize, payload).
+///
+/// `additionalImages`는 첫 이미지 뒤에 나란히 붙는 나머지 이미지들이다(실물
+/// 픽셀 캐릭터 시트 2212279721이 imageCount 2). 각각 자기 mipCount와 밉맵을
+/// 갖고, 디코더는 첫 이미지만 쓴다 — 파서가 제대로 건너뛰는지가 관건이다.
 func buildTex(
     container: String = "TEXB0004",
     format: Int32 = 0,
     flags: Int32 = 2,
     freeImageFormat: Int32 = 2,
     size: (Int32, Int32) = (2048, 1164),
-    mips: [(Int32, Int32, Int32, Int32, Data)]
+    /// 헤더의 imageWidth/imageHeight. 기본은 size와 같다(실물 대부분이 그렇다).
+    /// 밉맵이 이보다 큰 채움(TEX 패딩) 시험은 다르게 준다.
+    imageSize: (Int32, Int32)? = nil,
+    mips: [(Int32, Int32, Int32, Int32, Data)],
+    additionalImages: [[(Int32, Int32, Int32, Int32, Data)]] = []
 ) -> Data {
+    let imgSize = imageSize ?? size
     var d = nullTerminated("TEXV0005") + nullTerminated("TEXI0001")
     d += le32(format) + le32(flags)
-    d += le32(size.0) + le32(size.1) + le32(size.0) + le32(size.1)
+    d += le32(size.0) + le32(size.1) + le32(imgSize.0) + le32(imgSize.1)
     d += le32(0)                       // color
     d += nullTerminated(container)
-    d += le32(1)                       // imageCount
+    d += le32(Int32(1 + additionalImages.count))   // imageCount
     d += le32(freeImageFormat)
     if container == "TEXB0004" { d += le32(0) }
-    d += le32(Int32(mips.count))
-    for (w, h, lz4, decomp, payload) in mips {
-        d += le32(w) + le32(h) + le32(lz4) + le32(decomp) + le32(Int32(payload.count))
-        d += payload
+    for imageMips in [mips] + additionalImages {
+        d += le32(Int32(imageMips.count))
+        for (w, h, lz4, decomp, payload) in imageMips {
+            d += le32(w) + le32(h) + le32(lz4) + le32(decomp) + le32(Int32(payload.count))
+            d += payload
+        }
     }
     return d
 }
@@ -74,10 +85,12 @@ func buildTexV1(format: Int32 = 0, flags: Int32 = 0,
 /// TEXB0002는 TEXB0003에서 freeImageFormat만 빠진 형태다.
 func buildTexV2(format: Int32 = 0, flags: Int32 = 0,
                 size: (Int32, Int32) = (32, 32),
+                imageSize: (Int32, Int32)? = nil,
                 mips: [(Int32, Int32, Int32, Int32, Data)]) -> Data {
+    let imgSize = imageSize ?? size
     var d = nullTerminated("TEXV0005") + nullTerminated("TEXI0001")
     d += le32(format) + le32(flags)
-    d += le32(size.0) + le32(size.1) + le32(size.0) + le32(size.1)
+    d += le32(size.0) + le32(size.1) + le32(imgSize.0) + le32(imgSize.1)
     d += le32(0)
     d += nullTerminated("TEXB0002")
     d += le32(1) + le32(Int32(mips.count))

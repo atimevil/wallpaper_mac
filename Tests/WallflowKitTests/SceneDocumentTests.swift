@@ -219,7 +219,11 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(doc.layers.map(\.visible), [true, false])
     }
 
-    /// M2는 이미지 레이어만 그린다. 나머지는 이유를 달아 남긴다.
+    /// 참조가 끊긴 레이어는 이유를 달아 남긴다 — 조용히 사라지면 안 된다.
+    ///
+    /// "Time"은 origin이 아예 없다. 예전에는 origin 없는 최상위 텍스트를 통째로
+    /// 버렸지만(`testTopLevelTextWithoutOriginDefaultsToOrigin` 참고), 이제는
+    /// 화면 원점에 그린다 — 실물 "RST文字"가 이 모양이라 버리면 안 된다.
     func testNonImageLayersBecomeUnsupportedRatherThanDisappearing() throws {
         let reader = try makeScenePkg(scene: """
         {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
@@ -228,11 +232,13 @@ final class SceneDocumentTests: XCTestCase {
         """)
         let doc = try SceneDocument.load(from: reader)
         XCTAssertEqual(doc.layers.count, 2)
-        for layer in doc.layers {
-            guard case .unsupported = layer.content else {
-                return XCTFail("\(layer.name)이 unsupported가 아니다")
-            }
+        guard case .unsupported = doc.layers[0].content else {
+            return XCTFail("참조가 끊긴 파티클은 unsupported여야 한다: \(doc.layers[0].content)")
         }
+        guard case .text(let text) = doc.layers[1].content else {
+            return XCTFail("origin 없는 최상위 텍스트도 그려야 한다: \(doc.layers[1].content)")
+        }
+        XCTAssertEqual(text.value, "12:00")
     }
 
     /// origin이나 scale이 문자열이 아니라 스크립트 객체인 씬이 실제로 있다.
@@ -438,6 +444,50 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertEqual(doc.layers[0].content, .composition)
     }
 
+    /// `copybackground`가 없으면 기본 true — 합성 레이어가 진짜 화면을 받는다
+    /// (지금까지의 동작 그대로).
+    func testCompositionLayerCopiesBackgroundByDefault() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "Green", "image": "models/util/composelayer.json",
+                          "origin": "50 50 0", "size": "10 10"}]}
+            """,
+            extras: [
+                "models/util/composelayer.json":
+                    #"{"material":"materials/util/composelayer.json","passthrough":true}"#,
+                "materials/util/composelayer.json":
+                    #"{"passes":[{"shader":"composelayer","textures":["_rt_FullFrameBuffer"]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        XCTAssertTrue(doc.layers[0].copyBackground)
+    }
+
+    /// `copybackground: false`는 합성 레이어가 실제 화면을 받지 않는다는 뜻이다.
+    /// 실물 음반 커버 씬(3299228616)의 "Bar 3"가 이 경우다 — 오디오 바 이펙트는
+    /// 꺼져 있고 알파를 안 건드리는 `scroll`만 남는데, 화면을 그대로 받으면
+    /// 시계 글자가 불투명하게 덮인다. `SceneRenderer.renderComposition`이 이
+    /// 값을 보고 빈 텍스처를 대신 준다.
+    func testCompositionLayerCanOptOutOfCopyingBackground() throws {
+        let reader = try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "Bar 3", "image": "models/util/composelayer.json",
+                          "origin": "50 50 0", "size": "10 10", "copybackground": false}]}
+            """,
+            extras: [
+                "models/util/composelayer.json":
+                    #"{"material":"materials/util/composelayer.json","passthrough":true}"#,
+                "materials/util/composelayer.json":
+                    #"{"passes":[{"shader":"composelayer","textures":["_rt_FullFrameBuffer"]}]}"#,
+            ]
+        )
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        XCTAssertEqual(doc.layers[0].content, .composition)
+        XCTAssertFalse(doc.layers[0].copyBackground)
+    }
+
     func testSolidColorDefaultsToWhiteWhenColorMissing() throws {
         let reader = try makeScenePkg(
             scene: """
@@ -570,6 +620,132 @@ final class SceneDocumentTests: XCTestCase {
         XCTAssertGreaterThan(doc.orthoWidth, 0)
     }
 
+    /// 실물 Three-Body 씬(3509243656)처럼 `general.camera` 블록 없이, 대신
+    /// `"camera": "default"` 키를 가진 오브젝트로 카메라 자리가 오는 씬이 있다.
+    /// 그걸 놓치면 기본 눈 자리(0,0,100)를 그대로 써서, 반지름 8~12짜리
+    /// 하늘상자 훨씬 밖에서 작은 공 하나만 보게 된다.
+    func testCameraObjectOverridesDefaultEyePosition() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null},
+         "objects": [{"id": 443, "camera": "default", "origin": "0.00000 0.00000 6.00000"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.camera?.eye, Vec3(x: 0, y: 0, z: 6))
+    }
+
+    /// 부모 사슬이 있으면 합친 자리를 쓴다 — 다른 오브젝트와 같은 규칙이다.
+    func testCameraObjectEyeComposesParentChain() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null},
+         "objects": [{"id": 1, "origin": "10.00000 0.00000 0.00000"},
+                     {"id": 443, "camera": "default", "parent": 1,
+                      "origin": "0.00000 0.00000 6.00000"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.camera?.eye, Vec3(x: 10, y: 0, z: 6))
+    }
+
+    /// `general.camera`가 있으면 그쪽이 이긴다 — 오브젝트 쪽 좌표를 못 읽을 때만
+    /// (여기서는 카메라 오브젝트 자체가 없을 때) 기본값이 남는다.
+    func testMissingCameraObjectKeepsGeneralDefault() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null}, "objects": [{"id": 1, "name": "no camera key"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.camera?.eye, Vec3(x: 0, y: 0, z: 100), "카메라 오브젝트가 없으면 기본값")
+    }
+
+    /// 실물 원근 씬 넷(`prism`·`space boi`·`Three-Body`·`球体01`)이 전부 카메라를
+    /// `general.camera`가 아니라 **씬 최상위 `camera`**로 준다. 그걸 놓치면 기본
+    /// 눈 자리(0,0,100)가 남아 — `space boi.mdl`처럼 카메라 오브젝트로 덮어쓸
+    /// 길이 없는 씬은 메시의 시야 방향(`v_ViewDir = g_EyePosition - worldPos`)이
+    /// 어긋나 화면이 통째로 깨진다.
+    func testTopLevelCameraOverridesDefaultEyePosition() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null},
+         "camera": {"eye": "0.49863 0.86117 5.14408", "center": "0.41454 0.69461 4.16164",
+                    "up": "0.00000 1.00000 0.00000"},
+         "objects": []}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        let camera = try XCTUnwrap(doc.camera)
+        XCTAssertEqual(camera.eye, Vec3(x: 0.49863, y: 0.86117, z: 5.14408))
+        XCTAssertEqual(camera.center, Vec3(x: 0.41454, y: 0.69461, z: 4.16164))
+    }
+
+    /// `general.camera`와 씬 최상위 `camera`가 둘 다 있으면(실물엔 없지만) 최상위가
+    /// 이긴다 — 실물 전부가 최상위만 쓰므로 그쪽을 더 믿는다.
+    func testTopLevelCameraWinsOverGeneralCamera() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null,
+                     "camera": {"eye": "1 1 1", "center": "0 0 0", "up": "0 1 0"}},
+         "camera": {"eye": "0 0 38", "center": "0 0 0", "up": "0 1 0"},
+         "objects": []}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.camera?.eye, Vec3(x: 0, y: 0, z: 38))
+    }
+
+    /// 카메라 오브젝트가 있으면 최상위 `camera`의 중심도 안 믿는다. 실물 球体01
+    /// (3589454154) 씬으로 확인한 회귀다 — 최상위 camera는 eye(3.66,1.39,2.30)·
+    /// center(3.30,1.17,1.39)로 씬 콘텐츠(원점 근처)에서 먼 다른 자리를 보는
+    /// 값이고, 카메라 오브젝트(`angles` 없이 origin만)의 origin(0,0,2.3)만
+    /// 눈으로 쓰고 중심을 원점에 둬야 고리 클로즈업이 나온다. 중심까지 최상위
+    /// 값을 남기면(첫 시도가 그랬다) 카메라가 콘텐츠를 비켜 봐 화면이 별
+    /// 몇 점만 남고 거의 새까매졌다.
+    func testCameraObjectResetsCenterEvenWithTopLevelCamera() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": null},
+         "camera": {"eye": "3.65928 1.38746 2.29606", "center": "3.30315 1.17151 1.38692",
+                    "up": "0.00000 1.00000 0.00000"},
+         "objects": [{"id": 118, "camera": "default", "origin": "0.00000 0.00000 2.30000"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.camera?.eye, Vec3(x: 0, y: 0, z: 2.3))
+        XCTAssertEqual(doc.camera?.center, Vec3(x: 0, y: 0, z: 0), "중심도 원점으로 되돌아가야 한다")
+    }
+
+    /// `general.bloom`은 맨 Bool이거나 `{"user":…, "value":true}`다. 세기·문턱값도
+    /// 같이 온다. 직교·원근 둘 다 되는지 본다.
+    func testBloomFieldsAreParsedForBothProjections() throws {
+        for ortho in [true, false] {
+            let projection = ortho
+                ? #""orthogonalprojection": {"width": 1920, "height": 1080}"#
+                : #""orthogonalprojection": null"#
+            let reader = try makeScenePkg(scene: """
+            {"general": {\(projection), "bloom": {"user": "b", "value": true},
+                         "bloomstrength": 2.5, "bloomthreshold": 0.7},
+             "objects": []}
+            """)
+            let doc = try SceneDocument.load(from: reader)
+            XCTAssertTrue(doc.bloom, "직교=\(ortho)")
+            XCTAssertEqual(doc.bloomStrength, 2.5, "직교=\(ortho)")
+            XCTAssertEqual(doc.bloomThreshold, 0.7, "직교=\(ortho)")
+        }
+    }
+
+    /// 꺼져 있거나 아예 없는 씬은 그대로 꺼진 채(기본값)여야 한다 — 다른 씬을
+    /// 건드리면 안 된다.
+    func testBloomDefaultsToOffWhenSceneDoesNotRequestIt() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}},
+         "objects": []}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertFalse(doc.bloom)
+        XCTAssertFalse(doc.hdr)
+    }
+
+    /// `general.hdr`도 같은 자리에서 읽는다.
+    func testHDRFlagIsParsed() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}, "hdr": true},
+         "objects": []}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertTrue(doc.hdr)
+    }
+
     /// 키가 아예 없는 것은 여전히 missingField다. 원근 씬과 구분되어야 한다.
     func testMissingProjectionIsStillMissingField() throws {
         let reader = try makeScenePkg(scene: #"{"general": {}, "objects": []}"#)
@@ -581,6 +757,11 @@ final class SceneDocumentTests: XCTestCase {
     /// origin과 size가 없고 effects만 있으면 후처리 레이어다.
     /// 실물 "Couche de post-traitement"가 이 경우인데, 전에는 "스크립트 탓"이라고
     /// 잘못 보고해 사용자를 엉뚱한 원인으로 보냈다.
+    ///
+    /// 이 테스트의 이펙트 파일(`e.json`)은 일부러 `extras`에 없어 못 읽는다 —
+    /// 그래도 레이어까지 버리면 안 된다. 후처리는 걸 이펙트가 없으면(못
+    /// 읽었어도) 화면에 아무 일도 안 하는 무해한 레이어다. "스크립트 탓"으로도
+    /// "그리지 못한 레이어"로도 잘못 보고하지 않는다.
     func testPostProcessingLayerIsReportedAsSuch() throws {
         let reader = try makeScenePkg(scene: """
         {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
@@ -588,11 +769,8 @@ final class SceneDocumentTests: XCTestCase {
                       "image": "models/x.json", "effects": [{"file": "e.json"}]}]}
         """)
         let doc = try SceneDocument.load(from: reader, assets: nil)
-        guard case .unsupported(let reason) = doc.layers[0].content else {
-            return XCTFail("unsupported여야 한다")
-        }
-        XCTAssertTrue(reason.contains("후처리"), reason)
-        XCTAssertFalse(reason.contains("스크립트"), "스크립트 탓으로 오해시키면 안 된다: \(reason)")
+        XCTAssertEqual(doc.layers[0].content, .postProcess)
+        XCTAssertTrue(doc.layers[0].effects.isEmpty)
     }
 
     /// 머티리얼의 blending을 읽어야 한다. 실물에서 눈·비·먼지·광선은 additive,
@@ -750,6 +928,48 @@ extension SceneDocumentTests {
         XCTAssertEqual(anchor.alpha, 0)
     }
 
+    /// 실물 3147346398(Minecraft Lo-Fi Fireplace)의 화면 전체를 덮는 검은
+    /// 페이드 오버레이가 이 모양이다: alpha가 단발성 커브로 1(frame 0) →
+    /// 0(frame 120)로 빠지는데 `value`는 도입부 스냅숏 1이다. 예전에는 여기서
+    /// "정착값(커브 마지막 값)"으로 지름길을 냈지만, 그러면 애니메이션이 재생되지
+    /// 않고 늘 끝값에 멈춘 것처럼 보인다 — 재생 중간의 값이 아예 나오지 않는다.
+    /// 이제는 `layer.alpha`가 여전히 시작 스냅숏이고, `layer.animations["alpha"]`가
+    /// 실제 재생을 맡는다(렌더러가 매 프레임 여기에 시간을 넣는다).
+    func testAnimatedAlphaKeepsSnapshotAndCarriesPlayableCurve() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 1, "name": "페이드", "origin": "0 0 0", "size": "10 10",
+            "alpha": {"value": 1.0, "animation": {
+              "c0": [{"frame": 0, "value": 1}, {"frame": 120, "value": 0}],
+              "options": {"fps": 30, "length": 120, "mode": "single", "wraploop": null}}}}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        let fade = try XCTUnwrap(doc.layers.first { $0.name == "페이드" })
+        XCTAssertEqual(fade.alpha, 1, "기준값은 여전히 첫 프레임 스냅숏이다")
+        let anim = try XCTUnwrap(fade.animations["alpha"])
+        XCTAssertEqual(anim.scalar(atSeconds: 0, base: fade.alpha), 1, accuracy: 1e-9)
+        XCTAssertEqual(anim.scalar(atSeconds: 4, base: fade.alpha), 0, accuracy: 1e-9,
+                       "4초(120프레임/30fps) 뒤에는 다 빠져야 한다")
+    }
+
+    /// 반복(loop) 애니메이션도 커브를 그대로 들고 있는다.
+    func testLoopingAnimatedAlphaCarriesLoopCurve() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 1, "name": "깜빡임", "origin": "0 0 0", "size": "10 10",
+            "alpha": {"value": 0.7, "animation": {
+              "c0": [{"frame": 0, "value": 1}, {"frame": 60, "value": 0}],
+              "options": {"fps": 30, "length": 60, "mode": "loop", "wraploop": null}}}}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        let layer = try XCTUnwrap(doc.layers.first { $0.name == "깜빡임" })
+        XCTAssertEqual(layer.alpha, 0.7, accuracy: 0.001)
+        let anim = try XCTUnwrap(layer.animations["alpha"])
+        XCTAssertEqual(anim.mode, .loop)
+    }
+
     /// 자체 보임은 따로 남는다. 스크립트가 부모를 숨길 때 렌더러가 다시 합치는 재료다.
     func testLocalVisibleIsKeptSeparately() throws {
         let reader = try makeScenePkg(scene: """
@@ -777,6 +997,82 @@ extension SceneDocumentTests {
         let doc = try SceneDocument.load(from: reader, assets: nil)
         let child = try XCTUnwrap(doc.layers.first { $0.name == "자식" })
         XCTAssertFalse(child.visible, "부모가 숨으면 자식도 숨어야 한다")
+    }
+
+    /// 그룹(`.group`) 자신도 부모 사슬의 변환을 합쳐야 한다 — `resolveTransforms`는
+    /// 파일의 id/parent만 보고 내용 종류는 안 따진다. 실물 3299228616의 "Clock Layer
+    /// 1"(그룹, origin이 부모 안 상대값)이 부모 246 안에 있고, 그 자식 "Clock 12"가
+    /// 다시 그 아래 있는 3단 사슬이다 — 중간 그룹이 origin을 안 옮겨도 회전·배율은
+    /// 반드시 내려가야 한다.
+    func testTransformComposesThroughNestedGroupObjects() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 246, "name": "grandparent", "origin": "100 200 0", "scale": "2 2 2"},
+           {"id": 210, "name": "Clock Layer 1", "parent": 246,
+            "angles": "0.00000 -0.00000 0.00000", "origin": "0.00037 0.00012 0.00000",
+            "locktransforms": true},
+           {"id": 312, "name": "Clock 12", "parent": 210, "origin": "0 -121 0",
+            "size": "10 10", "image": "models/x.json"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        let group = try XCTUnwrap(doc.layers.first { $0.id == 210 })
+        XCTAssertEqual(group.content, .group)
+        // 조부모(scale 2) → 그룹(거의 0,0) → 자식(로컬 0,-121) = (100, 200-242).
+        let clock = try XCTUnwrap(doc.layers.first { $0.id == 312 })
+        XCTAssertEqual(clock.origin.x, 100, accuracy: 0.01)
+        XCTAssertEqual(clock.origin.y, 200 - 242, accuracy: 0.01)
+        XCTAssertEqual(clock.scale.x, 2, accuracy: 0.001, "조부모의 배율까지 내려와야 한다")
+    }
+
+    /// 그룹이 `visible:false`면(WE 편집기에서 그룹을 접어 끄는 것과 같다) 자식도
+    /// 전부 숨어야 한다 — 실물 3509243656의 "MAIN"(solid 그룹) 아래 여러 레이어가
+    /// 이 모양이다.
+    func testGroupVisibilityHidesAllDescendants() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [
+           {"id": 1326, "name": "MAIN", "disablepropagation": false, "solid": true,
+            "visible": false},
+           {"id": 205, "name": "MAIN 0-0", "parent": 1326, "angles": "0 0 0",
+            "disablepropagation": false, "solid": true},
+           {"id": 999, "name": "leaf", "parent": 205, "origin": "0 0 0", "size": "1 1",
+            "image": "models/x.json"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader, assets: nil)
+        XCTAssertEqual(try XCTUnwrap(doc.layers.first { $0.id == 1326 }).content, .group)
+        XCTAssertFalse(try XCTUnwrap(doc.layers.first { $0.id == 999 }).visible,
+                       "그룹 두 단계 위가 꺼지면 잎 레이어도 꺼져야 한다")
+    }
+
+    /// `composeLiveTransform`은 파일이 아니라 **스크립트가 방금 바꿨을 수 있는**
+    /// 로컬 값을 받아 같은 식으로 합친다 — `SceneRenderer.apply`가 매 틱 이걸로
+    /// 그룹을 드래그한 스크립트의 결과를 자식에 내려보낸다(실물 "Clock Layer 1"의
+    /// 드래그 스크립트). 순수 함수라 Metal 없이도 여기서 확인할 수 있다.
+    func testComposeLiveTransformFollowsScriptMovedParent() {
+        // 210(그룹)이 246(조부모) 밑에 있고, 312(자식)이 210 밑에 있다 — 실물 사슬과 같다.
+        let parentOf: [Int: Int] = [210: 246, 312: 210]
+        func local(_ id: Int, groupOrigin: Vec3) -> SceneDocument.LayerTransform? {
+            switch id {
+            case 246: return .identity
+            case 210: return SceneDocument.LayerTransform(
+                origin: groupOrigin, scale: Vec3(x: 1, y: 1, z: 1),
+                rotation: 0, alpha: 1, visible: true)
+            default: return nil
+            }
+        }
+        // 씬을 열었을 때의 그룹 자리.
+        let atOpen = SceneDocument.composeLiveTransform(of: 210, parentOf: parentOf) {
+            local($0, groupOrigin: Vec3(x: 0, y: 0, z: 0))
+        }
+        XCTAssertEqual(atOpen.origin, Vec3(x: 0, y: 0, z: 0))
+        // 드래그 스크립트가 `thisLayer.origin`을 옮긴 뒤 — 자식이 물려받는 부모
+        // 자리(`composeLiveTransform(of: 자식의 parent, ...)`)도 같이 옮겨져야 한다.
+        let afterDrag = SceneDocument.composeLiveTransform(of: 210, parentOf: parentOf) {
+            local($0, groupOrigin: Vec3(x: 50, y: -30, z: 0))
+        }
+        XCTAssertEqual(afterDrag.origin, Vec3(x: 50, y: -30, z: 0),
+                       "그룹을 드래그하면 자식이 물려받을 부모 자리도 따라가야 한다")
     }
 }
 
@@ -922,17 +1218,136 @@ extension SceneDocumentTests {
         XCTAssertEqual(layer.effects.count, 1)
     }
 
-    /// 걸 이펙트가 없는 후처리 레이어는 화면을 그대로 베끼는 일만 한다.
-    /// 그리지 않는 편이 낫다 — 화면 크기 텍스처를 괜히 하나 더 잡는다.
-    func testPostProcessLayerWithoutEffectsIsSkipped() throws {
+    /// 걸 이펙트가 없는 후처리 레이어는 화면을 그대로 낸다 — WE에서도
+    /// 후처리는 이펙트가 없으면 아무 일도 안 하는 것이 정상 동작이다.
+    /// 레이어를 버리면 "그리지 못한 레이어"로 잘못 보고된다
+    /// (`SceneRenderer.renderPostProcess`가 실제로 화면을 그대로 내는 쪽).
+    func testPostProcessLayerWithoutEffectsIsANoOp() throws {
         let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
         {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
          "objects": [{"id": 1, "name": "Post", "image": "models/util/fullscreenlayer.json",
                       "effects": []}]}
         """)).layers.first)
-        guard case .unsupported = layer.content else {
-            return XCTFail("이펙트 없는 후처리는 건너뛴다: \(layer.content)")
+        XCTAssertEqual(layer.content, .postProcess)
+        XCTAssertTrue(layer.effects.isEmpty)
+    }
+
+    /// 오브젝트에 `size`가 아예 없는데 모델 JSON이 `width`/`height`를 직접 박아
+    /// 두면 그걸 쓴다(실물 833227004·820654165 "Background" — `models/background.json`
+    /// 이 `{"width": 1920, "height": 1080}`). 안 그러면 배경이 통째로 "origin이나
+    /// size를 읽을 수 없다"로 버려진다.
+    func testModelDeclaredSizeIsUsedWhenObjectHasNoSize() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}},
+             "objects": [{"id": 1, "name": "Background", "image": "models/background.json",
+                          "origin": "960.000 540.000 0.000", "angles": "0 0 0",
+                          "scale": "1.500 1.500 1.500"}]}
+            """,
+            extras: [
+                "models/background.json":
+                    #"{"width": 1920, "height": 1080, "material": "materials/background.json"}"#,
+                "materials/background.json":
+                    #"{"passes": [{"shader": "genericimage4", "textures": ["t"]}]}"#,
+            ])).layers.first)
+        guard case .image = layer.content else {
+            return XCTFail("배경 이미지를 그려야 한다: \(layer.content)")
         }
+        // scale 1.5가 모델이 준 1920×1080에 곱해져야 한다.
+        XCTAssertEqual(layer.size, Vec2(x: 1920 * 1.5, y: 1080 * 1.5))
+    }
+
+    /// 모델 JSON이 `"fullscreen": true`를 선언하는데 걸 이펙트가 없으면(실물
+    /// 3509243656 "光标旋转后处理" — 커서 이벤트만 듣고 그림은 안 만든다, 로파이
+    /// 카페 씬(2370927443)의 이름 없는 구분선 7개도 마찬가지) 아무것도 안 그리는
+    /// 통과 레이어다. "origin이나 size를 읽을 수 없다"로 보고하면 안 된다 —
+    /// 파일이 깨진 게 아니라 원래 안 그리는 레이어다.
+    func testFullscreenPassthroughWithoutEffectsIsGroup() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+             "objects": [{"id": 1, "name": "------------------------",
+                          "image": "models/util/fullscreenlayer.json"}]}
+            """,
+            extras: [
+                "models/util/fullscreenlayer.json":
+                    #"{"material": "materials/util/fullscreenlayer.json", "fullscreen": true}"#,
+                "materials/util/fullscreenlayer.json":
+                    #"{"passes": [{"shader": "passthrough", "textures": ["_rt_FullFrameBuffer"]}]}"#,
+            ])).layers.first)
+        XCTAssertEqual(layer.content, .group)
+    }
+
+    /// `"fullscreen": true` 모델에 이펙트가 걸려 있으면(실물 2370927443의 구분선
+    /// 하나가 foliagesway를 건다) 여전히 후처리 레이어로 그려야 한다 — 그림이
+    /// 없다고 전부 group으로 뭉개면 진짜 이펙트가 사라진다.
+    func testFullscreenPassthroughWithEffectsIsStillPostProcess() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(
+            scene: """
+            {"general": {"orthogonalprojection": {"width": 640, "height": 360}},
+             "objects": [{"id": 1, "name": "------------------------",
+                          "image": "models/util/fullscreenlayer.json",
+                          "effects": [{"file": "effects/grain/effect.json"}]}]}
+            """,
+            extras: [
+                "models/util/fullscreenlayer.json":
+                    #"{"material": "materials/util/fullscreenlayer.json", "fullscreen": true}"#,
+                "materials/util/fullscreenlayer.json":
+                    #"{"passes": [{"shader": "passthrough", "textures": ["_rt_FullFrameBuffer"]}]}"#,
+                "effects/grain/effect.json": #"{"passes": [{"material": "materials/g.json"}]}"#,
+                "effects/grain/materials/g.json": #"{"passes": [{"shader": "effects/grain"}]}"#,
+            ])).layers.first)
+        XCTAssertEqual(layer.content, .postProcess)
+        XCTAssertEqual(layer.size, Vec2(x: 640, y: 360))
+    }
+
+    /// `image`·`model`·`particle`·`text`·`sound`·`shape` 중 아무 키도 없는
+    /// 오브젝트. WE 편집기의 그룹(폴더)이 이 모양이다(실물 3299228616 "Clock
+    /// Layer 1" — origin·angles·visible 스크립트만 있고 자식 여섯을 묶는다).
+    /// "알 수 없는 레이어 종류"로 보고하면 안 된다 — 자식이 부모 변환을 받도록
+    /// 트리에는 남되, 그릴 그림이 없을 뿐이다.
+    func testContentlessGroupObjectIsGroup() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "Clock Layer 1", "origin": "10 20 0",
+                      "angles": "0 0 0", "locktransforms": true}]}
+        """)).layers.first)
+        XCTAssertEqual(layer.content, .group)
+    }
+
+    /// `solid`(파티클 충돌 경계)·`light`(광원)·카메라 경로점도 같은 이유로 group이다
+    /// — 실물 3444535389 "Cat and bee"의 이름 없는 solid 8개, 3589454154의 light
+    /// 오브젝트가 이 모양이다. 자체 그림이 없을 뿐 씬이 깨진 게 아니다.
+    func testSolidAndLightObjectsAreGroup() throws {
+        let solid = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "", "disablepropagation": false, "solid": true,
+                      "origin": "0 0 0"}]}
+        """)).layers.first)
+        XCTAssertEqual(solid.content, .group)
+
+        let light = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "", "light": true, "color": "1 1 1",
+                      "intensity": 1.0, "radius": 100.0, "origin": "0 0 0"}]}
+        """)).layers.first)
+        XCTAssertEqual(light.content, .group)
+    }
+
+    /// 최상위(부모 없음) 텍스트 레이어에 origin이 아예 없을 수 있다(실물
+    /// 3509243656 "RST文字" — 리부트 버튼 글자다). 부모가 없으니 "부모와 같은
+    /// 자리"가 곧 화면 원점이다 — origin이 없다고 텍스트를 통째로 버리면 안 된다.
+    func testTopLevelTextWithoutOriginDefaultsToOrigin() throws {
+        let layer = try XCTUnwrap(SceneDocument.load(from: try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 100, "height": 100}},
+         "objects": [{"id": 1, "name": "RST文字", "size": "181 88",
+                      "text": {"value": "reset"}, "anchor": "none"}]}
+        """)).layers.first)
+        guard case .text(let text) = layer.content else {
+            return XCTFail("텍스트여야 한다: \(layer.content)")
+        }
+        XCTAssertEqual(text.value, "reset")
+        XCTAssertEqual(layer.origin, Vec3(x: 0, y: 0, z: 0))
     }
 
     /// 굴절 파티클은 **법선 지도까지 들고** 나온다.
@@ -1197,5 +1612,78 @@ extension SceneDocumentTests {
         ]
         XCTAssertEqual(SceneDocument.scriptHolders(of: object).map(\.property),
                        ["instanceoverride.controlpoint1"])
+    }
+
+    // MARK: - 광원
+
+    /// 실물 scene 3589454154의 점광 오브젝트를 그대로 재현한다 — 위치는 스크립트뿐이라
+    /// `value`(편집기 마지막 값)로 대체된다.
+    func testPointLightIsParsedWithColorIntensityAndRadius() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}},
+         "objects": [{"id": 433, "light": "lpoint", "name": "",
+                      "color": "1.00000 1.00000 1.00000", "intensity": 6.0, "radius": 100.0,
+                      "exponent": 2.0, "castshadow": true,
+                      "origin": {"value": "10.0 20.0 30.0"}}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        guard case .light(let info) = doc.layers.first?.content else {
+            return XCTFail("광원 레이어가 아니다: \(String(describing: doc.layers.first?.content))")
+        }
+        XCTAssertEqual(info.kind, .point)
+        XCTAssertEqual(info.color, Vec3(x: 1, y: 1, z: 1))
+        XCTAssertEqual(info.intensity, 6.0)
+        XCTAssertEqual(info.radius, 100.0)
+        XCTAssertEqual(info.exponent, 2.0)
+        XCTAssertEqual(doc.layers.first?.origin, Vec3(x: 10, y: 20, z: 30))
+    }
+
+    /// 실물 scene 3589454154의 방향광 — `angles` 없이 `origin`만 있다.
+    func testDirectionalLightDefaultsMissingFieldsReasonably() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}},
+         "objects": [{"id": 259, "light": "ldirectional", "name": "",
+                      "color": "1.00000 0.90000 0.80000", "intensity": 5.0, "radius": 200.0,
+                      "origin": "1.00000 0.00000 0.00000"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        guard case .light(let info) = doc.layers.first?.content else {
+            return XCTFail("광원 레이어가 아니다")
+        }
+        XCTAssertEqual(info.kind, .directional)
+        XCTAssertEqual(info.color, Vec3(x: 1, y: 0.9, z: 0.8))
+        // exponent가 없으면 1(그대로)로 본다 — 0이면 감쇠 없음이 아니라 거듭제곱
+        // 자체가 사라져 다른 셰이더 식과 안 맞는다.
+        XCTAssertEqual(info.exponent, 1)
+    }
+
+    /// 자식 자리라 origin이 스크립트뿐이고 `value`조차 못 읽으면(다른 레이어와
+    /// 같은 규칙으로) 그룹으로 떨어뜨린다 — 정체불명의 원점 광원보다 안전하다.
+    func testLightWithUnreadableOriginBecomesGroup() throws {
+        let reader = try makeScenePkg(scene: """
+        {"general": {"orthogonalprojection": {"width": 1920, "height": 1080}},
+         "objects": [{"id": 1, "light": "lpoint", "name": "", "color": "1 1 1"}]}
+        """)
+        let doc = try SceneDocument.load(from: reader)
+        XCTAssertEqual(doc.layers.first?.content, .group)
+    }
+
+    /// 회전이 없으면 기본 정면(-Z)을 본다. `direction`은 늘 단위 벡터다.
+    func testLightDirectionWithNoRotationFacesForward() {
+        let light = LightInfo(kind: .directional, color: Vec3(x: 1, y: 1, z: 1), intensity: 1,
+                              radius: 0, exponent: 1, angles: Vec3(x: 0, y: 0, z: 0))
+        let d = light.direction
+        XCTAssertEqual(d.x, 0, accuracy: 0.0001)
+        XCTAssertEqual(d.y, 0, accuracy: 0.0001)
+        XCTAssertEqual(d.z, -1, accuracy: 0.0001)
+    }
+
+    /// y축(요) 90도를 돌리면 +X를 본다(오른손 좌표계, WE의 y-위·-z-정면).
+    func testLightDirectionRotatesWithYaw() {
+        let light = LightInfo(kind: .directional, color: Vec3(x: 1, y: 1, z: 1), intensity: 1,
+                              radius: 0, exponent: 1, angles: Vec3(x: 0, y: 90, z: 0))
+        let d = light.direction
+        XCTAssertEqual(d.x, -1, accuracy: 0.001)
+        XCTAssertEqual(d.z, 0, accuracy: 0.001)
     }
 }

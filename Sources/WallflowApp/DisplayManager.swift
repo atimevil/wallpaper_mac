@@ -60,11 +60,64 @@ final class DisplayManager {
 
     private var lastLoggedOcclusion: Bool?
 
+    /// 전역 마우스 위치를 30Hz로 폴링해 웹 배경화면에 넘긴다. 웹 렌더러가 하나도
+    /// 없으면 매 틱 곧바로 돌아온다 — 창 목록을 묻는 `CGWindowListCopyWindowInfo`가
+    /// 싸지 않아서, 웹이 없을 땐 그 비용 자체를 안 쓴다.
+    private var cursorTimer: Timer?
+    private var lastForwardedMouse: NSPoint?
+    private var lastForwardedLeftDown = false
+
     init() {
         NotificationCenter.default.addObserver(
             self, selector: #selector(screensChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil
         )
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.forwardCursor() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        cursorTimer = timer
+    }
+
+    /// 실물 WE처럼, 데스크톱이 드러난 화면 위에서만 커서를 웹 배경화면에 준다.
+    /// `NSEvent.mouseLocation`(AppKit 전역 좌표)과 `CGWindowListCopyWindowInfo`
+    /// (Quartz 좌표)는 원점이 달라 `WebCursorBridge.quartzPoint`로 맞춘 뒤 묻는다.
+    private func forwardCursor() {
+        guard renderers.values.contains(where: { $0 is WebRenderer }) else { return }
+        let mouse = NSEvent.mouseLocation
+        let leftDown = NSEvent.pressedMouseButtons & 0x1 != 0
+        // 커서도 버튼도 그대로면 창 목록을 다시 묻지 않는다 — 초당 30번의
+        // CGWindowList 조회는 가만히 있는 동안에도 전력을 쓴다.
+        if mouse == lastForwardedMouse, leftDown == lastForwardedLeftDown { return }
+        lastForwardedMouse = mouse
+        lastForwardedLeftDown = leftDown
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let quartz = WebCursorBridge.quartzPoint(appKit: mouse, primaryScreenHeight: primaryHeight)
+        let desktopVisible = Self.isDesktopVisible(at: quartz)
+        for (id, renderer) in renderers {
+            guard let web = renderer as? WebRenderer, let window = windows[id] else { continue }
+            web.forwardCursor(
+                screenPoint: mouse, windowFrame: window.frame,
+                desktopVisible: desktopVisible, leftButtonDown: leftDown)
+        }
+    }
+
+    /// 이 Quartz 좌표를 레이어 0짜리(보통 앱) 창이 덮고 있는지. `SystemPowerSignals
+    /// .isFullscreenAppActive()`와 같은 재료(같은 레이어 필터)를 쓰지만, "화면
+    /// 전체를 덮나"가 아니라 "이 점을 덮나"로 묻는다 — 전체화면이 아니어도 그
+    /// 창 아래는 데스크톱이 아니다.
+    private static func isDesktopVisible(at point: CGPoint) -> Bool {
+        guard let windows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return true }
+        for window in windows {
+            guard let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
+                  let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
+            else { continue }
+            if rect.contains(point) { return false }
+        }
+        return true
     }
 
     @objc private func screensChanged() {
@@ -319,6 +372,8 @@ final class DisplayManager {
     }
 
     func stopAll() {
+        cursorTimer?.invalidate()
+        cursorTimer = nil
         for renderer in renderers.values { renderer.stop() }
         renderers.removeAll()
         for window in windows.values { window.orderOut(nil) }

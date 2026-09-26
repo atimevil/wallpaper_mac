@@ -115,14 +115,17 @@ final class GLSLTranslatorTests: XCTestCase {
             "\tconst vec2 c = wfTo2(v_TexCoord);")
     }
 
-    /// 대입문은 받는 쪽이 varying일 때만 안다. 실물 `cloudmotion`이
-    /// `v_NoiseCoord = v_TexCoord;`(vec2 ← vec4)로 쓴다.
+    /// 대입문은 받는 쪽이 varying이거나 스위즐이면 안다. 실물 `cloudmotion`이
+    /// `v_NoiseCoord = v_TexCoord;`(vec2 ← vec4)로 쓴다. 스위즐(`.x`)은 그 길이가
+    /// 곧 받는 쪽 폭이라 스칼라 복합 대입도 안전하게 감쌀 수 있다 —
+    /// `wfTo1(2.0)`은 항등이라 값이 안 바뀐다(editorpaintbrush 이펙트가 스위즐
+    /// 대입 쪽에서 진짜로 폭이 다른 값을 받아 이 처리가 필요해졌다).
     func testAssignmentToVaryingIsWrapped() {
         let source = "varying vec2 v_NoiseCoord;\nvarying vec4 v_TexCoord;\n"
             + "void main() {\n\tv_NoiseCoord = v_TexCoord;\n\tv_NoiseCoord.x *= 2.0;\n}"
         let out = GLSLTranslator.rewritingTruncation(source)
         XCTAssertTrue(out.contains("\tv_NoiseCoord = wfTo2(v_TexCoord);"), out)
-        XCTAssertTrue(out.contains("\tv_NoiseCoord.x *= 2.0;"), "스위즐 대입은 그대로")
+        XCTAssertTrue(out.contains("\tv_NoiseCoord.x *= wfTo1(2.0);"), out)
     }
 
     /// 두 값을 한 줄에 선언하거나 `==`·`+=`가 낀 줄은 건드리면 깨진다.
@@ -411,6 +414,29 @@ final class GLSLTranslatorTests: XCTestCase {
                       result.source)
     }
 
+    /// `texSample2D(tex, uv)`는 텍스처·샘플러 이름을 붙여 만든다. **직접**
+    /// `tex##Sampler`로 붙이면 C 전처리기 규칙상 `##`의 피연산자는 먼저
+    /// 펼쳐지지 않는다 — 인자가 `GRADIENT_SAMPLER`(실물 `generic3.frag`가
+    /// `#define GRADIENT_SAMPLER g_Texture4`로 미리 붙이는 별명) 같은 매크로
+    /// 이름이면 `g_Texture4`로 안 바뀌고 `GRADIENT_SAMPLERSampler`라는 없는
+    /// 식별자로 그대로 붙어 Metal 컴파일이 깨진다(space boi 씬으로 확인).
+    /// `WF_CAT(a,b)`가 `WF_CAT_(a,b)`(실제 `##` 붙임)를 한 단계 감싸 인자를
+    /// 먼저 펼친 뒤 붙인다 — 이 두 매크로와, `tex##Sampler`를 직접 쓰는
+    /// 자리가 프렐류드에 하나도 안 남았는지가 이 번역기의 결함이 다시
+    /// 생기지 않았다는 증거다. Metal 자체의 매크로 펼침은 Kit에서 못 재므로
+    /// (Metal을 못 부른다) 여기까지가 검증선이다.
+    func testTexSampleMacrosUseTwoLevelTokenPasteNotDirect() throws {
+        let result = try translate("void main() { gl_FragColor = vec4(0.0); }")
+        XCTAssertTrue(result.source.contains("#define WF_CAT_(a, b) a##b"), result.source)
+        XCTAssertTrue(result.source.contains("#define WF_CAT(a, b) WF_CAT_(a, b)"), result.source)
+        XCTAssertTrue(result.source.contains("WF_CAT(tex, Sampler)"), result.source)
+        // 주석 말고 실제 매크로 정의 줄에는 직접 붙임(`tex##Sampler`)이 하나도
+        // 없어야 한다 — 있으면 그 한 자리가 이 결함을 다시 낸다.
+        let codeLines = result.source.split(separator: "\n").map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        XCTAssertFalse(codeLines.contains { $0.contains("tex##Sampler") }, "\(codeLines)")
+    }
+
     /// 이름이 규칙에 안 맞으면 선언 순서로 매긴다. 그때만이다.
     func testUnnamedSamplersFallBackToDeclarationOrder() throws {
         let result = try translate("""
@@ -481,5 +507,142 @@ final class GLSLTranslatorTests: XCTestCase {
         // 배열은 통째로 대입할 수 없다. 성분마다 옮겨야 한다.
         XCTAssertTrue(result.source.contains(
             "context.g_AudioSpectrum32Left[31] = uniforms.g_AudioSpectrum32Left[31];"))
+    }
+
+    // MARK: - 본 스키닝 타입(uvec4·mat4x3)
+
+    /// 실물 `generic3.vert`(Star1/2/3 모델, scene 3509243656·3589454154)이
+    /// `uvec4 a_BlendIndices`·`mat4x3 g_Bones`를 쓴다. MSL엔 `uvec4`·`mat4x3`가
+    /// 없어 "unknown type name"으로 통째로 떨어졌었다.
+    func testSkinningTypesAreMapped() throws {
+        let result = try translate("""
+        uniform mat4x3 g_Bones;
+        attribute uvec4 a_BlendIndices;
+        void main() { gl_Position = vec4(float(a_BlendIndices.x), 0.0, 0.0, 1.0); }
+        """, stage: .vertex)
+        XCTAssertTrue(ShaderPrelude.types.contains("#define uvec4 uint4"), ShaderPrelude.types)
+        XCTAssertTrue(ShaderPrelude.types.contains("#define mat4x3 float4x3"), ShaderPrelude.types)
+        XCTAssertTrue(result.source.contains("mat4x3 g_Bones;"), result.source)
+        XCTAssertTrue(result.source.contains("uvec4 a_BlendIndices"), result.source)
+    }
+
+    /// `mul(vec4, mat4x3)`(본 변환)과 `CAST3X3(mat4x3)`(본 회전만 추출)이
+    /// 실제로 쓰일 때 프렐류드가 오버로드를 갖고 있어야 한다.
+    func testBoneMatrixHelpersExist() {
+        XCTAssertTrue(ShaderPrelude.helpers.contains("mul(float4 v, float4x3 m)"),
+                      ShaderPrelude.helpers)
+        XCTAssertTrue(ShaderPrelude.helpers.contains("wfCast3x3(float4x3 m)"),
+                      ShaderPrelude.helpers)
+    }
+
+    // MARK: - 이펙트 컴파일 실패 3건
+
+    /// `workshop/2800594362/effects/clipping_mask`. `varying vec4 v_TexCoord`를
+    /// `.xy`만 채워 쓰는데 `texSample2D`에 그대로 넘긴다 — `sample()`은 `float2`만
+    /// 받아 "no matching member function for call to 'sample'"로 떨어졌었다.
+    func testTexSample2DTruncatesWiderCoordinate() throws {
+        XCTAssertTrue(ShaderPrelude.sampling.contains("tex.sample(WF_CAT(tex, Sampler), wfTo2(uv))"),
+                      ShaderPrelude.sampling)
+        let result = try translate("""
+        uniform sampler2D g_Texture0;
+        varying vec4 v_TexCoord;
+        void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }
+        """)
+        XCTAssertTrue(result.source.contains("texSample2D(g_Texture0, v_TexCoord)"), result.source)
+    }
+
+    /// `workshop/2821337237/effects/crt_screen`. `#define mask 1.0;`처럼 몸통에
+    /// 군더더기 `;`가 붙은 매크로가 있으면, `wfTo1(u_alpha * mask)`로 감싼 뒤
+    /// 펼쳐질 때 그 `;`가 괄호 안에서 문장을 끊어 떨어졌었다.
+    func testStrayDefineSemicolonIsStripped() {
+        let source = "#define mask 1.0;\nfloat x = mask;"
+        let fixed = GLSLTranslator.strippingStrayDefineSemicolons(source)
+        XCTAssertTrue(fixed.contains("#define mask 1.0\n"), fixed)
+        // 함수형 매크로는 손대지 않는다 — 괄호 안의 `;`가 do/while 관용구일 수 있다.
+        let functionLike = "#define F(x) do { x; } while(0);"
+        XCTAssertEqual(GLSLTranslator.strippingStrayDefineSemicolons(functionLike), functionLike)
+    }
+
+    /// `workshop/2078835426/effects/pixelate`. `round(v_PixelCoord) * v_PixelSize`가
+    /// `vec2 * vec4`라 Metal이 "implicit conversions ... are not permitted"로
+    /// 떨어졌었다 — 받는 쪽(선언의 왼쪽)만 보는 감싸기로는 못 잡는 안쪽 불일치다.
+    func testMixedWidthMultiplicationIsNarrowed() throws {
+        let result = try translate("""
+        varying vec2 v_PixelCoord;
+        varying vec4 v_PixelSize;
+        void main() {
+            vec2 texCoord00 = round(v_PixelCoord) * v_PixelSize;
+            gl_FragColor = vec4(texCoord00, 0.0, 1.0);
+        }
+        """)
+        XCTAssertTrue(result.source.contains("round(v_PixelCoord)*wfTo2(v_PixelSize)"), result.source)
+    }
+
+    /// clipping_mask의 진짜 구조: `#define`이 uniform을 감싸고, `varying vec4`가
+    /// 그 매크로와 여러 항 뒤에서 만난다. 인접한 토큰 하나만 보면 못 잡는다 —
+    /// 실제 계산 순서를 따라가며 접어야 `v_TexCoord*2.0-1.0`(넓다)과
+    /// `texScaleCenter`(좁다)가 만나는 자리를 찾는다.
+    func testMixedWidthAcrossDefineIsNarrowed() throws {
+        let result = try translate("""
+        uniform vec2 u_texScaleCenter;
+        varying vec4 v_TexCoord;
+        #define texScaleCenter (u_texScaleCenter * 2.0 - 1.0)
+        void main() {
+            vec2 uv = (v_TexCoord * 2.0 - 1.0 - texScaleCenter) / 2.0;
+            gl_FragColor = vec4(uv, 0.0, 1.0);
+        }
+        """)
+        XCTAssertTrue(result.source.contains("wfTo2(v_TexCoord*2.0-1.0)"), result.source)
+    }
+
+    /// `length(a - b)`처럼 폭이 같은 자리는 건드리면 안 된다 — 건드리면
+    /// `length(wfTo1(a) - wfTo1(b))`가 되어 `length(float)`를 찾다 모호해진다
+    /// (실물 fluidsimulation 이펙트가 이 꼴로 떨어질 뻔했다).
+    func testEqualWidthOperandsAreUntouched() throws {
+        let result = try translate("""
+        varying vec2 g_PointerPosition;
+        varying vec2 g_PointerPositionLast;
+        void main() {
+            float moveAmt = length(g_PointerPosition - g_PointerPositionLast);
+            gl_FragColor = vec4(moveAmt);
+        }
+        """)
+        XCTAssertTrue(
+            result.source.contains("length(g_PointerPosition-g_PointerPositionLast)"),
+            result.source)
+        XCTAssertFalse(result.source.contains("wfTo1(g_PointerPosition"), result.source)
+    }
+
+    /// `#require LightingV1`가 걸린 실물 7개가 부르는 `PerformLighting_V1`은
+    /// 엔진이 씬의 빛 개수에 맞춰 링크해 주는 자리라 셰이더 헤더 어디에도
+    /// 정의가 없다 — "use of undeclared identifier"로 떨어졌었다(generic4.frag,
+    /// Star1/2/3 모델의 재질). `#require LightingV1`을 만나면 실제 광원 루프
+    /// (빛 유니폼 선언 + 쿡-토런스 BRDF)를 GLSL 텍스트로 끼워 넣는다 —
+    /// `generic3.frag`가 자기 안에 갖고 있는 같은 일을 하는 함수를 근거로 짰다.
+    func testPerformLightingV1IsInjectedAsRealLightLoop() throws {
+        let result = try translate("""
+        #require LightingV1
+        void main() { vec3 x = PerformLighting_V1(CAST3(0.0), CAST3(1.0), CAST3(0.0), CAST3(0.0), CAST3(1.0), CAST3(0.04), 0.5, 0.0); gl_FragColor = vec4(x, 1.0); }
+        """)
+        XCTAssertTrue(result.source.contains("vec3 PerformLighting_V1("), result.source)
+        XCTAssertTrue(result.source.contains("g_LPoint_Origin[LIGHTS_POINT]"), result.source)
+        XCTAssertTrue(result.source.contains("wfComputePBRLight("), result.source)
+        // 정의가 셰이더 본문 안에 있어야 `ShaderContext` 멤버로 들어가
+        // `Distribution_GGX` 같은 `common_pbr_2.h` 도움 함수를 볼 수 있다 — 프렐류드
+        // 쪽에 MSL 함수로 또 있으면 이름이 겹쳐 재정의 오류가 난다.
+        XCTAssertFalse(
+            ShaderPrelude.all.contains("float3 PerformLighting_V1("), ShaderPrelude.all)
+    }
+
+    /// `#require`는 한 번만 펼친다 — `#include`와 같은 규칙. 두 번 펼치면
+    /// `wfComputePBRLight`가 다시 정의되어 그 셰이더가 통째로 떨어진다.
+    func testRequireLightingV1ExpandsOnce() throws {
+        let result = try translate("""
+        #require LightingV1
+        #require LightingV1
+        void main() { gl_FragColor = vec4(PerformLighting_V1(CAST3(0.0), CAST3(1.0), CAST3(0.0), CAST3(0.0), CAST3(1.0), CAST3(0.04), 0.5, 0.0), 1.0); }
+        """)
+        XCTAssertEqual(
+            result.source.components(separatedBy: "vec3 PerformLighting_V1(").count, 2, result.source)
     }
 }

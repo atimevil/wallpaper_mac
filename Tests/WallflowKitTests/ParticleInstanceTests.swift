@@ -87,7 +87,8 @@ final class ParticleInstanceTests: XCTestCase {
         o.speed = 2
         let preset = bare(burst: ParticleEmitterBurst(count: 1), operators: [
             .remapValue(output: .velocity, transform: .noise, inputScale: 1,
-                        outputMin: Vec3(x: 10, y: 0, z: 0), outputMax: Vec3(x: 10, y: 0, z: 0)),
+                        outputMin: Vec3(x: 10, y: 0, z: 0), outputMax: Vec3(x: 10, y: 0, z: 0),
+                        input: .none),
         ])
         let p = try XCTUnwrap(spawn(preset, o, dt: 0.05).first)
         XCTAssertEqual(p.velocity.x, 20, accuracy: 1e-9)

@@ -197,6 +197,56 @@ public struct SoundLayer: Equatable, Sendable {
     }
 }
 
+/// WE 광원 오브젝트(`"light": "lpoint"` 등). 위치는 이 오브젝트의 `SceneLayer.origin`
+/// (부모 사슬까지 합친 값)을 그대로 쓴다 — 3D 메시가 위치를 얻는 것과 같은 자리다.
+public struct LightInfo: Equatable, Sendable {
+    public enum Kind: String, Equatable, Sendable {
+        case point = "lpoint"
+        case spot = "lspot"
+        case directional = "ldirectional"
+        case tube = "ltube"
+    }
+    public let kind: Kind
+    public let color: Vec3
+    public let intensity: Double
+    public let radius: Double
+    public let exponent: Double
+    /// 오일러 각(도), WE의 `angles` 키. 방향광·스팟라이트의 방향을 구하는 데만 쓴다.
+    public let angles: Vec3
+
+    public init(
+        kind: Kind, color: Vec3, intensity: Double, radius: Double, exponent: Double,
+        angles: Vec3 = Vec3(x: 0, y: 0, z: 0)
+    ) {
+        self.kind = kind
+        self.color = color
+        self.intensity = intensity
+        self.radius = radius
+        self.exponent = exponent
+        self.angles = angles
+    }
+
+    /// `angles`가 가리키는 단위 방향 벡터.
+    ///
+    /// **가정.** WE 셰이더 쪽 근거(회전 없는 기본 카메라가 -Z를 본다,
+    /// `common.h`의 좌표계)만 있고 각도 합성 순서를 명시한 자료는 못 찾았다 —
+    /// 3D 오브젝트 회전에 흔한 순서(Y로 좌우, 그다음 X로 위아래, Z는 화면 기울기라
+    /// 방향과 무관)를 그대로 썼다. 실제로 확인하려면 방향광이 든 실물 씬을 미리보기와
+    /// 견주는 수밖에 없는데, 이 작업 규칙상 앱을 직접 띄워 보지 않는다 — 그림이
+    /// 어긋나 보이면 이 순서부터 의심할 것.
+    public var direction: Vec3 {
+        let yaw = angles.y * .pi / 180
+        let pitch = angles.x * .pi / 180
+        let cosPitch = cos(pitch), sinPitch = sin(pitch)
+        let cosYaw = cos(yaw), sinYaw = sin(yaw)
+        // 기본 정면 (0,0,-1)에 X축 회전(피치) 다음 Y축 회전(요)을 적용한다.
+        let x = -sinYaw * cosPitch
+        let y = sinPitch
+        let z = -cosYaw * cosPitch
+        return Vec3(x: x, y: y, z: z)
+    }
+}
+
 /// 레이어가 무엇을 그리는지.
 public enum LayerContent: Equatable, Sendable {
     /// .pkg 또는 assets 안의 텍스처 경로.
@@ -223,6 +273,15 @@ public enum LayerContent: Equatable, Sendable {
     case text(TextLayer)
     /// 소리. 그리지 않는다.
     case sound(SoundLayer)
+    /// 광원. 자기 그림은 없다 — `ModelRenderer`가 3D 메시를 밝히는 데 쓴다.
+    case light(LightInfo)
+    /// 자기 그림이 없는 오브젝트. WE 편집기의 그룹(폴더), 파티클 충돌용 `solid`
+    /// 경계, `light` 광원, 카메라 경로점이 전부 이 모양이다 — `image`·`model`·
+    /// `particle`·`text`·`sound`·`shape` 중 아무 키도 없다. 자식은 부모 변환만
+    /// 물려받으면 되고, 이 오브젝트 자신은 그릴 것이 없다. `unsupported`로
+    /// 뭉치면 실물 씬마다 수십 줄씩 "알 수 없는 레이어 종류"를 찍어 진짜 결함을
+    /// 파묻는다.
+    case group
     /// 그리지 못하는 레이어. 이유를 남겨 나중에 무엇을 만들지 알 수 있게 한다.
     /// 화면 전체에 거는 후처리 레이어. 자기 그림이 없고, **그 아래까지 합성된
     /// 화면**을 받아 이펙트를 건다. 실물 씬 하나가 마지막 레이어로 filmgrain·vhs·
@@ -362,6 +421,16 @@ public struct SceneLayer: Equatable, Sendable {
     public let content: LayerContent
     /// 이 레이어에 걸린 이펙트들. 순서대로 이어서 건다.
     public let effects: [LayerEffect]
+    /// 합성 레이어(`.composition`)가 `_rt_FullFrameBuffer`로 그 지점까지 그려진
+    /// 화면을 실제로 받을지. 기본 true(WE 기본값과 같다).
+    ///
+    /// `false`면 이펙트 체인의 입구가 **빈 투명 텍스처**를 받는다 — 화면이 아니다.
+    /// 실물 음반 커버 씬(3299228616)의 "Bar 3"가 이 경우다: 오디오 바 이펙트는
+    /// (스타일이 안 맞아) 꺼져 있고 남은 `scroll` 이펙트는 알파를 전혀 안 건드려
+    /// 입력을 그대로 불투명하게 돌려준다. `copybackground`가 없으면(기본 true)
+    /// 그 입력이 진짜 화면(시계 글자 포함)이라 시계를 통째로 덮어 버린다 —
+    /// `false`를 지키면 입력이 애초에 비어 있어 여전히 투명하게 남는다.
+    public let copyBackground: Bool
     /// `visible`/`alpha`에 붙은 스크립트 본문들. 미디어 위젯이 여기서 스스로 숨는다.
     public let displayScripts: [DisplayScript]
     /// 스크립트가 붙어 있지만 우리가 아직 돌리지 못하는 속성 이름들.
@@ -389,6 +458,10 @@ public struct SceneLayer: Equatable, Sendable {
     /// `alignment`가 정한 닻에서 그림 중심까지의 거리(씬 단위, 배율 적용, 회전 전).
     /// `origin`에는 이미 더해져 있다. 스크립트가 origin을 옮길 때 다시 더하려고 따로 둔다.
     public let anchorOffset: Vec2
+    /// 씬 JSON의 타임라인 키프레임 애니메이션. 키는 `alpha`·`color`·`brightness`·
+    /// `origin`·`scale`·`angles`다. 렌더러가 매 프레임 기준값(위 각 필드)에 얹어
+    /// 논다 — 여기 있는 값은 그 기준값(첫 프레임 스냅숏)일 뿐이다.
+    public let animations: [String: PropertyAnimation]
 
     public init(
         id: Int, name: String, visible: Bool, origin: Vec3, size: Vec2,
@@ -407,12 +480,16 @@ public struct SceneLayer: Equatable, Sendable {
         puppet: PuppetSpec? = nil,
         parentID: Int? = nil,
         localVisible: Bool? = nil,
-        anchorOffset: Vec2 = Vec2(x: 0, y: 0)
+        anchorOffset: Vec2 = Vec2(x: 0, y: 0),
+        animations: [String: PropertyAnimation] = [:],
+        copyBackground: Bool = true
     ) {
+        self.copyBackground = copyBackground
         self.puppet = puppet
         self.parentID = parentID
         self.localVisible = localVisible ?? visible
         self.anchorOffset = anchorOffset
+        self.animations = animations
         self.scripts = scripts
         self.angles = angles
         self.localOrigin = localOrigin ?? origin
@@ -445,7 +522,7 @@ public struct SceneLayer: Equatable, Sendable {
             colorBlendMode: colorBlendMode, brightness: brightness,
             scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
             puppet: puppet, parentID: parentID, localVisible: localVisible,
-            anchorOffset: anchorOffset)
+            anchorOffset: anchorOffset, animations: animations, copyBackground: copyBackground)
     }
 
     /// 스크립트와 오브젝트 자체 변환을 붙인 사본. 나머지는 그대로다.
@@ -460,7 +537,20 @@ public struct SceneLayer: Equatable, Sendable {
             colorBlendMode: colorBlendMode, brightness: brightness,
             scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
             puppet: puppet, parentID: parentID, localVisible: localVisible,
-            anchorOffset: anchorOffset)
+            anchorOffset: anchorOffset, animations: animations, copyBackground: copyBackground)
+    }
+
+    /// 타임라인 애니메이션을 붙인 사본. 나머지는 그대로다.
+    public func attachingAnimations(_ animations: [String: PropertyAnimation]) -> SceneLayer {
+        SceneLayer(
+            id: id, name: name, visible: visible, origin: origin, size: size,
+            content: content, unrunScripts: unrunScripts, effects: effects,
+            alpha: alpha, tint: tint, rotation: rotation, displayScripts: displayScripts,
+            scale: scale, parallaxDepth: parallaxDepth,
+            colorBlendMode: colorBlendMode, brightness: brightness,
+            scripts: scripts, angles: angles, localOrigin: localOrigin, localScale: localScale,
+            puppet: puppet, parentID: parentID, localVisible: localVisible,
+            anchorOffset: anchorOffset, animations: animations, copyBackground: copyBackground)
     }
 }
 
@@ -493,8 +583,18 @@ public struct SceneCamera: Equatable, Sendable {
         self.up = up
     }
 
-    /// `general`에서 읽는다. 값은 수이거나 `{"user": …, "value": …}` 객체다.
-    static func parse(_ general: [String: Any]) -> SceneCamera {
+    /// `fov`·`nearz`·`farz`는 `general`에서, 눈·중심·위는 `general.camera`나
+    /// **씬 최상위의 `camera`**(`{"eye":…, "center":…, "up":…}`)에서 읽는다.
+    /// 값은 수이거나 `{"user": …, "value": …}` 객체다.
+    ///
+    /// **실물은 전부 최상위 `camera`를 쓴다** — 코퍼스의 원근 씬 넷(`prism`·
+    /// `space boi`·`Three-Body`·`球体01` 씬) 모두 `general.camera`는 없고
+    /// `scene.camera`만 있다. `general.camera`만 보던 예전 코드는 늘 기본 눈
+    /// (0,0,100)으로 떨어졌다 — Three-Body는 우연히 카메라 오브젝트의 origin으로
+    /// 덮어써져 괜찮아 보였을 뿐, `space boi`처럼 그런 오브젝트가 없는 씬은
+    /// 카메라가 원점 가까이(0,0,100)에 남아 메시 시야 방향(`v_ViewDir`)이
+    /// 어긋났다. 최상위가 있으면 그걸 먼저 쓴다.
+    static func parse(_ general: [String: Any], topLevelCamera: [String: Any]? = nil) -> SceneCamera {
         func number(_ raw: Any?, _ fallback: Double, min lo: Double, max hi: Double) -> Double {
             let value = (raw as? [String: Any])?["value"] ?? raw
             guard let d = (value as? NSNumber)?.doubleValue, d.isFinite else { return fallback }
@@ -504,7 +604,7 @@ public struct SceneCamera: Equatable, Sendable {
         camera.fov = number(general["fov"], 50, min: 1, max: 179)
         camera.nearZ = number(general["nearz"], 0.1, min: 0.0001, max: 1e6)
         camera.farZ = number(general["farz"], 10000, min: camera.nearZ * 1.001, max: 1e9)
-        if let block = general["camera"] as? [String: Any] {
+        for block in [general["camera"] as? [String: Any], topLevelCamera].compactMap({ $0 }) {
             if let eye = (block["eye"] as? String).flatMap(Vec3.parse) { camera.eye = eye }
             if let center = (block["center"] as? String).flatMap(Vec3.parse) { camera.center = center }
             if let up = (block["up"] as? String).flatMap(Vec3.parse) { camera.up = up }

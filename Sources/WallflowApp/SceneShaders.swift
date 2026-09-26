@@ -324,6 +324,50 @@ enum SceneShaders {
         return color;
     }
 
+    // ---- 블룸 ----
+
+    struct BloomUniforms {
+        float2 texelSize;
+        float threshold;
+        float strength;
+    };
+
+    /// 씬의 `general.bloom`. 밝은 자리를 넓게 퍼뜨려 더한다 — WE 실물 재질이
+    /// `#if HDR`에서 `saturate(...)`로 자르고 남는 값을 "overbright"로 흘려보내
+    /// 블룸이 그걸 받아 퍼뜨리는 두 단계 파이프라인이다(`common_pbr_2.h`의
+    /// `CombineLighting` 참고). `general.hdr`인 씬은 오프스크린이 `rgba16Float`라
+    /// (`MetalCompositor.sceneColorFormat`) 그 1 넘는 값을 그대로 들고 다닐 수
+    /// 있다 — 이미 그려진 화면에서 문턱값(threshold) 위인 자리를 다시 찾아
+    /// 번지게 하는 한 단계짜리로 흉내 낸다. 여러 번 내려찍고 흐리는 실물
+    /// 파이프라인보다 거칠지만, 텍스처를 새로 여럿 두지 않고 프레임 하나로
+    /// 끝난다. HDR이 아닌 씬은 오프스크린이 여전히 8비트라(bgra8Unorm) 문턱값
+    /// 위 색이 이미 1로 잘려 있고, 그 결과 번지는 색이 흰색에 가깝다 — 예전과
+    /// 같은 동작이다.
+    fragment float4 bloom_fragment(
+        VertexOut in [[stage_in]],
+        texture2d<float> tex [[texture(0)]],
+        sampler samp [[sampler(0)]],
+        constant BloomUniforms &u [[buffer(0)]]
+    ) {
+        float4 base = tex.sample(samp, in.uv);
+        float3 glow = float3(0.0);
+        float total = 0.0;
+        for (int y = -4; y <= 4; y++) {
+            for (int x = -4; x <= 4; x++) {
+                // 실물 배경화면은 화면이 커서(3000px대) 반경을 넉넉히 잡아야
+                // 번지는 게 보인다 — 2배수로는 몇 픽셀짜리 테두리라 눈에 안 띈다.
+                float2 offset = float2(float(x), float(y)) * u.texelSize * 14.0;
+                float3 c = tex.sample(samp, in.uv + offset).rgb;
+                float lum = max(c.r, max(c.g, c.b));
+                float weight = exp(-float(x * x + y * y) * 0.15);
+                glow += c * smoothstep(u.threshold, u.threshold + 0.2, lum) * weight;
+                total += weight;
+            }
+        }
+        glow /= max(total, 0.0001);
+        return float4(base.rgb + glow * u.strength, base.a);
+    }
+
     // ---- 파티클 ----
 
     struct ParticleInstance {
@@ -361,21 +405,39 @@ enum SceneShaders {
         float trailLength;
         float trailMaxLength;
         float trailMinLength;
+        // `orientation`/`axis`가 낸 빌보드 축(회전 전). sprite가 아니면 안
+        // 쓴다. Swift의 orientRightX/Y/Z·orientUpX/Y/Z와 같은 순서 — packed
+        // float3 대신 float 6개로 편 것도 그쪽과 맞춘 것이다.
+        float orientRightX;
+        float orientRightY;
+        float orientRightZ;
+        float orientUpX;
+        float orientUpY;
+        float orientUpZ;
         // 레이어의 세계 변환 × 카메라 뷰·투영. 파티클 좌표는 레이어 기준이다.
         float4x4 transform;
     };
 
     // common_particles.h의 ComputeParticleTangents를 옮긴 것.
-    // 회전 행렬 세 축을 곱해 빌보드의 right/up을 만든다.
-    static void particleTangents(float3 rotation, thread float3 &right, thread float3 &up) {
+    // 회전 행렬 세 축을 곱해 빌보드의 right/up을 만든다. 원문은 그 뒤
+    // `mRotation = mul(mRotation, mat3(g_OrientationRight, g_OrientationUp,
+    // g_OrientationForward))`를 한 번 더 곱하는데, forward 없이도 끝난다 —
+    // (A*B)의 0번째/1번째 열은 `A * B의 0번째/1번째 열`이라 orientRight·
+    // orientUp만 있으면 된다(WallflowKit의 `ParticleOrientationBasis` 문서
+    // 참고). orientRight/orientUp이 기본값 (1,0,0)/(0,1,0)이면 곱해도 자기
+    // 자신이라 이전 동작(orientation 무시) 그대로다.
+    static void particleTangents(
+        float3 rotation, float3 orientRight, float3 orientUp,
+        thread float3 &right, thread float3 &up
+    ) {
         float3 c = cos(rotation);
         float3 s = sin(rotation);
         float3x3 rz = float3x3(float3(c.z, -s.z, 0), float3(s.z, c.z, 0), float3(0, 0, 1));
         float3x3 rx = float3x3(float3(1, 0, 0), float3(0, c.x, -s.x), float3(0, s.x, c.x));
         float3x3 ry = float3x3(float3(c.y, 0, s.y), float3(0, 1, 0), float3(-s.y, 0, c.y));
         float3x3 m = rz * rx * ry;
-        right = m[0];
-        up = m[1];
+        right = m * orientRight;
+        up = m * orientUp;
     }
 
     // common_particles.h의 ComputeParticleTrailTangents를 옮긴 것.
@@ -431,7 +493,11 @@ enum SceneShaders {
                 u.trailMinLength, right, up);
         }
         if (!drewTrail) {
-            particleTangents(float3(p.rotation), right, up);
+            particleTangents(
+                float3(p.rotation),
+                float3(u.orientRightX, u.orientRightY, u.orientRightZ),
+                float3(u.orientUpX, u.orientUpY, u.orientUpZ),
+                right, up);
         }
 
         // ComputeParticlePosition 그대로.

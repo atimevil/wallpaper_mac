@@ -106,6 +106,18 @@ public enum EffectConstant: Equatable, Sendable {
         }
         return nil
     }
+
+    /// 셰이더 주석의 `material` 키로 재질 상수를 찾는다. 정확히 맞는 키가
+    /// 없으면 대소문자를 무시하고 한 번 더 찾는다 — 실물 `space boi`의
+    /// `diffuse_0.json`이 키를 `Alpha`(대문자)로 주는데 셰이더 주석은
+    /// `alpha`(소문자)를 기대한다. 못 찾으면 `g_TintAlpha`가 기본값
+    /// 1(불투명)로 남아, 반투명이어야 할 메시가 화면을 통째로 덮는 판으로
+    /// 그려진다. `ModelRenderer`(3D 메시)·`EffectChain`(2D 이펙트) 둘 다 이
+    /// 자리로 찾는다 — 한쪽만 고치면 나머지 하나는 같은 결함을 그대로 낸다.
+    public static func lookup(materialKey: String, in constants: [String: EffectConstant]) -> EffectConstant? {
+        constants[materialKey]
+            ?? constants.first { $0.key.caseInsensitiveCompare(materialKey) == .orderedSame }?.value
+    }
 }
 
 extension EffectDefinition {
@@ -183,8 +195,14 @@ extension EffectDefinition {
     static func resolveJSON(
         _ path: String, base: String, resolver: ReferenceResolver
     ) -> [String: Any]? {
-        if !base.isEmpty, let json = resolver.json(for: base + "/" + path) { return json }
-        return resolver.json(for: path)
+        let candidates = base.isEmpty ? [path] : [base + "/" + path, path]
+        // pkg를 두 철자 다 먼저 훑는다 — Assets에 같은 이름의 폴더 기준 사본이
+        // 있으면(`ReferenceResolver.firstData` 주석의 waterwaves 사례) pkg의
+        // 재질을 놔두고 Assets 재질을 집을 수 있다.
+        guard let data = resolver.firstData(of: candidates),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any] else { return nil }
+        return dict
     }
 
     /// 셰이더 짝의 경로. 재질은 확장자 없는 이름을 준다.
@@ -194,5 +212,46 @@ extension EffectDefinition {
         let candidates = base.isEmpty
             ? ["shaders/\(name)"] : ["\(base)/shaders/\(name)", "shaders/\(name)"]
         return (candidates.map { $0 + ".vert" }, candidates.map { $0 + ".frag" })
+    }
+
+    /// `_rt_imageLayerComposite_<레이어id>_a`/`_b`를 그 레이어 id로 판다.
+    ///
+    /// 이펙트가 **다른** 이미지 레이어의 합성 결과(이펙트가 있으면 그 출력,
+    /// 없으면 원본 그림)를 슬롯에 받을 때 씬이 주는 이름이다. `_a`/`_b`는
+    /// 그 레이어 자신의 이펙트 체인이 번갈아 쓰는 두 버퍼 이름일 뿐이라
+    /// 우리는 구분하지 않는다 — 어느 쪽이든 "그 레이어의 지금 결과"를
+    /// 뜻한다. 실물 음반 커버 씬(2938612768)의 `blend`/`blendgradient`
+    /// 이펙트가 다른 "音频封面" 레이어를 이 이름으로 가리킨다.
+    public static func imageLayerCompositeID(for name: String) -> Int? {
+        let prefix = "_rt_imageLayerComposite_"
+        guard name.hasPrefix(prefix) else { return nil }
+        var rest = name.dropFirst(prefix.count)
+        guard rest.hasSuffix("_a") || rest.hasSuffix("_b") else { return nil }
+        rest = rest.dropLast(2)
+        return Int(rest)
+    }
+
+    /// 씬의 모든 레이어를 훑어 `_rt_imageLayerComposite_<id>_a/_b`로 참조되는
+    /// 레이어 id를 모은다.
+    ///
+    /// 참조 대상은 자기 자신이 `visible: false`라도 텍스처가 준비돼야 한다 —
+    /// 실물 음반 커버 씬(2938612768)의 기본 커버 소스 레이어들이 전부
+    /// `visible: false`다(화면 밖 좌표에 두고 순전히 텍스처 공급용으로만
+    /// 쓴다). 렌더러가 "안 보이는 레이어는 건너뛴다" 최적화를 쓸 때 이
+    /// 목록에 있는 id는 예외로 둬야 한다 — 안 그러면 참조하는 쪽이 흰
+    /// placeholder로 채워진다(배경 전체가 하얗게 뜨는 원인이었다).
+    public static func referencedLayerIDs(in layers: [SceneLayer]) -> Set<Int> {
+        var ids: Set<Int> = []
+        for layer in layers {
+            for effect in layer.effects {
+                for pass in effect.definition.passes {
+                    for texture in pass.textures {
+                        guard let texture, let id = imageLayerCompositeID(for: texture) else { continue }
+                        ids.insert(id)
+                    }
+                }
+            }
+        }
+        return ids
     }
 }

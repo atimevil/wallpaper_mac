@@ -20,9 +20,21 @@ public enum ShaderPrelude {
     #define ivec3 int3
     #define ivec4 int4
     #define uvec2 uint2
+    #define uvec3 uint3
+    // 정점의 `a_BlendIndices`(본 스키닝)가 `uvec4`다.
+    #define uvec4 uint4
     #define mat2 float2x2
     #define mat3 float3x3
     #define mat4 float4x4
+    // 정사각이 아닌 행렬. GLSL의 `matCxR`은 C열 R행이고 MSL의 `floatCxR`도
+    // 같은 순서라 그대로 옮긴다 — 본 행렬 `mat4x3 g_Bones`(4열 3행, 동차 좌표
+    // vec4를 vec3로 보내는 3x4 아핀 변환)가 이 자리에서 떨어졌었다.
+    #define mat2x3 float2x3
+    #define mat2x4 float2x4
+    #define mat3x2 float3x2
+    #define mat3x4 float3x4
+    #define mat4x2 float4x2
+    #define mat4x3 float4x3
     """
 
     /// WE 호환 헬퍼와 `shaders/common.h`(37줄)의 함수들.
@@ -56,6 +68,10 @@ public enum ShaderPrelude {
     inline float3x3 wfCast3x3(float3x3 m) { return m; }
     inline float3x3 wfCast3x3(float4x4 m) {
         return float3x3(m[0].xyz, m[1].xyz, m[2].xyz);
+    }
+    // 본 행렬(`mat4x3`, 4열 3행)에서 회전·크기 3x3만 뜯는다. 마지막 열은 이동이다.
+    inline float3x3 wfCast3x3(float4x3 m) {
+        return float3x3(m[0], m[1], m[2]);
     }
 
     // 받는 쪽 타입에 맞춘다. 번역기가 `TYPE x = EXPR;`의 EXPR을 이걸로 감싼다.
@@ -99,6 +115,17 @@ public enum ShaderPrelude {
     inline float4 mul(float4 v, float4x4 m) { return v * m; }
     inline float3 mul(float3x3 m, float3 v) { return m * v; }
     inline float4 mul(float4x4 m, float4 v) { return m * v; }
+    // 본 행렬(4열 3행)로 동차 좌표를 옮긴다. `v * m`(행벡터 관례)는 성분 수가
+    // 안 맞아 못 쓰지만, `m * v`(열이 4개, v도 4성분)는 그대로 표준 행렬곱이라
+    // 결과가 같다 — 각 열에 v의 성분을 가중해 더한 값이 두 관례 모두에서 같다.
+    inline float3 mul(float4 v, float4x3 m) { return m * v; }
+    // 행렬끼리의 `mul`. 실물 `common_particles.h`가 회전 셋을
+    // `mul(mul(Rz, Rx), Ry)`로 합성한다 — `mul(v,M)=v*M`(행벡터 관례)과 같은
+    // 순서를 지키려면 `mul(A,B)`가 `A*B`여야 한다: `mul(mul(v,A),B) = (v*A)*B =
+    // v*(A*B)`이므로 합친 행렬은 `A*B` 그대로다.
+    inline float2x2 mul(float2x2 a, float2x2 b) { return a * b; }
+    inline float3x3 mul(float3x3 a, float3x3 b) { return a * b; }
+    inline float4x4 mul(float4x4 a, float4x4 b) { return a * b; }
 
     // `shaders/common.h`(37줄). 이 파일은 `#include`로 208곳에서 쓰이지만
     // 여기 이미 있으므로 번역기가 그 include를 건너뛴다 — 둘 다 펼치면
@@ -110,6 +137,12 @@ public enum ShaderPrelude {
     #define M_PI_2 6.28318530718
     #define SQRT_2 1.41421356237
     #define SQRT_3 1.73205080756
+
+    // `PerformLighting_V1`은 여기 없다 — `GLSLTranslator.syntheticLightingV1`이
+    // `#require LightingV1`을 만나면 진짜 광원 루프(빛 유니폼 선언 +
+    // `common_pbr_2.h`의 `Distribution_GGX`·`GeoSmith`·`FresnelSchlick`로 짠
+    // 쿡-토런스 BRDF)를 GLSL 텍스트로 끼워 넣는다. 여기서 MSL 스텁으로 두면
+    // 그 진짜 정의와 이름이 겹쳐 재정의 오류가 난다.
 
     inline float3 hsv2rgb(float3 c) {
         float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
@@ -183,25 +216,38 @@ public enum ShaderPrelude {
     /// `g_Texture0`과 샘플러 `g_Texture0Sampler` 둘로 쪼개고, 이 매크로가 둘을
     /// 다시 묶는다. 인자 이름 규칙이 매크로와 번역기 양쪽에 걸려 있다.
     public static let sampling = """
+    // `tex##Sampler`처럼 매크로 인자를 `##`로 바로 붙이면 **그 인자는 먼저
+    // 펼쳐지지 않는다**(C 전처리기 규칙) — 인자 자리에 `GRADIENT_SAMPLER`
+    // 같은 매크로 이름이 오면(`#define GRADIENT_SAMPLER g_Texture4`) `g_Texture4`로
+    // 안 바뀌고 `GRADIENT_SAMPLERSampler`라는 없는 식별자로 그대로 붙어 컴파일이
+    // 깨진다. 실물 `space boi.mdl`의 `generic3.frag`(`SHADINGGRADIENT` 콤보)로
+    // 확인했다. 한 단계를 더 두면(`WF_CAT`가 `WF_CAT_`를 부르기 전에 인자를
+    // 펼친다) 인자가 먼저 펼쳐진 뒤 붙는다 — 표준 두 단계 붙임(two-level paste)
+    // 우회다.
+    #define WF_CAT_(a, b) a##b
+    #define WF_CAT(a, b) WF_CAT_(a, b)
     #ifdef WF_FORCE_GREEN
     #define texSample2D(tex, uv) float4(0.0, 1.0, 0.0, 1.0)
     #elif defined(WF_SHOW_ALPHA)
     // 진단용: 샘플의 알파를 회색조로 그린다. 자홍이 나오던 자리가 검으면
     // 그 자리는 투명한 곳이고, 문제는 투명 영역의 RGB가 보이는 것이다.
     #define texSample2D(tex, uv) \
-        float4(float3(tex.sample(tex##Sampler, (uv)).a), 1.0)
+        float4(float3(tex.sample(WF_CAT(tex, Sampler), wfTo2(uv)).a), 1.0)
     #elif defined(WF_SHOW_UV)
     // 진단용: 샘플링 좌표를 색으로 그린다. 0~1이면 빨강-초록 그라데이션이 나온다.
     #define texSample2D(tex, uv) float4(saturate((uv).x), saturate((uv).y), 0.0, 1.0)
     #elif defined(WF_FIXED_UV)
     // 진단용: 좌표를 고정해 샘플링한다. 결과가 균일한 색이면 텍스처는 정상이고
     // 좌표가 문제다. 여기서도 자홍이면 텍스처 자체를 잘못 읽고 있는 것이다.
-    #define texSample2D(tex, uv) tex.sample(tex##Sampler, float2(0.5, 0.5))
+    #define texSample2D(tex, uv) tex.sample(WF_CAT(tex, Sampler), float2(0.5, 0.5))
     #else
-    #define texSample2D(tex, uv) tex.sample(tex##Sampler, (uv))
+    // 실물 `v_TexCoord`가 `vec4`로 선언되고 좌표는 `.xy`에만 채워지는 셰이더가
+    // 있다(clipping_mask). GLSL/HLSL은 함수 인자에서 폭이 넓은 쪽을 암묵적으로
+    // 잘라 받지만 `sample()`은 `float2`만 받는다 — `wfTo2`로 그 잘림을 흉내 낸다.
+    #define texSample2D(tex, uv) tex.sample(WF_CAT(tex, Sampler), wfTo2(uv))
     #endif
-    #define texSample2DLod(tex, uv, lod) tex.sample(tex##Sampler, (uv), level(lod))
-    #define texSample2DCompare(tex, uv, z) tex.sample(tex##Sampler, (uv))
+    #define texSample2DLod(tex, uv, lod) tex.sample(WF_CAT(tex, Sampler), wfTo2(uv), level(lod))
+    #define texSample2DCompare(tex, uv, z) tex.sample(WF_CAT(tex, Sampler), wfTo2(uv))
     """
 
     /// 번역기가 셰이더 앞에 붙이는 전체 조각.

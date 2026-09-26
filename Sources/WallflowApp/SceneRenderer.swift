@@ -52,6 +52,13 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         var scriptFrame: Int?
     }
     private var spriteSheetImages: [SpriteSheetImage] = []
+    /// 타임라인 키프레임 애니메이션(`layer.animations`)이 걸린 레이어. id로 찾는다 —
+    /// `applyPropertyAnimations`가 매 프레임 여기 있는 레이어만 훑는다.
+    private var animatedLayers: [Int: SceneLayer] = [:]
+    /// `animatedLayers`가 지금까지 흐른 시간(초). 파티클·스프라이트 시트와 같은
+    /// dt를 쓴다 — 멈췄다 재개할 때 `lastFrameTime`이 끊겨(`apply(.paused)`) dt가
+    /// 0으로 시작하므로, 여기도 한 번에 몰아 튀지 않는다.
+    private var animationClock: Double = 0
     /// 텍스트 레이어마다 스크립트와 구운 글자. 값이 바뀔 때만 다시 굽는다.
     private var texts: [TextState] = []
     /// 씬의 스크립트 전부를 돌리는 호스트. 스크립트가 없는 씬이면 nil이다.
@@ -86,7 +93,14 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     /// 레이어 id → 부모 id. 스크립트가 부모를 숨기면 자식도 숨긴다.
     private var parentOf: [Int: Int] = [:]
     /// 레이어에 걸린 이펙트 체인들. 매 프레임 컴포지터보다 먼저 그린다.
-    private var effectChains: [(chain: EffectChain, source: MTLTexture)] = []
+    /// `layerID`는 이 체인이 속한 레이어의 씬 id다 — 다른 체인이 이 레이어를
+    /// `_rt_imageLayerComposite_<id>_a/_b`로 참조할 때 그리기 순서를 맞추는 데 쓴다.
+    private var effectChains: [(chain: EffectChain, source: MTLTexture, layerID: Int)] = []
+    /// 레이어 id → 그 레이어의 "지금" 그림(이펙트 있으면 그 출력, 없으면 원본).
+    /// `_rt_imageLayerComposite_*` 참조가 이걸로 다른 레이어를 찾는다. 클로저인
+    /// 이유는 이펙트 체인의 결과가 매 프레임 바뀌기 때문이다(체인이 그 자체로
+    /// 최신 텍스처를 들고 있다).
+    private var layerOutputs: [Int: () -> MTLTexture?] = [:]
     /// 이펙트가 쓰는 `g_Time`. 씬을 켠 뒤 흐른 시간이다.
     private var effectStartTime: CFTimeInterval?
     /// 화면 전체 후처리. 입력이 "합성이 끝난 화면"이라 첫 프레임에야 만들 수 있다.
@@ -144,6 +158,9 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let clearColor: SIMD4<Float>
         let ambient: SIMD3<Float>
         let skylight: SIMD3<Float>
+        /// 씬의 `light` 오브젝트 전부. 위치는 부모 사슬까지 합친 `layer.origin`,
+        /// 방향은 `layer.angles`로 `ModelRenderer`가 구한다.
+        let lights: [(origin: Vec3, angles: Vec3, info: LightInfo)]
     }
 
     /// 스크립트 상태를 화면의 어디에 반영할지.
@@ -708,7 +725,30 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     degraded.append("스크립트가 만든 레이어를 세우지 못했다: \(state.asset ?? "?")")
                 }
             }
-            guard appliedStates[id] != state else { continue }
+            // 부모(그룹)를 스크립트가 옮겼으면(실물 "Clock Layer 1"의 드래그 스크립트가
+            // `thisLayer.origin`을 바꾼다) 자식의 화면 자리도 다시 구해야 한다.
+            // `ScriptTarget.parentOrigin/Scale/Rotation`은 씬을 열 때 한 번 굳는데,
+            // 그러면 그룹을 드래그해도 자식(시계 숫자·막대)이 안 따라간다.
+            // `snapshot.layers`는 스크립트가 없는 레이어도 포함한다(seed 그대로) —
+            // 파일 값과 같아 안전하다.
+            var parentMoved = false
+            if let parentID = parentOf[id] {
+                let live = SceneDocument.composeLiveTransform(of: parentID, parentOf: parentOf) { ancestorID in
+                    guard let s = snapshot.layers[ancestorID] else { return nil }
+                    return SceneDocument.LayerTransform(
+                        origin: s.origin, scale: s.scale, rotation: s.angles.z,
+                        alpha: s.alpha, visible: s.visible)
+                }
+                if let target = scriptTargets[id],
+                   target.parentOrigin != live.origin || target.parentScale != live.scale
+                    || target.parentRotation != live.rotation {
+                    parentMoved = true
+                }
+                scriptTargets[id]?.parentOrigin = live.origin
+                scriptTargets[id]?.parentScale = live.scale
+                scriptTargets[id]?.parentRotation = live.rotation
+            }
+            guard appliedStates[id] != state || parentMoved else { continue }
             appliedStates[id] = state
             let applied = applyScriptState(state, to: id)
             if Self.scriptDebug {
@@ -873,6 +913,125 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         return changed
     }
 
+    /// 씬 JSON의 타임라인 키프레임 애니메이션(`layer.animations`)을 매 프레임 반영한다.
+    ///
+    /// 스크립트가 같은 자리에 걸려 있으면 스크립트가 이긴다(WE와 같다) — 변환
+    /// (origin/angles/scale)과 색(alpha/color)을 한 묶음으로 본다. `quad.color`
+    /// 하나가 alpha·color·밝기를 같이 지고, `quad.origin/size/rotation`(또는
+    /// `.world`) 하나가 origin·angles·scale을 같이 지어서 반만 못 쓴다 — 묶음 안에
+    /// 스크립트가 하나라도 있으면 그 묶음 전체를 건드리지 않는다(스크립트 쪽
+    /// 값을 그대로 둔다).
+    ///
+    /// 글자·파티클은 각자 자리 갱신 경로가 따로 있어(구운 글자의 `text.origin`,
+    /// 파티클의 `layerOrigin`/`instance.alpha`) `applyScriptState`와 같은 자리를
+    /// 건드린다 — 글자는 T4가 구운 크기를 다시 재지 않고 상자 중심만 옮기고,
+    /// 파티클은 스크립트가 미는 것과 같은 필드(커서 계산용 layerOrigin, 알파는
+    /// `instanceoverride.alpha`)만 쓴다. 소리 전용 레이어는 그릴 쿼드가 없어
+    /// `target.indices`가 비어 있으므로 아래 루프가 저절로 아무 일도 하지 않는다.
+    private func applyPropertyAnimations(elapsed: Double) {
+        guard !animatedLayers.isEmpty, let context = buildContext else { return }
+        var changed = false
+        for (id, layer) in animatedLayers {
+            guard let target = scriptTargets[id] else { continue }
+            let transformScripted = layer.scripts.contains { ["origin", "angles", "scale"].contains($0.property) }
+            let colorScripted = layer.scripts.contains { ["alpha", "color"].contains($0.property) }
+
+            var origin = layer.localOrigin, angles = layer.angles, scale = layer.localScale
+            var touchesTransform = false
+            if !transformScripted {
+                if let a = layer.animations["origin"] {
+                    origin = a.vector(atSeconds: elapsed, base: origin); touchesTransform = true
+                }
+                if let a = layer.animations["angles"] {
+                    angles = a.vector(atSeconds: elapsed, base: angles); touchesTransform = true
+                }
+                if let a = layer.animations["scale"] {
+                    scale = a.vector(atSeconds: elapsed, base: scale); touchesTransform = true
+                }
+            }
+
+            var alpha = layer.alpha, tint = layer.tint, brightness = layer.brightness
+            var touchesColor = false
+            if !colorScripted {
+                if let a = layer.animations["alpha"] {
+                    alpha = a.scalar(atSeconds: elapsed, base: alpha); touchesColor = true
+                }
+                if let a = layer.animations["color"] {
+                    tint = a.vector(atSeconds: elapsed, base: tint); touchesColor = true
+                }
+            }
+            // 밝기는 스크립트가 걸 수 있는 자리가 아니다(`scriptableProperties`에 없다) —
+            // 스크립트 유무와 무관하게 늘 적용한다.
+            if let a = layer.animations["brightness"] {
+                brightness = a.scalar(atSeconds: elapsed, base: brightness); touchesColor = true
+            }
+
+            guard touchesTransform || touchesColor else { continue }
+            let world = target.composed(origin: origin, angles: angles, scale: scale)
+
+            // 글자는 T4가 구운 크기를 여기서 다시 재지 않는다 — 상자 중심(boxCenter)만
+            // 옮기고, 처음 세울 때 정해진 정렬 오프셋(origin - boxCenter)을 그대로
+            // 얹는다. 그래야 매 프레임 다시 굽지 않고도 자리만 움직인다(T4 회귀 금지).
+            if touchesTransform, let ti = target.textIndex, ti < texts.count {
+                let text = texts[ti]
+                let alignOffset = SIMD2(text.origin.x - text.boxCenter.x, text.origin.y - text.boxCenter.y)
+                text.boxCenter = SIMD2(Float(world.origin.x), Float(world.origin.y))
+                text.origin = text.boxCenter + alignOffset
+                text.worldOrigin = world.origin
+                text.worldAngles = world.anglesDegrees
+            }
+            // 파티클은 자기 draw가 커서 계산에 쓰는 layerOrigin을 따로 들고 있다
+            // (스크립트가 미는 자리와 같다 — `applyScriptState`의 particleIndex 분기 참고).
+            if touchesTransform, let pi = target.particleIndex, pi < particles.count {
+                particles[pi].layerOrigin = SIMD2(Float(world.origin.x), Float(world.origin.y))
+            }
+            // 파티클 알파는 스크립트가 미는 것과 같은 자리(`instanceoverride.alpha`)를 쓴다.
+            if touchesColor, let pi = target.particleIndex, pi < particles.count {
+                var instance = particles[pi].system.instance
+                if abs(instance.alpha - alpha) > 1e-9 {
+                    instance.alpha = alpha
+                    particles[pi].system.instance = instance
+                }
+            }
+
+            for index in target.indices where index < layerList.count {
+                var quad = layerList[index].0
+                if touchesColor {
+                    let b = Float(brightness)
+                    quad.color = SIMD4(
+                        Float(tint.x) * b, Float(tint.y) * b, Float(tint.z) * b,
+                        layer.visible ? Float(alpha) : 0)
+                }
+                if touchesTransform {
+                    if let ti = target.textIndex, ti < texts.count {
+                        let text = texts[ti]
+                        if context.isPerspective {
+                            quad.world = Scene3D.world(
+                                origin: world.origin, anglesDegrees: world.anglesDegrees,
+                                scale: Vec3(x: 1, y: 1, z: 1),
+                                size: Vec2(x: Double(text.size.x), y: Double(text.size.y)))
+                        } else {
+                            quad.origin = text.origin
+                            quad.size = text.size
+                        }
+                    } else if context.isPerspective {
+                        quad.world = Scene3D.world(
+                            origin: world.origin, anglesDegrees: world.anglesDegrees, scale: world.scale,
+                            size: target.unitWorld ? Vec2(x: 1, y: 1) : target.baseSize)
+                    } else {
+                        quad.origin = SIMD2(Float(world.origin.x), Float(world.origin.y))
+                        quad.size = SIMD2(Float(target.baseSize.x * world.scale.x),
+                                          Float(target.baseSize.y * world.scale.y))
+                        quad.rotation = Float(world.anglesDegrees.z * .pi / 180)
+                    }
+                }
+                layerList[index].0 = quad
+                changed = true
+            }
+        }
+        if changed { compositor?.setLayers(layerList) }
+    }
+
     /// 스크립트가 `createLayer(asset)`으로 만든 레이어를 세운다.
     private func spawnLayer(id: Int, asset: String) -> Bool {
         guard let context = buildContext,
@@ -971,11 +1130,18 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     }
 
     private func setAudioNeed(_ needed: Bool) {
-        let key = ObjectIdentifier(self)
-        let before = Self.audioNeeders.contains(key)
+        Self.setAudioNeeded(needed, for: ObjectIdentifier(self))
+    }
+
+    /// 씬이 아닌 다른 렌더러(웹)도 소리가 필요할 수 있다. 같은 창구를 쓴다 —
+    /// `WebRenderer`가 자기 신원으로 등록/해제한다. 키가 여럿이어도 하나라도
+    /// 필요하면(교집합이 비지 않으면) 캡처가 켜진다 — 씬끼리 공유하던 규칙
+    /// 그대로다.
+    static func setAudioNeeded(_ needed: Bool, for key: ObjectIdentifier) {
+        let before = audioNeeders.contains(key)
         guard before != needed else { return }
-        if needed { Self.audioNeeders.insert(key) } else { Self.audioNeeders.remove(key) }
-        Self.audioNeedChanged?(!Self.audioNeeders.isEmpty)
+        if needed { audioNeeders.insert(key) } else { audioNeeders.remove(key) }
+        audioNeedChanged?(!audioNeeders.isEmpty)
     }
 
     /// 진단용: 스크립트가 바꾼 레이어 상태를 틱마다 stderr에 쓴다.
@@ -1009,7 +1175,17 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         effectStartTime = start
         let time = Float(now - start)
         let bands = Self.audioBands
-        for entry in effectChains where entry.chain.isAnimated || isFirstFrame || !bands.isEmpty {
+        // 다른 체인의 결과를 읽는 체인이 있으면 그 체인을 먼저 그려야 한다.
+        // 문서 순서는 그리기 순서(뒤→앞)라 참조 대상이 오히려 나중에 나올 때가
+        // 있다(실물 음반 커버 씬 2938612768 — 커버 이미지가 겉 위젯보다 뒤에 있다).
+        // ponytail: 참조되는 체인을 앞으로 미는 한 단계짜리 partition이다.
+        // A가 B를 읽고 B가 C를 읽는 2단 연쇄까지는 순서를 못 맞춘다 — 실물
+        // 코퍼스의 참조 대상은 전부 이펙트가 없는(즉시 준비되는) 레이어라
+        // 이 정도로 충분하다. 다단 연쇄가 나오면 위상 정렬로 올린다.
+        let referenced = Set(effectChains.flatMap { $0.chain.referencedLayerIDs })
+        let ordered = referenced.isEmpty ? effectChains
+            : effectChains.sorted { referenced.contains($0.layerID) && !referenced.contains($1.layerID) }
+        for entry in ordered where entry.chain.isAnimated || isFirstFrame || !bands.isEmpty {
             entry.chain.audioBands = bands
             entry.chain.render(commandBuffer: commands, source: entry.source, time: time)
         }
@@ -1019,22 +1195,42 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private func renderComposition(
         _ id: Int, commands: MTLCommandBuffer, frame: MTLTexture
     ) -> MTLTexture? {
-        guard let layer = compositionLayers[id], let resolver = compositionResolver,
-              let device = compositor?.device else { return nil }
+        guard let layer = compositionLayers[id], let device = compositor?.device else { return nil }
+        // `copybackground: false`면 이 레이어는 화면을 안 받는다 — 이펙트 체인의
+        // 입구가 진짜 화면(`frame`) 대신 빈 투명 텍스처를 받는다. WE에서
+        // composelayer의 텍스처는 "그 지점까지 그려진 화면"이고 이펙트의 출력이
+        // 그 자리를 대신하는데(`renderComposition`이 없을 때 `frame`을 그대로
+        // 내는 것과 같은 규칙), `copybackground`가 꺼져 있으면 애초에 그 화면을
+        // 안 준다는 뜻이다. 실물 음반 커버 씬(3299228616)의 "Bar 3"가 이 경우다 —
+        // 오디오 바 이펙트는 (스타일이 안 맞아) 꺼져 있고 남은 `scroll` 이펙트는
+        // 알파를 전혀 안 건드린다. `frame`을 그대로 줬다면 시계 글자가 그려진
+        // 화면을 불투명하게 돌려줘 시계를 덮어 버린다 — 빈 텍스처를 주면 알파가
+        // 여전히 0으로 남아 투명하다.
+        let source = layer.copyBackground
+            ? frame : (Self.blankTransparent(like: frame, device: device, commands: commands) ?? frame)
+        // 이펙트가 없거나(편집기에서 꺼 뒀거나) 디버그로 이펙트를 껐으면 걸 것이
+        // 없다. 화면을 받는 레이어는 화면을 그대로 낸다(상자를 안 그리는 것과
+        // 다르게 틴트·블렌드모드는 호출자가 quad에서 이미 적용한다) — 화면을 안
+        // 받는 레이어는 낼 것 자체가 없으니 그린다.
+        guard !layer.effects.isEmpty, Self.effectsEnabled else {
+            return layer.copyBackground ? frame : nil
+        }
+        guard let resolver = compositionResolver else { return nil }
         if compositionChains[id] == nil {
             var ignored: [String] = []
             guard let chain = EffectChain(
                 device: device,
                 effects: layer.effects.map(\.definition),
                 effectBases: layer.effects.map(\.base),
-                source: frame, resolver: resolver, includes: compositionIncludes,
+                source: source, resolver: resolver, includes: compositionIncludes,
                 makeTexture: { [weak self] in
                     guard let compositor = self?.compositor else {
                         throw RendererError.noDrawableLayers
                     }
                     return try compositor.makeTexture(from: $0)
                 },
-                diagnostics: &ignored) else {
+                diagnostics: &ignored,
+                layerTexture: { [weak self] otherID in self?.layerOutputs[otherID]?() }) else {
                 // 한 번 실패하면 매 프레임 다시 시도하지 않는다.
                 compositionLayers[id] = nil
                 FileHandle.standardError.write(Data(
@@ -1051,8 +1247,29 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let start = effectStartTime ?? now
         effectStartTime = start
         chain.audioBands = Self.audioBands
-        chain.render(commandBuffer: commands, source: frame, time: Float(now - start))
+        chain.render(commandBuffer: commands, source: source, time: Float(now - start))
         return chain.texture
+    }
+
+    /// `frame`과 같은 크기의 빈 투명 텍스처를 만든다. `copybackground: false`인
+    /// 합성 레이어의 이펙트 체인 입구로 쓴다 — 진짜 화면이 아니라 아무것도
+    /// 그려지지 않은 빈 캔버스를 받아야 한다.
+    private static func blankTransparent(
+        like frame: MTLTexture, device: MTLDevice, commands: MTLCommandBuffer
+    ) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: frame.pixelFormat, width: frame.width, height: frame.height,
+            mipmapped: false)
+        descriptor.usage = [.shaderRead, .renderTarget]
+        descriptor.storageMode = .private
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        pass.colorAttachments[0].storeAction = .store
+        commands.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
+        return texture
     }
 
     /// 합성이 끝난 화면에 후처리를 건다.
@@ -1062,8 +1279,12 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
     private func renderPostProcess(
         _ commands: MTLCommandBuffer, frame: MTLTexture
     ) -> MTLTexture? {
-        guard let layer = postEffectSource, let resolver = postResolver,
-              let device = compositor?.device else { return nil }
+        guard let layer = postEffectSource else { return nil }
+        // 이펙트가 없으면(편집기에서 꺼 뒀거나 원래 없거나) 후처리는 아무 일도
+        // 안 하는 것이 맞다 — 화면을 그대로 낸다. 조용히 넘어간다, 걸지
+        // 못한 게 아니라 애초에 걸 것이 없기 때문이다.
+        guard !layer.effects.isEmpty else { return nil }
+        guard let resolver = postResolver, let device = compositor?.device else { return nil }
         if postEffects == nil {
             var ignored: [String] = []
             postEffects = EffectChain(
@@ -1077,7 +1298,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     }
                     return try compositor.makeTexture(from: $0)
                 },
-                diagnostics: &ignored)
+                diagnostics: &ignored,
+                layerTexture: { [weak self] otherID in self?.layerOutputs[otherID]?() })
             if postEffects != nil { updateAudioNeed() }
             if postEffects == nil {
                 // 한 번 실패하면 매 프레임 다시 시도하지 않는다.
@@ -1307,9 +1529,23 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let soundsBefore = sounds.count
         defer {
             // 스크립트가 이 레이어를 움직일 수 있게 어디에 뭐가 붙었는지 적어 둔다.
+            //
+            // `layer.scale`은 WE에서 뒤집힘(거울상)을 나타내려고 음수일 수 있다
+            // (실물 "Cat and bee"의 배경 전체를 덮는 단색 레이어가 scale
+            // (-17.9,-11.4,-17.9)다). `Swift.max(scale, 1e-9)`로 0나눔만 막으면
+            // 음수 scale이 전부 아주 작은 양수로 뭉개져 baseSize(=size/scale)가
+            // 수십억 배로 튄다 — 스크립트가 한 번이라도 이 레이어 상태를
+            // 적용하면(`applyScriptState`가 매 틱 `baseSize * world.scale`로
+            // 쿼드 크기를 다시 잰다) 그 거대한 값이 그대로 화면 크기가 되어
+            // 사실상 아무것도 안 그려진다. 캔버스를 덮어야 할 배경이 회색
+            // clearcolor로 남고, 시계·눈꺼풀 같은 검정 조각들만 도드라져 보이는
+            // 원인이 이거였다. 부호는 지키고 0에 가까운 크기만 밀어낸다.
+            func nonZeroScale(_ value: Double) -> Double {
+                value.magnitude < 1e-9 ? (value < 0 ? -1e-9 : 1e-9) : value
+            }
             var target = ScriptTarget(
-                baseSize: Vec2(x: layer.size.x / Swift.max(layer.scale.x, 1e-9),
-                               y: layer.size.y / Swift.max(layer.scale.y, 1e-9)),
+                baseSize: Vec2(x: layer.size.x / nonZeroScale(layer.scale.x),
+                               y: layer.size.y / nonZeroScale(layer.scale.y)),
                 brightness: Float(layer.brightness))
             target.indices = Array(firstIndex..<layerList.count)
             let parent = Self.parentTransform(of: layer)
@@ -1372,10 +1608,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             // 합성 레이어는 그 지점까지 그려진 화면이 입력이라, 체인을 여기서
             // 만들 수 없다(화면 텍스처가 아직 없다). 자리만 잡아 두고
             // 첫 프레임에 만든다. 오디오 막대가 이 형태다.
-            guard !layer.effects.isEmpty, Self.effectsEnabled else {
-                degraded.append("\(layer.name): 합성 레이어인데 걸 이펙트가 없다")
-                return
-            }
+            //
+            // 이펙트가 없어도(꺼져 있어도) 드롭하지 않는다 — WE에서 합성
+            // 레이어는 이펙트가 없으면 그 지점까지 그려진 화면을 그대로 내는
+            // 투명한 상자다. 통째로 안 그리면 틴트·블렌드모드까지 같이
+            // 사라진다(`renderComposition`이 이펙트 없을 때 화면을 그대로 낸다).
             compositionLayers[layerList.count] = layer
             layerList.append((quad, .composition(layerList.count)))
 
@@ -1397,8 +1634,10 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 source: blank, resolver: context.resolver,
                 includes: context.shaderIncludes,
                 makeTexture: { try context.compositor.makeTexture(from: $0) },
-                diagnostics: &degraded) {
-                effectChains.append((chain, blank))
+                diagnostics: &degraded,
+                layerTexture: { [weak self] id in self?.layerOutputs[id]?() }) {
+                effectChains.append((chain, blank, layer.id))
+                layerOutputs[layer.id] = { [weak chain] in chain?.texture }
                 layerList.append((quad, .dynamic { [weak chain] in chain?.texture }))
             } else {
                 layerList.append((quad, .solid(SIMD4(Float(c.x), Float(c.y), Float(c.z), 1))))
@@ -1463,8 +1702,14 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                         source: texture, resolver: context.resolver,
                         includes: context.shaderIncludes,
                         makeTexture: { try context.compositor.makeTexture(from: $0) },
-                        diagnostics: &degraded) {
-                        effectChains.append((chain, texture))
+                        diagnostics: &degraded,
+                        layerTexture: { [weak self] id in self?.layerOutputs[id]?() }) {
+                        effectChains.append((chain, texture, layer.id))
+                        // 다른 레이어가 이 레이어를
+                        // `_rt_imageLayerComposite_<id>_a/_b`로 참조할 수 있다
+                        // (실물 음반 커버 씬 — 커버 썸네일 레이어를 겉 위젯이
+                        // 이렇게 가리킨다). 이펙트가 있으니 그 출력을 내준다.
+                        layerOutputs[layer.id] = { [weak chain] in chain?.texture }
                         appendImage(quad, layer: layer, context: context,
                                     texture: texture, provider: { [weak chain] in chain?.texture })
                     } else {
@@ -1478,6 +1723,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                                 "\(layer.name): 이펙트 \(layer.effects.count)개를 걸지 못해 "
                                     + "원본 그대로 그린다")
                         }
+                        // 이펙트가 없거나 못 걸었으면 원본 그림이 "지금 결과"다.
+                        layerOutputs[layer.id] = { texture }
                         appendImage(quad, layer: layer, context: context,
                                     texture: texture, provider: nil)
                     }
@@ -1599,7 +1846,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     makeTexture: { try context.compositor.makeTexture(from: $0) },
                     sampler: context.compositor.sharedSampler,
                     eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
-                        clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight)
+                        clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight,
+                        lights: context.lights, hdr: context.compositor.hdr)
                 // 판의 크기는 size × scale 세계 단위다(실물 배경 구름 64 × 10).
                 quad.world = Scene3D.world(
                     origin: layer.origin,
@@ -1627,22 +1875,53 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                     skipped.append("\(layer.name): 메시에 재질이 없다: \(path)")
                     return
                 }
+                // 서브메시마다 재질·정점·색인만 다르고 나머지 재료(리졸버·조명 등)는
+                // 같아서 그 자리만 받는 얇은 클로저로 묶는다.
+                let makeRenderer = { (mesh: MDLModel, materialPath: String) in
+                    try ModelRenderer(
+                        device: context.compositor.device, model: mesh, materialPath: materialPath,
+                        resolver: context.resolver, includes: context.shaderIncludes,
+                        makeTexture: { try context.compositor.makeTexture(from: $0) },
+                        sampler: context.compositor.sharedSampler,
+                        eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
+                        clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight,
+                        lights: context.lights, hdr: context.compositor.hdr)
+                }
                 let materialPath = model.materials[min(skin, model.materials.count - 1)]
-                let renderer = try ModelRenderer(
-                    device: context.compositor.device, model: model, materialPath: materialPath,
-                    resolver: context.resolver, includes: context.shaderIncludes,
-                    makeTexture: { try context.compositor.makeTexture(from: $0) },
-                    sampler: context.compositor.sharedSampler,
-                    eye: { [weak context = context.compositor] in context?.cameraEye ?? .zero },
-                        clearColor: context.clearColor, ambient: context.ambient, skylight: context.skylight)
+                let renderer = try makeRenderer(model, materialPath)
                 quad.world = Scene3D.world(
                     origin: layer.origin,
                     anglesDegrees: Vec3(x: layer.angles.x, y: layer.angles.y, z: layer.rotation * 180 / .pi),
                     scale: layer.scale)
                 layerList.append((quad, .model(renderer)))
+                // `MDLV0017`은 서브메시가 여럿일 수 있다(실물 space boi가 둘) —
+                // 각자 자기 재질을 들고 있어 첫 서브메시와 다른 셰이더로 그릴 수
+                // 있으므로 렌더러를 따로 세워 같은 쿼드 자리에 겹쳐 그린다.
+                for submesh in model.extraSubmeshes {
+                    let extraModel = MDLModel(
+                        materials: model.materials, boneCount: model.boneCount,
+                        boundsMin: model.boundsMin, boundsMax: model.boundsMax,
+                        vertexData: submesh.vertexData, indices: submesh.indices)
+                    do {
+                        let extraRenderer = try makeRenderer(extraModel, submesh.materialPath)
+                        layerList.append((quad, .model(extraRenderer)))
+                    } catch {
+                        skipped.append("\(layer.name): 서브메시를 그리지 못한다: \(error)")
+                    }
+                }
             } catch {
                 skipped.append("\(layer.name): 3D 메시를 그리지 못한다: \(error)")
             }
+
+        case .group:
+            // 그룹·solid·카메라 자리표시자. 자식이 부모 변환만 받으면 되고
+            // 자신은 그릴 그림이 없다. 로그에 올릴 것도 없다.
+            break
+
+        case .light:
+            // 광원 자신은 그릴 그림이 없다 — `updateLights`가 씬 전체에서
+            // `.light` 레이어를 따로 모아 `ModelRenderer`에 먹인다.
+            break
 
         case .unsupported(let reason):
             skipped.append("\(layer.name): \(reason)")
@@ -1680,7 +1959,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         let document = try SceneDocument.load(
             from: reader, assets: assets, userOverrides: overrides, userTextures: userTextures)
 
-        let compositor = try MetalCompositor(device: device)
+        let compositor = try MetalCompositor(device: device, hdr: document.hdr)
         compositor.setProjection(width: document.orthoWidth, height: document.orthoHeight)
         // 첫 draw 전에도 커서 계산 등이 drawable 크기를 물어볼 수 있어 미리 준다.
         // draw(in:)이 매 프레임 다시 재므로 창 크기가 달라져도 스스로 맞는다.
@@ -1717,7 +1996,11 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             ambient: SIMD3(Float(document.ambientColor.x), Float(document.ambientColor.y),
                            Float(document.ambientColor.z)),
             skylight: SIMD3(Float(document.skylightColor.x), Float(document.skylightColor.y),
-                            Float(document.skylightColor.z)))
+                            Float(document.skylightColor.z)),
+            lights: document.layers.compactMap { layer in
+                guard case .light(let info) = layer.content else { return nil }
+                return (layer.origin, layer.angles, info)
+            })
         buildContext = context
         layerList = []
         // layerList의 인덱스를 들고 있다 — layerList와 같이 끊어야 다음 씬을
@@ -1743,9 +2026,20 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
 
         // 숨은 레이어도 스크립트가 있으면 세운다 — 스크립트가 나중에 보이게 할 수 있고,
         // 실물 원근 씬은 카메라·프리즘 로직을 숨은 레이어에 둔다. 알파 0으로 시작한다.
-        for layer in document.layers where layer.visible || !layer.scripts.isEmpty {
+        //
+        // `_rt_imageLayerComposite_<id>`로 다른 레이어의 이펙트가 참조하는
+        // 레이어도 세운다 — 실물 음반 커버 씬은 기본 커버 소스 레이어들을
+        // `visible: false`로 화면 밖에 숨겨 두고 텍스처만 꿔 준다. 안 세우면
+        // `layerOutputs`에 등록되지 않아 참조하는 쪽이 흰 placeholder를
+        // 받는다(배경 전체가 하얗게 뜨던 원인).
+        let referencedByEffects = EffectDefinition.referencedLayerIDs(in: document.layers)
+        for layer in document.layers
+        where layer.visible || !layer.scripts.isEmpty || referencedByEffects.contains(layer.id) {
             addLayer(layer, context: context)
         }
+        animatedLayers = Dictionary(
+            uniqueKeysWithValues: document.layers.filter { !$0.animations.isEmpty }.map { ($0.id, $0) })
+        animationClock = 0
 
         // 건너뛴 이유는 drawable이 비어 폴백하는 경우에 사용자가 가장 필요로 한다.
         // isEmpty 가드보다 먼저 써야 그 경로에서도 진단이 버려지지 않는다.
@@ -1811,6 +2105,14 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
                 self?.renderPostProcess(commands, frame: frame)
             }
         }
+        // `general.bloom`. 켠 적 없는 씬은 손대지 않는다(nil로 두면 컴포지터가
+        // 그 단계를 통째로 건너뛴다). HDR은 따로 걸 톤매핑 단계가 없어(오프스크린이
+        // 8비트다) 블룸으로 밝은 자리를 대신 드러낸다 — `MetalCompositor.BloomSettings`
+        // 문서 참고.
+        compositor.bloom = document.bloom
+            ? MetalCompositor.BloomSettings(
+                threshold: Float(document.bloomThreshold), strength: Float(document.bloomStrength))
+            : nil
         compositor.setLayers(layerList)
         self.compositor = compositor
 
@@ -1875,7 +2177,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             hasText: !texts.isEmpty,
             hasAnimatedEffect: effectChains.contains { $0.chain.isAnimated },
             hasScriptHost: scriptHost != nil, hasPuppets: !puppets.isEmpty,
-            hasAnimatedImage: !spriteSheetImages.isEmpty)
+            hasAnimatedImage: !spriteSheetImages.isEmpty,
+            hasPropertyAnimations: !animatedLayers.isEmpty)
     }
 
     func apply(_ directive: PlaybackDirective) {
@@ -1914,6 +2217,8 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         sounds.removeAll()
         particles.removeAll()
         spriteSheetImages.removeAll()
+        animatedLayers.removeAll()
+        animationClock = 0
         texts.removeAll()
         puppets.removeAll()
         puppetStartTime = nil
@@ -1972,17 +2277,21 @@ extension SceneRenderer: MTKViewDelegate {
             puppetStartTime = start
             for puppet in puppets { puppet.update(time: now - start) }
         }
-        // 파티클과 스프라이트 시트 이미지가 dt를 함께 쓴다 — 같은 프레임이면
-        // 같은 dt여야 한다. 첫 프레임(또는 막 재생을 재개한 프레임)은 직전 시각이
-        // 없다. 0을 넘기면 그만큼 멈춰 있던 시간이 한 번에 적분되지 않는다
-        // (`apply(.paused)`가 lastFrameTime을 nil로 끊어 둔다).
+        // 파티클·스프라이트 시트 이미지·타임라인 애니메이션이 dt를 함께 쓴다 —
+        // 같은 프레임이면 같은 dt여야 한다. 첫 프레임(또는 막 재생을 재개한
+        // 프레임)은 직전 시각이 없다. 0을 넘기면 그만큼 멈춰 있던 시간이 한
+        // 번에 적분되지 않는다(`apply(.paused)`가 lastFrameTime을 nil로 끊어 둔다).
         let dt: CFTimeInterval
-        if !particles.isEmpty || !spriteSheetImages.isEmpty {
+        if !particles.isEmpty || !spriteSheetImages.isEmpty || !animatedLayers.isEmpty {
             let now = CACurrentMediaTime()
             dt = lastFrameTime.map { now - $0 } ?? 0
             lastFrameTime = now
         } else {
             dt = 0
+        }
+        if !animatedLayers.isEmpty {
+            animationClock += dt
+            applyPropertyAnimations(elapsed: animationClock)
         }
         if !particles.isEmpty {
             // 커서를 씬 좌표로 옮긴다. 제어점이 마우스를 따라가는 프리셋이

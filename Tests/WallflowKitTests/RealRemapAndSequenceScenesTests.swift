@@ -41,7 +41,7 @@ final class RealRemapAndSequenceScenesTests: XCTestCase {
         for layer in document.layers {
             guard case .particle(let preset, _, _, _, _) = layer.content else { continue }
             if preset.operators.contains(where: {
-                if case .remapValue(.speed, _, _, _, _) = $0 { return true }
+                if case .remapValue(.speed, _, _, _, _, _) = $0 { return true }
                 return false
             }) {
                 sawSpeedRemap = true

@@ -53,6 +53,10 @@ final class ModelRenderer {
     /// 씬의 `ambientcolor`·`skylightcolor`.
     private let ambient: SIMD3<Float>
     private let skylight: SIMD3<Float>
+    /// 씬의 점광·방향광 하나씩(있으면). `PerformLighting_V1`(`generic4` 등)이나
+    /// `generic3`의 인라인 광원 루프를 먹인다.
+    private let pointLight: (origin: Vec3, angles: Vec3, info: LightInfo)?
+    private let directionalLight: (origin: Vec3, angles: Vec3, info: LightInfo)?
 
     var needsBackground: Bool { !backgroundSlots.isEmpty }
     func setBackground(_ texture: MTLTexture?) { background = texture }
@@ -69,7 +73,13 @@ final class ModelRenderer {
         sampler: MTLSamplerState, eye: @escaping () -> SIMD3<Float>,
         clearColor: SIMD4<Float> = SIMD4(0, 0, 0, 1),
         ambient: SIMD3<Float> = SIMD3(repeating: 0.302),
-        skylight: SIMD3<Float> = SIMD3(repeating: 1)
+        skylight: SIMD3<Float> = SIMD3(repeating: 1),
+        lights: [(origin: Vec3, angles: Vec3, info: LightInfo)] = [],
+        /// 씬의 `general.hdr`. 켜져 있으면 재질 셰이더의 `HDR` 콤보를 켜고
+        /// (`common_pbr_2.h`의 `CombineLighting` `#if HDR` 분기 — 밝기를 곱하고
+        /// 이미시브 오버브라이트를 더한다), 파이프라인 색 포맷을 `rgba16Float`로
+        /// 만들어 그 값이 1을 넘어도 오프스크린에서 안 잘리게 한다.
+        hdr: Bool = false
     ) throws {
         self.ambient = ambient
         self.skylight = skylight
@@ -130,6 +140,21 @@ final class ModelRenderer {
                   sceneTextures[texture.index] != nil else { continue }
             combos[combo] = 1
         }
+        // 점광·방향광 하나씩만 먹인다. `g_LPoint_Color[LIGHTS_POINT]`는 배열
+        // 크기를 모르는 유니폼이라 `UniformPacker`가 원소 하나 자리만 잡는다
+        // (`GLSLTranslator.declared(in:)` 문서 참고) — 그 이상을 담으면
+        // 버퍼 밖을 쓴다. 여러 빛을 쓰려면 패커부터 배열 크기를 실제 콤보값으로
+        // 아는 쪽으로 고쳐야 한다.
+        let pointLight = lights.first { $0.info.kind == .point }
+        let directionalLight = lights.first { $0.info.kind == .directional }
+        if pointLight != nil { combos["LIGHTS_POINT"] = 1 }
+        if directionalLight != nil { combos["LIGHTS_DIRECTIONAL"] = 1 }
+        // `#define HDR 0`은 절대 넣지 않는다 — `common_blending.h`는 `#ifdef HDR`를
+        // 쓰므로, 0을 정의하면 정의 자체가 있다는 뜻이 되어 비HDR 씬의 동작이
+        // 바뀐다. 값을 안 주는 것과 0을 주는 것이 다르다.
+        if hdr { combos["HDR"] = 1 }
+        self.pointLight = pointLight
+        self.directionalLight = directionalLight
         let defines = combos.sorted { $0.key < $1.key }
             .map { "#define \($0.key) \($0.value)\n" }.joined()
         let vertexLibrary = try device.makeLibrary(source: defines + vertex.source, options: nil)
@@ -143,7 +168,7 @@ final class ModelRenderer {
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = vertexFunction
         descriptor.fragmentFunction = fragmentFunction
-        descriptor.colorAttachments[0].pixelFormat = MetalCompositor.colorPixelFormat
+        descriptor.colorAttachments[0].pixelFormat = hdr ? .rgba16Float : MetalCompositor.colorPixelFormat
         descriptor.colorAttachments[0].isBlendingEnabled = true
         descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
         descriptor.colorAttachments[0].destinationRGBBlendFactor =
@@ -159,7 +184,16 @@ final class ModelRenderer {
                 vertexDescriptor.attributes[attribute.slot].bufferIndex = 1
             } else {
                 // 메시에 없는 속성. 0으로 채운 버퍼를 한 자리에서 계속 읽게 한다.
-                vertexDescriptor.attributes[attribute.slot].format = .float4
+                //
+                // **포맷은 셰이더가 선언한 타입을 따라야 한다.** 여기서 무조건
+                // `.float4`를 쓰면, `#if SKINNING` 블록의 `a_BlendIndices`(GLSL
+                // `uvec4` → MSL `uint4`)처럼 정수 타입 속성에서 Metal이 파이프라인
+                // 생성 자체를 거부한다("... of type uint4 cannot be read using
+                // MTLAttributeFormatFloat4") — SKINNING이 실제로 꺼져 있어도,
+                // 번역기가 `#if`와 무관하게 선언을 전부 걷어 내므로 이 속성 자체는
+                // 항상 나타난다(실물 Star1/2/3·Earth4 등, generic3/4 계열 전부).
+                vertexDescriptor.attributes[attribute.slot].format =
+                    Self.zeroFillFormat(for: attribute.type)
                 vertexDescriptor.attributes[attribute.slot].offset = 0
                 vertexDescriptor.attributes[attribute.slot].bufferIndex = 2
                 usesZero = true
@@ -177,7 +211,7 @@ final class ModelRenderer {
         guard let vb = model.vertexData.withUnsafeBytes({ raw in
                   device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: []) }),
               let ib = model.indices.withUnsafeBytes({ raw in
-                  device.makeBuffer(bytes: raw.baseAddress!, length: max(raw.count, 2), options: []) }),
+                  device.makeBuffer(bytes: raw.baseAddress!, length: max(raw.count, 4), options: []) }),
               let zero = device.makeBuffer(length: 16, options: []) else {
             throw CompositorError.bufferAllocationFailed
         }
@@ -230,7 +264,8 @@ final class ModelRenderer {
         var values: [String: [Float]] = [:]
         for uniform in uniforms {
             guard let field = layout.field(named: uniform.name) else { continue }
-            let constant = uniform.materialKey.flatMap { constants[$0] }
+            // 재질 키 대소문자 어긋남은 `EffectConstant.lookup` 문서 참고.
+            let constant = uniform.materialKey.flatMap { EffectConstant.lookup(materialKey: $0, in: constants) }
                 ?? uniform.defaultValue.flatMap { EffectConstant.parse($0) }
             if let constant { values[uniform.name] = constant.components(field.count) }
         }
@@ -260,6 +295,28 @@ final class ModelRenderer {
         }
     }
 
+    /// 메시에 없는 속성을 0-버퍼로 채울 때 쓰는 포맷. GLSL 선언 타입(번역기가
+    /// 돌려주는 `attribute.type`, 예: `uvec4`·`vec3`)을 그대로 따라가야 한다 —
+    /// 0은 어느 타입으로 읽어도 0이라 값은 안 바뀌지만, **포맷 자체가 셰이더의
+    /// 선언과 안 맞으면 Metal이 파이프라인을 통째로 거부한다.**
+    static func zeroFillFormat(for glslType: String) -> MTLVertexFormat {
+        switch glslType {
+        case "float": return .float
+        case "vec2": return .float2
+        case "vec3": return .float3
+        case "vec4": return .float4
+        case "int": return .int
+        case "ivec2": return .int2
+        case "ivec3": return .int3
+        case "ivec4": return .int4
+        case "uint": return .uint
+        case "uvec2": return .uint2
+        case "uvec3": return .uint3
+        case "uvec4": return .uint4
+        default: return .float4
+        }
+    }
+
     private static func makePixel(device: MTLDevice, color: SIMD4<Float>) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
@@ -279,17 +336,45 @@ final class ModelRenderer {
         return [t.columns.0, t.columns.1, t.columns.2, t.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] }
     }
 
+    private static func linear3x3(_ world: simd_float4x4) -> simd_float3x3 {
+        simd_float3x3(
+            SIMD3(world.columns.0.x, world.columns.0.y, world.columns.0.z),
+            SIMD3(world.columns.1.x, world.columns.1.y, world.columns.1.z),
+            SIMD3(world.columns.2.x, world.columns.2.y, world.columns.2.z))
+    }
+
+    /// `g_NormalModelMatrix`(`mat3`, `generic4.vert`가 `mul(localNormal, ...)`로
+    /// 쓴다). world의 3x3(선형) 부분의 **역행렬**을 준다 — 전치는 안 한다.
+    ///
+    /// 이유: 보통 표기(열벡터 `M*v`)에서 법선은 `(M^-1)^T * n`으로 옮긴다(비균등
+    /// 배율에서 법선이 안 비뚤어지려면 역전치가 필요하다). 그런데 이 셰이더는
+    /// 행벡터 관례라 `n * G`로 곱한다 — `v*G`는 `G^T*v`(열벡터)와 같으므로,
+    /// `G^T = (M^-1)^T`가 되려면 `G = M^-1`이어야 한다. `Self.floats(world)`가
+    /// `g_ModelMatrix`에 전치를 **한 번만** 넣는 것과 같은 이유(같은 행벡터
+    /// 관례)다. 이 유니폼을 빼먹으면(예전에 그랬다) 값이 0인 행렬로 남아
+    /// `normalize(vec3(0))`가 NaN을 내고, 그 NaN이 조명 전체에 번져 구가 텍스처
+    /// 없이 새하얗게 뜬다 — 토성 구가 그렇게 뜬 진짜 원인 중 하나였다(남은
+    /// 밝기 편차는 별개 사안이다. 아래 커밋 메시지 참고).
+    private static func normalMatrixFloats(_ world: simd_float4x4) -> [Float] {
+        let m3 = linear3x3(world)
+        // 특이 행렬(배율 0)은 못 뒤집는다 — 항등으로 물러나 NaN을 안 낸다.
+        let inv = abs(simd_determinant(m3)) > 1e-8 ? simd_inverse(m3) : matrix_identity_float3x3
+        return [inv.columns.0, inv.columns.1, inv.columns.2].flatMap { [$0.x, $0.y, $0.z] }
+    }
+
     func encode(into encoder: MTLRenderCommandEncoder, world: simd_float4x4,
                 viewProjection: simd_float4x4, alpha: Float, time: Float) {
         guard indexCount > 0 else { return }
         if needsBackground, background == nil { return }
         let eye = eyeProvider()
-        let engine: [String: [Float]] = [
+        var engine: [String: [Float]] = [
             "g_ModelMatrix": Self.floats(world),
+            "g_NormalModelMatrix": Self.normalMatrixFloats(world),
             "g_ViewProjectionMatrix": Self.floats(viewProjection),
             "g_ModelViewProjectionMatrix": Self.floats(viewProjection * world),
             "g_EyePosition": [eye.x, eye.y, eye.z],
-            // 조명 레이어는 아직 없다. 원점의 빛 넷 — 실물 씬도 빛 레이어가 없다.
+            // `g_LightsPosition`은 옛 셰이더(`PerformLighting_Deprecated` 이전)의
+            // 자리라 실물 어디서도 안 쓴다 — 0으로만 채워 둔다.
             "g_LightsPosition": [Float](repeating: 0, count: 12),
             "g_LightAmbientColor": [ambient.x, ambient.y, ambient.z],
             "g_LightSkylightColor": [skylight.x, skylight.y, skylight.z],
@@ -298,6 +383,21 @@ final class ModelRenderer {
             "g_TexelSizeHalf": [0.5 / 1920, 0.5 / 1080],
             "g_TexelSize": [1.0 / 1920, 1.0 / 1080],
         ]
+        // `PerformLighting_V1`·`generic3`의 인라인 루프가 읽는 빛 유니폼.
+        // `.rgb`에 밝기를 미리 곱한다 — `wfComputePBRLight`가 `.w`를 안 읽는다.
+        if let pointLight {
+            let c = pointLight.info.color, i = Float(pointLight.info.intensity)
+            engine["g_LPoint_Color"] = [Float(c.x) * i, Float(c.y) * i, Float(c.z) * i, 0]
+            engine["g_LPoint_Origin"] = [
+                Float(pointLight.origin.x), Float(pointLight.origin.y), Float(pointLight.origin.z), 0,
+            ]
+        }
+        if let directionalLight {
+            let c = directionalLight.info.color, i = Float(directionalLight.info.intensity)
+            let d = directionalLight.info.direction
+            engine["g_LDirectional_Color"] = [Float(c.x) * i, Float(c.y) * i, Float(c.z) * i, 0]
+            engine["g_LDirectional_Direction"] = [Float(d.x), Float(d.y), Float(d.z), 0]
+        }
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 1)
         encoder.setVertexBuffer(zeroBuffer, offset: 0, index: 2)
@@ -324,7 +424,10 @@ final class ModelRenderer {
             encoder.setFragmentTexture(texture, index: slot.index)
             encoder.setFragmentSamplerState(sampler, index: slot.index)
         }
-        encoder.drawIndexedPrimitives(type: .triangle, indexCount: indexCount, indexType: .uint16,
+        // `MDLModel.indices`가 이제 늘 4바이트다(정점 65,536개 넘는 실물이 있어서 —
+        // `MDLModel.swift` 문서 참고). 작은 메시도 그냥 4바이트로 통일해 쓴다 —
+        // 몇 KB 아끼자고 폭을 또 가르면 여기서 다시 어긋날 자리가 생긴다.
+        encoder.drawIndexedPrimitives(type: .triangle, indexCount: indexCount, indexType: .uint32,
                                       indexBuffer: indexBuffer, indexBufferOffset: 0)
     }
 }

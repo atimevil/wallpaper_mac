@@ -33,6 +33,106 @@ public enum GLSLTranslator {
     /// 프리앰블이 이미 담고 있는 헤더들. 다시 펼치면 중복 정의가 된다.
     static let preludeHeaders: Set<String> = ["common.h"]
 
+    /// `#require LightingV1`이 실제로 필요로 하는 것. 실물 7개(`generic4`·
+    /// `chroma4`·`fur4`·`foliage4`·`genericparticle`·`genericimage4`·
+    /// `genericropeparticle`)가 `PerformLighting_V1`을 부르는데 정의가 셰이더
+    /// 파일 어디에도 없다 — WE 엔진이 씬의 빛 개수에 맞춰 이 함수와 빛 유니폼을
+    /// 링크 시점에 만들어 붙이는 자리다. 우리는 그 자리를 직접 만든다.
+    ///
+    /// **근거.** `generic3.frag`가 자기 안에 `PerformLighting_Deprecated`라는
+    /// 같은 일을 하는 함수를 두고 있고, 그 몸통이 정확히 이 꼴이다(빛 종류별
+    /// `#if LIGHTS_*` 루프 + `ComputePBRLight`). `ComputePBRLight` 자체는
+    /// `common_pbr.h`에 있는데, `PerformLighting_V1`을 부르는 7개는 전부 그 대신
+    /// `common_pbr_2.h`를 include한다 — 그 헤더엔 `FresnelSchlick`·
+    /// `Distribution_GGX`·`Schlick_GGX`·`GeoSmith`·`PointSegmentDelta`까지 같은
+    /// 이름으로 다 있지만 `ComputePBRLight`로 감싼 것만 없다. 그래서 그 함수의
+    /// 몸통(쿡-토런스 BRDF, 역제곱 감쇠)을 `common_pbr.h`에서 그대로 옮기고
+    /// 이름만 바꿔(`wfComputePBRLight`, `ComputePBRLight`와의 재정의 충돌을
+    /// 피하려고) 썼다. 빛 유니폼 선언도 `generic3.frag`가 쓰는 것과 글자
+    /// 그대로다 — 재질의 `combos`가 실제 빛 개수를 `LIGHTS_POINT` 등으로 주면
+    /// `#if`가 그 갯수만큼 켜진다. **가정한 것:** `GRADIENT_SAMPLER`·
+    /// `RIMLIGHTING`·그림자(`ComputePBRLightShadow`)는 뺐다 — 이 7개 파일의
+    /// 실제 재질에서 그 콤보가 켜진 예가 없었고, 그림자 맵 파이프라인 자체가
+    /// 아직 없다.
+    static let syntheticLightingV1 = """
+    #if LIGHTS_POINT
+    uniform vec4 g_LPoint_Color[LIGHTS_POINT];
+    uniform vec4 g_LPoint_Origin[LIGHTS_POINT];
+    #endif
+    #if LIGHTS_SPOT
+    uniform vec4 g_LSpot_Color[LIGHTS_SPOT];
+    uniform vec4 g_LSpot_Origin[LIGHTS_SPOT];
+    uniform vec4 g_LSpot_Direction[LIGHTS_SPOT];
+    #endif
+    #if LIGHTS_TUBE
+    uniform vec4 g_LTube_Color[LIGHTS_TUBE];
+    uniform vec4 g_LTube_OriginA[LIGHTS_TUBE];
+    uniform vec4 g_LTube_OriginB[LIGHTS_TUBE];
+    #endif
+    #if LIGHTS_DIRECTIONAL
+    uniform vec4 g_LDirectional_Color[LIGHTS_DIRECTIONAL];
+    uniform vec4 g_LDirectional_Direction[LIGHTS_DIRECTIONAL];
+    #endif
+
+    vec3 wfComputePBRLight(vec3 N, vec3 L, vec3 V, vec3 albedo, vec3 lightColor,
+        vec3 baseReflectance, float roughness, float metallic)
+    {
+        float wfLightDist = length(L);
+        L = L / wfLightDist;
+        vec3 H = normalize(V + L);
+        float NDF = Distribution_GGX(N, H, roughness);
+        float G = GeoSmith(N, V, L, roughness);
+        vec3 F = FresnelSchlick(max(dot(H, V), 0.0), baseReflectance);
+        vec3 numerator = NDF * G * F;
+        float NL = max(dot(N, L), 0.0);
+        float denominator = 4.0 * max(dot(N, V), 0.0) * NL;
+        vec3 specular = numerator / max(denominator, 0.001);
+        vec3 diffuse = (1.0 - metallic) * (CAST3(1.0) - F);
+        vec3 radiance = lightColor.xyz / (wfLightDist * wfLightDist);
+        return (diffuse * albedo / M_PI + specular) * radiance * NL;
+    }
+
+    vec3 PerformLighting_V1(vec3 worldPos, vec3 albedo, vec3 normal, vec3 viewVector,
+        vec3 specularTint, vec3 f0, float roughness, float metallic)
+    {
+        vec3 light = CAST3(0.0);
+    #if LIGHTS_POINT
+        for (uint l = 0u; l < CASTU(LIGHTS_POINT); ++l)
+        {
+            vec3 lightDelta = g_LPoint_Origin[l].xyz - worldPos;
+            light += wfComputePBRLight(normal, lightDelta, viewVector, albedo,
+                g_LPoint_Color[l].rgb, f0, roughness, metallic);
+        }
+    #endif
+    #if LIGHTS_SPOT
+        for (uint l = 0u; l < CASTU(LIGHTS_SPOT); ++l)
+        {
+            vec3 lightDelta = g_LSpot_Origin[l].xyz - worldPos;
+            float spotCookie = -dot(normalize(lightDelta), g_LSpot_Direction[l].xyz);
+            spotCookie = smoothstep(g_LSpot_Direction[l].w, g_LSpot_Origin[l].w, spotCookie);
+            light += wfComputePBRLight(normal, lightDelta, viewVector, albedo,
+                g_LSpot_Color[l].rgb * spotCookie, f0, roughness, metallic);
+        }
+    #endif
+    #if LIGHTS_TUBE
+        for (uint l = 0u; l < CASTU(LIGHTS_TUBE); ++l)
+        {
+            vec3 lightDelta = PointSegmentDelta(worldPos, g_LTube_OriginA[l].xyz, g_LTube_OriginB[l].xyz);
+            light += wfComputePBRLight(normal, lightDelta, viewVector, albedo,
+                g_LTube_Color[l].rgb, f0, roughness, metallic);
+        }
+    #endif
+    #if LIGHTS_DIRECTIONAL
+        for (uint l = 0u; l < CASTU(LIGHTS_DIRECTIONAL); ++l)
+        {
+            light += wfComputePBRLight(normal, g_LDirectional_Direction[l].xyz, viewVector, albedo,
+                g_LDirectional_Color[l].rgb, f0, roughness, metallic);
+        }
+    #endif
+        return light;
+    }
+    """
+
     /// 유니폼 하나. 씬이 주는 값과 이어 붙일 근거가 여기 다 있다.
     public struct Uniform: Equatable, Sendable {
         public let name: String
@@ -44,6 +144,21 @@ public enum GLSLTranslator {
         public let defaultValue: String?
         /// 배열이면 그 길이. `uniform float g_AudioSpectrum32Left[32]`가 이 꼴이다.
         public let count: Int?
+        /// 배열 크기가 숫자가 아니라 매크로일 때(`uniform mat4x3 g_Bones[BONECOUNT]`).
+        /// 재질의 `combos`가 이 이름에 값을 준다 — `count`와 동시에 차지 않는다.
+        public let sizeMacro: String?
+
+        public init(
+            name: String, type: String, materialKey: String? = nil, defaultValue: String? = nil,
+            count: Int? = nil, sizeMacro: String? = nil
+        ) {
+            self.name = name
+            self.type = type
+            self.materialKey = materialKey
+            self.defaultValue = defaultValue
+            self.count = count
+            self.sizeMacro = sizeMacro
+        }
     }
 
     public struct Texture: Equatable, Sendable {
@@ -102,10 +217,15 @@ public enum GLSLTranslator {
         let combos = comboDefaults(in: expanded)
         let annotations = uniformAnnotations(in: expanded)
         let stripped = strippingComments(expanded)
-        let modulo = rewritingModulo(stripped)
+        let precisionStripped = strippingPrecisionQualifiers(stripped)
+        let definesFixed = strippingStrayDefineSemicolons(precisionStripped)
+        let inoutFixed = rewritingInoutSwizzleCalls(definesFixed)
+        let modulo = rewritingModulo(inoutFixed)
         let renamed = rewritingReservedIdentifiers(modulo)
         let arrays = rewritingArrayConstructors(renamed)
-        let truncated = rewritingTruncation(arrays)
+        let aliased = rewritingInferredSizeArrayAliases(arrays)
+        let subscripted = rewritingFloatArraySubscripts(aliased)
+        let truncated = rewritingTruncation(subscripted)
         let qualified = rewritingParameterQualifiers(truncated)
         let parsed = parseDeclarations(qualified, annotations: annotations)
         return try assemble(parsed, stage: stage, entryPoint: entryPoint, combos: combos)
@@ -135,7 +255,19 @@ public enum GLSLTranslator {
         for line in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             // `#require`는 WE가 편집기에서 쓰는 지시자다. Metal은 모른다.
-            if trimmed.hasPrefix("#require") { out.append(""); continue }
+            // `LightingV1`만 예외다 — 엔진이 씬의 빛 개수에 맞춰 링크 시점에
+            // `PerformLighting_V1`을 만들어 붙이는 자리인데, 그 몸통이 셰이더
+            // 파일 어디에도 없다(`syntheticLightingV1` 참고). `#include`처럼
+            // 한 번만 펼친다.
+            if trimmed.hasPrefix("#require") {
+                if trimmed.contains("LightingV1"), !seen.contains("LightingV1") {
+                    seen.insert("LightingV1")
+                    out.append(syntheticLightingV1)
+                } else {
+                    out.append("")
+                }
+                continue
+            }
             guard trimmed.hasPrefix("#include") else { out.append(String(line)); continue }
             guard let name = quotedName(in: trimmed) else { out.append(""); continue }
             // 같은 헤더를 두 번 펼치면 함수가 중복 정의된다. 순환도 여기서 끊긴다.
@@ -195,19 +327,67 @@ public enum GLSLTranslator {
     static func comboDefaults(in source: String) -> [(String, Int)] {
         var out: [(String, Int)] = []
         var seen: Set<String> = []
+        // 배열 크기 자리에 쓰이는 매크로 전부(주석이 있든 없든). C++은 배열 크기
+        // 0을 안 받는다("zero-length arrays are not permitted") — `[COMBO]`
+        // 주석은 있는데 `"default"`가 없어 0으로 떨어지는 것도 있다(실물
+        // `shadowcaster.vert`의 `BONECOUNT`). 이 이름들은 끝에서 최소 1로 올린다.
+        var arraySizeMacros: Set<String> = []
         for line in source.split(whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix("//"), trimmed.contains("[COMBO]"),
-                  let braceStart = trimmed.firstIndex(of: "{"),
-                  let braceEnd = trimmed.lastIndex(of: "}"), braceStart < braceEnd,
-                  let data = String(trimmed[braceStart...braceEnd]).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let name = object["combo"] as? String, !name.isEmpty, !seen.contains(name)
+            guard trimmed.hasPrefix("uniform"), trimmed.hasSuffix(";"),
+                  let (_, count, macro) = declared(in: trimmed), count == nil, let macro
             else { continue }
-            seen.insert(name)
-            out.append((name, (object["default"] as? NSNumber)?.intValue ?? 0))
+            arraySizeMacros.insert(macro)
         }
-        return out
+        for line in source.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("//"), trimmed.contains("[COMBO]"),
+               let braceStart = trimmed.firstIndex(of: "{"),
+               let braceEnd = trimmed.lastIndex(of: "}"), braceStart < braceEnd,
+               let data = String(trimmed[braceStart...braceEnd]).data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let name = object["combo"] as? String, !name.isEmpty, !seen.contains(name) {
+                seen.insert(name)
+                out.append((name, (object["default"] as? NSNumber)?.intValue ?? 0))
+                continue
+            }
+            // `uniform sampler2D g_Texture8; // {"formatcombo":true, ...}`처럼
+            // 이름이 아니라 텍스처 슬롯에 붙는 콤보도 있다 — 이름은 늘
+            // `TEX<슬롯>FORMAT`이다(실물 `fur4.frag`의 `TEX8FORMAT`). 실제로
+            // 묶이는 텍스처의 진짜 포맷은 로드 시점에만 아는데, 지금 디코더는
+            // 그걸 셰이더에 넘기지 않는다 — 0(그대로 통과, `ConvertTextureFormat`이
+            // 변환 없이 원본을 돌려주는 값)을 기본값으로 둔다.
+            if trimmed.hasPrefix("uniform"), trimmed.contains("sampler2D"),
+               trimmed.contains("\"formatcombo\":true"), let commentStart = trimmed.range(of: "//"),
+               let name = declaredName(in: String(trimmed[..<commentStart.lowerBound])),
+               let slot = textureSlot(for: name) {
+                let comboName = "TEX\(slot)FORMAT"
+                if !seen.contains(comboName) {
+                    seen.insert(comboName)
+                    out.append((comboName, 0))
+                }
+                continue
+            }
+            // `uniform vec4 g_LPoint_Color[LIGHTS_POINT];`처럼 배열 크기 자리에
+            // 매크로 이름을 쓰는데 `[COMBO]` 주석이 아예 없는 경우도 있다(실물
+            // `generic3.frag`의 `LIGHTS_POINT`·`LIGHTS_SPOT`·`LIGHTS_TUBE`·
+            // `LIGHTS_DIRECTIONAL`). 기본값을 안 주면 선언 자체가 "정의 안 된
+            // 식별자"로 떨어진다 — 우선 0으로 등록해 두고, 끝에서 배열 크기
+            // 매크로는 전부 최소 1로 올린다. 씬이 그 유니폼에 값을 준 적이 없어
+            // 항상 0으로 비어 있으므로(`UniformPacker`의 기본값), 빛 개수가 1이
+            // 되어도 보태는 빛은 색이 0인 빛 하나뿐이라 그림은 그대로다.
+            if trimmed.hasPrefix("uniform"), trimmed.hasSuffix(";"),
+               let (_, count, macro) = declared(in: trimmed), count == nil, let macro,
+               !seen.contains(macro) {
+                seen.insert(macro)
+                out.append((macro, 0))
+            }
+        }
+        // `[COMBO]` 주석은 있지만 `"default"`가 없어 0으로 떨어진 것까지 포함해,
+        // 배열 크기로 쓰이는 매크로는 전부 여기서 최소 1로 올린다.
+        return out.map { name, value in
+            arraySizeMacros.contains(name) ? (name, max(value, 1)) : (name, value)
+        }
     }
 
     /// `uniform vec3 g_EyeColor;`에서 `g_EyeColor`.
@@ -219,19 +399,31 @@ public enum GLSLTranslator {
     /// 크기 13이다. 크기를 버리면 구조체 멤버가 `float2` 하나가 되어
     /// `v_TexCoord[0] = vec2(...)`가 벡터 성분에 벡터를 넣는 꼴이 된다 —
     /// 실물 블러 계열 18개가 이 때문에 떨어졌다.
-    static func declared(in declaration: String) -> (name: String, count: Int?)? {
+    ///
+    /// 크기가 숫자가 아니라 매크로 이름(`uniform mat4x3 g_Bones[BONECOUNT]`,
+    /// `uniform vec4 g_BlendMap[BLENDROWCOUNT]`)일 수도 있다 — 재질의 `combos`가
+    /// 그 매크로를 값으로 준다(`#define BONECOUNT 64` 식으로 미리 붙는다).
+    /// `count`는 숫자일 때만 채우고, 매크로 이름은 `sizeMacro`에 그대로 담는다.
+    static func declared(
+        in declaration: String
+    ) -> (name: String, count: Int?, sizeMacro: String?)? {
         let cleaned = declaration.replacingOccurrences(of: ";", with: " ")
         let words = cleaned.split(whereSeparator: \.isWhitespace)
         // `uniform` `타입` `이름` 순서다.
         guard words.count >= 3 else { return nil }
         let third = String(words[2])
         guard let bracket = third.firstIndex(of: "[") else {
-            return third.isEmpty ? nil : (third, nil)
+            return third.isEmpty ? nil : (third, nil, nil)
         }
         let name = String(third[..<bracket])
-        let inside = third[third.index(after: bracket)...].prefix { $0.isNumber }
-        guard !name.isEmpty else { return nil }
-        return (name, Int(inside))
+        guard let closeBracket = third[bracket...].firstIndex(of: "]") else { return nil }
+        let inside = third[third.index(after: bracket)..<closeBracket]
+        guard !name.isEmpty, !inside.isEmpty else { return nil }
+        if let count = Int(inside) { return (name, count, nil) }
+        // 매크로 이름다운지만 본다 — 식별자 글자만 있어야 한다.
+        guard inside.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }),
+              inside.first?.isNumber == false else { return nil }
+        return (name, nil, String(inside))
     }
 
     /// 줄 주석과 블록 주석을 지운다. 문자열 리터럴은 셰이더에 없다.
@@ -266,6 +458,102 @@ public enum GLSLTranslator {
         return out
     }
 
+    /// GLSL ES의 정밀도 한정자(`lowp`/`mediump`/`highp`)를 지운다. MSL엔 없는
+    /// 낱말이라 `unknown type name`으로 떨어질 뿐 아니라, `attribute mediump vec2
+    /// a_TexCoord`처럼 타입 앞에 끼면 `declared(in:)`가 `mediump`를 타입으로,
+    /// `vec2`를 이름으로 잘못 읽는다(실물 `fade.vert` 등 7개). 값은 안 바뀐다 —
+    /// Metal 셰이더는 정밀도를 따로 안 가른다.
+    static func strippingPrecisionQualifiers(_ source: String) -> String {
+        let qualifiers: Set<String> = ["lowp", "mediump", "highp"]
+        var out = ""
+        out.reserveCapacity(source.count)
+        var word = ""
+        func flush() {
+            if !qualifiers.contains(word) { out += word }
+            word = ""
+        }
+        for character in source {
+            if character.isLetter || character.isNumber || character == "_" {
+                word.append(character)
+            } else {
+                flush()
+                out.append(character)
+            }
+        }
+        flush()
+        return out
+    }
+
+    /// `#define mask 1.0;`처럼 몸통에 군더더기 `;`가 붙은 한 줄짜리 매크로가
+    /// 실물에 있다(crt_screen). `float opacity = wfTo1(u_alpha * mask);`로
+    /// 감싸고 나면 그 `;`가 펼쳐지면서 감싼 괄호 **안에서** 문장이 끝나 버려
+    /// 통째로 떨어진다. 함수형 매크로(`#define F(x) ...`)는 건드리지 않는다 —
+    /// 괄호 안의 `;`는 do/while 관용구처럼 의도한 것일 수 있다.
+    static func strippingStrayDefineSemicolons(_ source: String) -> String {
+        var out: [String] = []
+        for rawLine in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            let line = String(rawLine)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("#define"), trimmed.hasSuffix(";") else {
+                out.append(line); continue
+            }
+            let afterDefine = trimmed.dropFirst("#define".count)
+                .drop { $0 == " " || $0 == "\t" }
+            // 매크로 이름 바로 뒤가 `(`면 함수형 매크로다 — 손대지 않는다.
+            let name = afterDefine.prefix { $0.isLetter || $0.isNumber || $0 == "_" }
+            guard afterDefine.dropFirst(name.count).first != "(" else {
+                out.append(line); continue
+            }
+            var fixed = line
+            fixed.removeLast()
+            out.append(fixed)
+        }
+        return out.joined(separator: "\n")
+    }
+
+    /// `inout`/`out` 인자를 벡터 성분(`gl_FragColor.a`)으로 부르는 호출을 임시
+    /// 변수로 감싼다.
+    ///
+    /// `void ApplyAlphaToCoverage(inout float alpha)`처럼 값을 되돌려주는 인자는
+    /// MSL에서 `thread float&`가 된다. Metal은 **벡터 성분에 참조를 못 묶는다**
+    /// (`gl_FragColor.a`, `c[3]` 전부) — 직접 확인했다: `bump(c[3])`도 "non-const
+    /// reference cannot bind to vector element"로 떨어진다. 실물 `chroma4`·
+    /// `foliage4`·`fur4.frag`가 `ApplyAlphaToCoverage(gl_FragColor.a);`로 이렇게
+    /// 부른다. 함수 이름을 하드코딩하지 않는다 — 정의에서 `out`/`inout`이 있는
+    /// 이름을 걷어(정의에만 그 낱말이 나온다) 그 이름을 부르는 자리를 전부 고친다.
+    static func rewritingInoutSwizzleCalls(_ source: String) -> String {
+        let definitionPattern = try! NSRegularExpression(
+            pattern: #"([A-Za-z_]\w*)\s*\([^)]*\b(?:out|inout)\b"#)
+        var inoutFunctions: Set<String> = []
+        let fullRange = NSRange(source.startIndex..., in: source)
+        for match in definitionPattern.matches(in: source, range: fullRange) {
+            guard let range = Range(match.range(at: 1), in: source) else { continue }
+            inoutFunctions.insert(String(source[range]))
+        }
+        guard !inoutFunctions.isEmpty else { return source }
+
+        var out: [String] = []
+        for rawLine in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            let line = String(rawLine)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasSuffix(");"), trimmed.filter({ $0 == ";" }).count == 1,
+                  let open = trimmed.firstIndex(of: "(") else { out.append(line); continue }
+            let name = String(trimmed[..<open])
+            guard inoutFunctions.contains(name) else { out.append(line); continue }
+            let closeIndex = trimmed.index(trimmed.endIndex, offsetBy: -2)
+            let argsText = String(trimmed[trimmed.index(after: open)..<closeIndex])
+            // 인자 하나에, 그게 벡터 성분(`x.a`)일 때만 고친다 — 그 밖의 호출은
+            // 참조 바인딩 문제가 없어 손댈 이유가 없다.
+            guard !argsText.contains(","), swizzleWidth(argsText) != nil else {
+                out.append(line); continue
+            }
+            let indent = line.prefix { $0 == " " || $0 == "\t" }
+            out.append(
+                "\(indent){ auto wfRef = \(argsText); \(name)(wfRef); \(argsText) = wfRef; }")
+        }
+        return out.joined(separator: "\n")
+    }
+
     /// WE의 셰이더 컴파일러는 HLSL식 **암묵적 벡터 절단**을 허용한다.
     /// 실물이 이렇게 쓴다:
     /// ```glsl
@@ -290,61 +578,103 @@ public enum GLSLTranslator {
                 .split(whereSeparator: \.isWhitespace).map(String.init)
             guard words.count >= 3, words[0] == "varying",
                   let width = widths[words[1]], !words[2].contains("[") else { continue }
-            varyingWidth[words[2]] = width
+            // `#if`/`#else` 양쪽에 같은 이름이 다른 타입으로 선언된 실물이 있다
+            // (`generic.vert`의 `v_TexCoord`: vec4 다음 vec2). `parseDeclarations`가
+            // 먼저 나온 선언을 구조체에 남기므로, 여기서도 먼저 온 것을 지킨다 —
+            // 나중 것으로 덮으면 구조체의 진짜 타입(vec4)과 여기서 계산한 폭(vec2)이
+            // 어긋나 `wfTo2`로 감싼 값을 vec4 멤버에 대입하다 떨어진다.
+            if varyingWidth[words[2]] == nil { varyingWidth[words[2]] = width }
         }
+        // varying·uniform과, 폭을 알아낼 수 있는 `#define` 상수까지. 식 안쪽에서
+        // 폭이 다른 전역 둘이 바로 섞이는 자리(HLSL 암묵적 절단, pixelate·
+        // clipping_mask 이펙트)를 고치는 데 쓴다.
+        let identifierWidth = declaredIdentifierWidths(in: source)
 
         var out: [String] = []
         for rawLine in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
             let line = String(rawLine)
-            guard let rewritten = wrappedInitializer(line, widths: widths,
-                                                     varyingWidth: varyingWidth)
+            guard let rewritten = wrappedInitializer(
+                line, widths: widths, varyingWidth: varyingWidth, identifierWidth: identifierWidth)
             else { out.append(line); continue }
             out.append(rewritten)
         }
         return out.joined(separator: "\n")
     }
 
-    /// 한 줄이 `TYPE NAME = EXPR;`이거나 `VARYING = EXPR;`이면 EXPR을 감싼다.
-    /// 아니면 nil.
+    /// `name`이 `v.xy`·`albedo.rgb`처럼 스위즐로 끝나면 그 길이가 곧 폭이다 —
+    /// 밑의 식이 무엇이든(지역 변수든 varying이든) 스위즐 자체가 정한다.
+    private static func swizzleWidth(_ name: String) -> Int? {
+        guard let lastDot = name.lastIndex(of: "."), lastDot != name.startIndex else { return nil }
+        let suffix = name[name.index(after: lastDot)...]
+        let swizzleLetters: Set<Character> = ["x", "y", "z", "w", "r", "g", "b", "a"]
+        guard (1...4).contains(suffix.count), suffix.allSatisfy({ swizzleLetters.contains($0) })
+        else { return nil }
+        return suffix.count
+    }
+
+    /// 대입의 왼쪽 `lhs`(`TYPE NAME`·`NAME`·`NAME.swizzle`)에서 받는 쪽 폭을 찾는다.
+    /// `allowDeclaration`이 거짓이면 `TYPE NAME` 꼴(새 선언)은 인정하지 않는다 —
+    /// 복합 대입(`+=` 등)의 왼쪽은 반드시 **이미 있는** 변수라 새 선언일 수 없다.
+    private static func assignmentTargetWidth(
+        _ lhs: String, widths: [String: Int], varyingWidth: [String: Int],
+        allowDeclaration: Bool
+    ) -> Int? {
+        var lhsWords = lhs.split(whereSeparator: \.isWhitespace).map(String.init)
+        if lhsWords.first == "const" { lhsWords.removeFirst() }
+        switch lhsWords.count {
+        case 2 where allowDeclaration:
+            // `TYPE NAME`. 이름에 `[`가 있으면 배열 선언이다.
+            guard !lhsWords[1].contains("[") else { return nil }
+            return widths[lhsWords[0]]
+        case 1:
+            // `NAME`이나 `NAME.swizzle`. 첨자(`[0]`)는 받는 쪽 타입이 달라 건너뛴다.
+            guard !lhsWords[0].contains("[") else { return nil }
+            return varyingWidth[lhsWords[0]] ?? swizzleWidth(lhsWords[0])
+        default:
+            return nil
+        }
+    }
+
+    /// 한 줄이 `TYPE NAME = EXPR;`·`VARYING = EXPR;`·`NAME.swizzle = EXPR;`거나
+    /// 그 복합 대입(`*=`·`+=`·`-=`·`/=`)이면 EXPR을 감싼다. 아니면 nil.
     private static func wrappedInitializer(
-        _ line: String, widths: [String: Int], varyingWidth: [String: Int]
+        _ line: String, widths: [String: Int], varyingWidth: [String: Int],
+        identifierWidth: [String: Int]
     ) -> String? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         // 한 문장만 다룬다. `;`가 둘이면 for 머리이거나 두 문장이다.
         guard trimmed.hasSuffix(";"), trimmed.filter({ $0 == ";" }).count == 1,
               !trimmed.contains("wfTo"), !trimmed.hasPrefix("#"),
               let equals = trimmed.firstIndex(of: "=") else { return nil }
-        // `==`, `<=`, `+=` 같은 것은 대입이 아니다.
+        // `==`, `<=` 같은 것은 대입이 아니다.
         let afterEquals = trimmed.index(after: equals)
         guard afterEquals < trimmed.endIndex, trimmed[afterEquals] != "=" else { return nil }
         let before = trimmed.index(before: equals)
-        guard !"+-*/<>!&|^%".contains(trimmed[before]) else { return nil }
+        let beforeChar = trimmed[before]
+        guard !"<>!&|^%".contains(beforeChar) else { return nil }
 
-        let lhs = trimmed[..<equals].trimmingCharacters(in: .whitespaces)
+        // `*=`·`+=`·`-=`·`/=`는 받는 쪽이 `=` 앞의 연산자 한 글자 전까지다.
+        // `albedo.rgb *= g_Color4 * max(...)`(puppettexturechannels 이펙트)가 이 꼴이다.
+        let isCompound = "+-*/".contains(beforeChar)
+        let lhs = String(trimmed[..<(isCompound ? before : equals)])
+            .trimmingCharacters(in: .whitespaces)
+        guard let width = assignmentTargetWidth(
+            lhs, widths: widths, varyingWidth: varyingWidth, allowDeclaration: !isCompound)
+        else { return nil }
+
         var rhs = trimmed[afterEquals...].trimmingCharacters(in: .whitespaces)
         rhs.removeLast()  // `;`
         // 배열 초기화와 빈 값은 건드리지 않는다.
         guard !rhs.isEmpty, !rhs.hasPrefix("{"), !topLevelCommaOrAssignment(in: rhs) else {
             return nil
         }
-
-        var lhsWords = lhs.split(whereSeparator: \.isWhitespace).map(String.init)
-        if lhsWords.first == "const" { lhsWords.removeFirst() }
-        let width: Int
-        switch lhsWords.count {
-        case 2:
-            // `TYPE NAME`. 이름에 `[`가 있으면 배열 선언이다.
-            guard let w = widths[lhsWords[0]], !lhsWords[1].contains("[") else { return nil }
-            width = w
-        case 1:
-            // `NAME`. 스위즐(`v.xy = …`)이나 첨자는 받는 쪽 타입이 달라 건너뛴다.
-            guard let w = varyingWidth[lhsWords[0]] else { return nil }
-            width = w
-        default:
-            return nil
-        }
+        // 식 안쪽에서 폭이 다른 전역끼리 바로 섞이는 자리를 먼저 고친다. 바깥
+        // `wfTo\(width)(...)`는 받는 쪽(LHS) 하나만 보므로, `v_TexCoord - texScaleCenter`
+        // 처럼 안쪽 뺄셈 자체가 이미 Metal에서 타입 불일치인 경우를 못 잡는다.
+        let (fixedRhs, _) = rewriteWithWidth(rhs, widths: identifierWidth)
         let indent = line.prefix { $0 == " " || $0 == "\t" }
-        return "\(indent)\(lhs) = wfTo\(width)(\(rhs));"
+        let op = isCompound ? "\(beforeChar)=" : "="
+        return "\(indent)\(lhs) \(op) wfTo\(width)(\(fixedRhs));"
     }
 
     /// 괄호 밖에 `,`나 `=`가 있는지. `float a = 1, b = 2;`나 `a = b = c;`는
@@ -438,6 +768,70 @@ public enum GLSLTranslator {
         return String(characters)
     }
 
+    /// `TYPE NAME[] = EXPR;`(GLSL의 크기 추론 배열 별칭)을 참조로 바꾼다.
+    ///
+    /// 실물 오디오 막대 이펙트가 `float g_AudioSpectrumLeft[] = g_AudioSpectrum32Left;`
+    /// 로 32/64/16짜리 유니폼 배열 중 하나를 짧은 이름에 잇는다. C++엔 이런 초기화가
+    /// 없다("array initializer must be an initializer list") — 직접 검증해 보니
+    /// `thread auto&`(주소 공간을 밝힌 참조)로 바꾸면 통과한다. `auto`라 크기·
+    /// 원소 타입을 몰라도 된다.
+    static func rewritingInferredSizeArrayAliases(_ source: String) -> String {
+        var out: [String] = []
+        for rawLine in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            let line = String(rawLine)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasSuffix(";"), trimmed.filter({ $0 == ";" }).count == 1,
+                  let equals = trimmed.firstIndex(of: "=") else { out.append(line); continue }
+            let lhs = trimmed[..<equals].trimmingCharacters(in: .whitespaces)
+            let words = lhs.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard words.count == 2, words[1].hasSuffix("[]") else { out.append(line); continue }
+            let name = String(words[1].dropLast(2))
+            var rhs = trimmed[trimmed.index(after: equals)...].trimmingCharacters(in: .whitespaces)
+            rhs.removeLast()  // `;`
+            let indent = line.prefix { $0 == " " || $0 == "\t" }
+            out.append("\(indent)thread auto& \(name) = \(rhs);")
+        }
+        return out.joined(separator: "\n")
+    }
+
+    /// 배열 첨자에 소수점이 있으면 `int(...)`로 감싼다.
+    ///
+    /// HLSL은 `arr[a_BlendIndices.x / 4.0]`처럼 나눗셈이 낀 첨자도 받아 암묵적으로
+    /// 정수로 자른다(실물 puppettexturechannels.vert). C++은 첨자가 정수 타입이어야
+    /// 한다("array subscript is not an integer"). 소수점이 있는 첨자만 골라 감싼다 —
+    /// `[32]`·`[BONECOUNT]`처럼 선언 자리의 배열 크기는 소수점이 없어 안 건드린다.
+    static func rewritingFloatArraySubscripts(_ source: String) -> String {
+        var out: [Character] = []
+        let characters = Array(source)
+        var index = 0
+        while index < characters.count {
+            guard characters[index] == "[" else {
+                out.append(characters[index]); index += 1; continue
+            }
+            var depth = 0
+            var end = index
+            while end < characters.count {
+                if characters[end] == "[" { depth += 1 }
+                if characters[end] == "]" {
+                    depth -= 1
+                    if depth == 0 { break }
+                }
+                end += 1
+            }
+            guard end < characters.count else {
+                out.append(characters[index]); index += 1; continue
+            }
+            let inner = String(characters[(index + 1)..<end])
+            if inner.contains(".") {
+                out.append(contentsOf: "[int(\(inner))]")
+            } else {
+                out.append(contentsOf: "[\(inner)]")
+            }
+            index = end + 1
+        }
+        return String(out)
+    }
+
     /// `a % b`를 `wfMod(a, b)` 호출로 바꾼다.
     ///
     /// HLSL은 실수에도 `%`를 쓴다 — 실물 오디오 막대 셰이더가
@@ -478,6 +872,254 @@ public enum GLSLTranslator {
             out.append(contentsOf: "wfMod(\(String(left)), \(right))")
         }
         return String(out)
+    }
+
+    /// `round(v_PixelCoord) * v_PixelSize`처럼 폭이 다른 varying/uniform 둘을
+    /// 연산자 하나로 바로 묶는 실물이 있다(pixelate 이펙트, `vec2 * vec4`).
+    /// HLSL은 이런 이항 연산에서도 넓은 쪽을 조용히 잘라 좁은 쪽에 맞춘다.
+    /// C++/Metal은 크기가 다른 벡터끼리 연산자를 아예 허용하지 않는다.
+    ///
+    /// `rewritingTruncation`의 감싸기는 **받는 쪽**(선언·대입의 왼쪽)만 본다 — 식
+    /// 안쪽에서 벌어지는 이 불일치는 못 잡는다. 여기서는 연산자 바로 양옆(피연산자
+    /// 하나씩, `%` 재작성과 같은 방식으로 괄호까지 통째로 집는다)의 폭을 실제로
+    /// 비교해서, 다를 때만 넓은 쪽을 좁힌다 — `length(a - b)`처럼 폭이 같은
+    /// 자리는 건드리지 않으므로 그 결과(스칼라)를 다시 잘못 좁히지 않는다.
+    /// `varying`·`uniform` 선언과, 폭을 알아낼 수 있는 `#define` 상수의 이름 → 폭(1~4).
+    /// 배열·행렬·샘플러는 뺀다.
+    ///
+    /// 실물 clipping_mask 이펙트가 `#define texScaleCenter (u_texScaleCenter * 2.0 - 1.0)`
+    /// 처럼 uniform을 그대로 감싼 매크로를 만들고, 그 매크로를 `v_TexCoord`(vec4)와
+    /// 바로 섞어 쓴다. `#define`은 위에서 아래로 먼저 온 것부터 펼쳐지므로,
+    /// 한 줄씩 내려가며 지금까지 안 이름으로 다음 매크로의 폭을 잰다.
+    static func declaredIdentifierWidths(in source: String) -> [String: Int] {
+        let typeWidths = ["float": 1, "vec2": 2, "vec3": 3, "vec4": 4]
+        var out: [String: Int] = [:]
+        for line in source.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("#define") {
+                let afterDefine = trimmed.dropFirst("#define".count)
+                    .drop { $0 == " " || $0 == "\t" }
+                let name = String(afterDefine.prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+                let rest = afterDefine.dropFirst(name.count)
+                // 함수형 매크로(`NAME(args) ...`)는 인자마다 폭이 다를 수 있어 건너뛴다.
+                guard !name.isEmpty, rest.first != "(" else { continue }
+                if let width = rewriteWithWidth(String(rest), widths: out).width { out[name] = width }
+                continue
+            }
+            let words = trimmed.replacingOccurrences(of: ";", with: " ")
+                .split(whereSeparator: \.isWhitespace).map(String.init)
+            if words.count >= 3, ["varying", "uniform"].contains(words[0]),
+               let width = typeWidths[words[1]], !words[2].contains("[") {
+                if out[words[2]] == nil { out[words[2]] = width }  // 먼저 온 선언이 이긴다.
+                continue
+            }
+            // 지역 변수 선언(`vec3 newAlbedo = ...;`, `float mask = ...;`)도 잰다 —
+            // `mix(albedo, newAlbedo, mask)`(hue_shift 이펙트)처럼 인자가 전부
+            // 지역이면 전역만 보는 스캔으론 폭을 하나도 못 알아낸다. 이름 바로 뒤가
+            // `=`나 `;`여야 한다 — `(`면 함수 정의(`vec3 f(...)`)라 건너뛴다.
+            if words.count >= 2, let width = typeWidths[words[0]] {
+                let name = String(words[1].prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+                let isPlainDeclaration = !name.isEmpty && words[1].dropFirst(name.count).first != "("
+                if isPlainDeclaration, out[name] == nil { out[name] = width }
+            }
+        }
+        return out
+    }
+
+    /// 폭이 다른 전역 둘이 식 안에서 바로 섞이는 자리(HLSL 암묵적 절단)를 찾아
+    /// 넓은 쪽을 `wfToN`으로 좁힌다.
+    ///
+    /// `rewritingTruncation`의 감싸기는 **받는 쪽**(선언·대입의 왼쪽)만 본다 —
+    /// `v_TexCoord*2.0-1.0-texScaleCenter`처럼 실제 불일치가 여러 항을 지나서야
+    /// 나타나면(clipping_mask 이펙트, vec4 - vec2) 못 잡는다. 연산자 하나만
+    /// 보는 게 아니라 `+`/`-`(낮은 우선순위)부터 `*`/`/`까지 실제 계산 순서를 따라
+    /// 왼쪽 결합으로 접으면서 HLSL의 규칙(스칼라는 투명, 벡터끼리 폭이 다르면
+    /// 좁은 쪽에 맞춘다)을 그대로 재현한다. 폭을 모르는 자리는 손대지 않는다
+    /// (nil을 그대로 전파) — 확신 없는 곳을 고치면 오히려 새 버그가 된다
+    /// (`length(a - b)`의 `a - b`처럼 폭이 같은 자리를 잘못 좁히면 그렇게 된다).
+    static func rewriteWithWidth(
+        _ expression: String, widths: [String: Int]
+    ) -> (text: String, width: Int?) {
+        let trimmed = expression.trimmingCharacters(in: .whitespaces)
+        if let segments = splitTopLevel(trimmed, operators: Set("+-")) {
+            return foldChain(segments, widths: widths)
+        }
+        if let segments = splitTopLevel(trimmed, operators: Set("*/")) {
+            return foldChain(segments, widths: widths)
+        }
+        if trimmed.hasPrefix("("), trimmed.hasSuffix(")"), isSingleParenGroup(trimmed) {
+            let inner = String(trimmed.dropFirst().dropLast())
+            let (text, width) = rewriteWithWidth(inner, widths: widths)
+            return ("(\(text))", width)
+        }
+        if trimmed.hasSuffix(")"), let open = trimmed.firstIndex(of: "(") {
+            let name = String(trimmed[..<open])
+            let argsText = String(
+                trimmed[trimmed.index(after: open)..<trimmed.index(before: trimmed.endIndex)])
+            let argSegments = splitTopLevel(argsText, operators: Set(","))
+                ?? [(text: argsText, op: "")]
+            let rewrittenArgs = argSegments.map { rewriteWithWidth($0.text, widths: widths) }
+            // GLSL 내장 중 인자가 **서로 같은 폭이어야만 하는** 것들만 맞춘다
+            // (`mix(albedo, newAlbedo, mask)`처럼, hue_shift·procedural_noise 이펙트).
+            // `rotateVec2(v, angle)`처럼 인자마다 역할이 다른(폭이 달라도 되는)
+            // 함수까지 맞추면 `g_Direction`(스칼라 각도)을 보고 `vec2(0,1)`을
+            // `wfTo1`로 깎아 호출 자체를 바꿔 버린다(실물 waterwaves 이펙트가
+            // 이렇게 깨졌었다) — 그래서 이름을 딱 이 목록으로만 좁힌다.
+            // 인자는 **저마다 따로** 감싼다 — `foldChain`처럼 왼쪽으로 누적해
+            // 감싸면 `wfTo1(a, b)`처럼 인자 둘이 하나로 뭉개져 호출이 깨진다
+            // (실물 blurRadial13a가 처음엔 이렇게 떨어졌었다).
+            let homogeneousArgFunctions: Set<String> = [
+                "mix", "lerp", "clamp", "min", "max", "step", "smoothstep",
+            ]
+            let text: String
+            if homogeneousArgFunctions.contains(name) {
+                // 폭 0(리터럴)·1(`float`)은 스칼라라 맞출 대상에서 뺀다 —
+                // `clamp(v, 0.0, 1.0)`의 `0.0`·`1.0`을 건드리면 안 된다.
+                let knownWidths = Set(rewrittenArgs.compactMap { $0.width }.filter { $0 > 1 })
+                if let target = knownWidths.min(), knownWidths.contains(where: { $0 != target }) {
+                    let wrapped = rewrittenArgs.map { arg -> String in
+                        guard let width = arg.width, width > target else { return arg.text }
+                        return "wfTo\(target)(\(arg.text))"
+                    }
+                    text = "\(name)(\(wrapped.joined(separator: ", ")))"
+                } else {
+                    text = "\(name)(\(rewrittenArgs.map(\.text).joined(separator: ", ")))"
+                }
+            } else {
+                text = "\(name)(\(rewrittenArgs.map(\.text).joined(separator: ", ")))"
+            }
+            let elementwiseUnary: Set<String> = [
+                "round", "floor", "ceil", "fract", "frac", "abs", "sign",
+                "normalize", "saturate", "trunc",
+            ]
+            if rewrittenArgs.count == 1, elementwiseUnary.contains(name) {
+                return (text, rewrittenArgs[0].width)
+            }
+            if ["vec2", "vec3", "vec4", "CAST2", "CAST3", "CAST4"].contains(name) {
+                return (text, name.hasSuffix("2") ? 2 : name.hasSuffix("3") ? 3 : 4)
+            }
+            // `CASTF(x)`/`CASTU(x)`는 스칼라로 깎는 WE 매크로다.
+            if ["CASTF", "CASTU"].contains(name) { return (text, 0) }
+            return (text, nil)
+        }
+        // 숫자 리터럴은 스칼라다 — 벡터 어느 폭과 섞여도 걸리지 않는다(폭 0으로 표시).
+        if !trimmed.isEmpty, trimmed.allSatisfy({ $0.isNumber || $0 == "." }) {
+            return (trimmed, 0)
+        }
+        // 스위즐(`.rgb`·`.xy`)은 그 자체로 폭을 정한다 — 밑의 식이 뭐든 상관없다.
+        // `albedo.rgb`·`v_TexCoord.xy`가 이 꼴이다(editorpaintbrush·hue_shift 등).
+        if let lastDot = trimmed.lastIndex(of: "."), lastDot != trimmed.startIndex {
+            let suffix = trimmed[trimmed.index(after: lastDot)...]
+            let swizzleLetters: Set<Character> = ["x", "y", "z", "w", "r", "g", "b", "a"]
+            if (1...4).contains(suffix.count), suffix.allSatisfy({ swizzleLetters.contains($0) }) {
+                return (trimmed, suffix.count)
+            }
+        }
+        if let width = widths[trimmed] { return (trimmed, width) }
+        return (trimmed, nil)
+    }
+
+    /// `A op1 B op2 C ...`를 왼쪽 결합으로 접는다. 폭이 다른 이웃(스칼라 제외)이
+    /// 만나면 넓은 쪽을 `wfToN`으로 좁힌다.
+    private static func foldChain(
+        _ segments: [(text: String, op: String)], widths: [String: Int]
+    ) -> (text: String, width: Int?) {
+        var text = ""
+        var width: Int?
+        for (index, segment) in segments.enumerated() {
+            let (termText, termWidth) = rewriteWithWidth(segment.text, widths: widths)
+            if index == 0 {
+                text = termText
+                width = termWidth
+                continue
+            }
+            let combined = combineWidths(width, termWidth)
+            let left = narrowed(text, from: width, to: combined)
+            let right = narrowed(termText, from: termWidth, to: combined)
+            text = "\(left)\(segment.op)\(right)"
+            width = combined
+        }
+        return (text, width)
+    }
+
+    /// 스칼라(리터럴 폭 0, `float` 폭 1)는 아무 폭과도 섞인다 — Metal이 `vecN op
+    /// float`를 네이티브로 지원한다(성분마다 곱/나눔). `or_(vec2) / u_scale(float)`
+    /// 를 폭이 다르다고 `wfTo1`로 좁히면 진짜 vec2였던 값이 스칼라로 깎여
+    /// 버린다(실물 dot_matrix_mobile_fix 이펙트가 이렇게 떨어질 뻔했다) — `float`도
+    /// 리터럴과 똑같이 투명해야 한다. 둘 다 진짜 벡터(2 이상)인데 폭이 다르면
+    /// HLSL처럼 좁은 쪽으로 — 이 자리가 바로 `wfToN`으로 감싸야 하는 자리다.
+    private static func combineWidths(_ left: Int?, _ right: Int?) -> Int? {
+        guard let left, let right else { return nil }
+        if left <= 1 { return right }
+        if right <= 1 { return left }
+        return min(left, right)
+    }
+
+    private static func narrowed(_ text: String, from width: Int?, to target: Int?) -> String {
+        guard let width, let target, target > 1, width > target else { return text }
+        return "wfTo\(target)(\(text))"
+    }
+
+    /// `expression`을 괄호 깊이 0인 자리에서만 `operators`로 나눈다. `+`/`-`는
+    /// 단항(맨 앞이거나 다른 연산자·여는 괄호 바로 뒤)이면 나누지 않는다.
+    /// 나눌 자리가 없으면 nil — "이 우선순위의 사슬이 아니다"라는 뜻이다.
+    private static func splitTopLevel(
+        _ expression: String, operators: Set<Character>
+    ) -> [(text: String, op: String)]? {
+        let characters = Array(expression)
+        func isOperandEnd(_ c: Character) -> Bool {
+            c.isLetter || c.isNumber || c == "_" || c == ")" || c == "]" || c == "."
+        }
+        var depth = 0
+        var segments: [(String, String)] = []
+        var start = 0
+        var pendingOp = ""
+        var index = 0
+        while index < characters.count {
+            let c = characters[index]
+            if c == "(" || c == "[" {
+                depth += 1
+            } else if c == ")" || c == "]" {
+                depth -= 1
+            } else if depth == 0, operators.contains(c) {
+                let isSign = c == "+" || c == "-"
+                var precededByOperand = false
+                if isSign {
+                    var j = index - 1
+                    while j >= 0, characters[j] == " " { j -= 1 }
+                    precededByOperand = j >= 0 && isOperandEnd(characters[j])
+                }
+                if !isSign || precededByOperand {
+                    let text = String(characters[start..<index]).trimmingCharacters(in: .whitespaces)
+                    guard !text.isEmpty else { return nil }
+                    segments.append((text, pendingOp))
+                    // 쉼표(함수 인자)는 읽기 좋게 뒤에 공백을 하나 둔다. 산술
+                    // 연산자는 기존 테스트가 공백 없는 형태를 이미 고정해 뒀다.
+                    pendingOp = c == "," ? ", " : String(c)
+                    start = index + 1
+                }
+            }
+            index += 1
+        }
+        guard !segments.isEmpty else { return nil }
+        let lastText = String(characters[start...]).trimmingCharacters(in: .whitespaces)
+        guard !lastText.isEmpty else { return nil }
+        segments.append((lastText, pendingOp))
+        return segments
+    }
+
+    /// `trimmed`가 통째로 괄호 한 겹인지. `(a)+(b)`처럼 두 조각이면 아니다.
+    private static func isSingleParenGroup(_ trimmed: String) -> Bool {
+        var depth = 0
+        let characters = Array(trimmed)
+        for (index, character) in characters.enumerated() {
+            if character == "(" { depth += 1 }
+            else if character == ")" {
+                depth -= 1
+                if depth == 0 { return index == characters.count - 1 }
+            }
+        }
+        return false
     }
 
     /// 지금 쓰고 있는 줄이 전처리기 지시자인지. `#if A % B` 같은 것은 건드리지 않는다.
@@ -566,7 +1208,11 @@ public enum GLSLTranslator {
     /// (실물 28개). 인자 목록 안(여는 괄호나 쉼표 뒤)에서만 바꿔서, 본문에 우연히
     /// 나온 같은 낱말을 건드리지 않는다.
     static func rewritingParameterQualifiers(_ source: String) -> String {
-        let types = "(?:vec[234]|mat[234]|float|int|uint|bool|ivec[234]|uvec[234])"
+        // 실물 창작마당 셰이더가 GLSL 타입 대신 HLSL 이름(`float2`)을 그대로 쓰기도
+        // 한다(`in float2 uv`, contrast_based_sharpness 이펙트). 정해진 타입 목록
+        // 대신 아무 식별자나 받는다 — 여는 괄호·쉼표 바로 뒤의 `in`/`out`/`inout`은
+        // 인자 한정자일 수밖에 없어 안전하다.
+        let types = "[A-Za-z_]\\w*"
         var out = source
         for (pattern, template) in [
             ("([(,]\\s*)in\\s+((?:const\\s+)?\\b\(types)\\b)", "$1$2"),
@@ -588,9 +1234,22 @@ public enum GLSLTranslator {
         var varyings: [(type: String, name: String, count: Int?)] = []
         /// 정점 입력.
         var attributes: [(type: String, name: String, count: Int?)] = []
+        /// GLSL 4.x식 `in uint gl_InstanceID;`(전역, 인자 목록 밖) — 정점 하나당
+        /// 엔진이 주는 시스템 값이다. `[[instance_id]]` 같은 Metal 특성으로
+        /// 진입점 인자가 된다. 아는 이름만 담는다 — 모르는 `in` 선언은 조용히 뺀다.
+        var systemValues: [(type: String, name: String)] = []
         /// 선언을 뺀 나머지 전부(함수, `#if`, `#define`).
         var body: String = ""
     }
+
+    /// GLSL의 정점당 시스템 값 → MSL 특성. WE 셰이더가 `in uint gl_InstanceID;`
+    /// 처럼 전역에 선언해 쓴다(실물 `shadowcaster.vert`·`fur4.vert`). 목록에 없는
+    /// 이름은 우리가 채워 줄 값이 없어 조용히 지운다 — 셰이더가 실제로 그 값을
+    /// 안 쓰면(다른 콤보로 꺼져 있으면) 몰라도 무방하다.
+    static let systemValueAttributes: [String: String] = [
+        "gl_InstanceID": "instance_id",
+        "gl_VertexID": "vertex_id",
+    ]
 
     static func parseDeclarations(
         _ source: String, annotations: [String: [String: Any]]
@@ -602,10 +1261,21 @@ public enum GLSLTranslator {
         for line in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             let words = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
+            // `in TYPE NAME;`(전역 시스템 값). 함수 인자 목록 안의 `in`은
+            // `rewritingParameterQualifiers`가 이미 걷어 냈으므로 여기 남는 `in`은
+            // 전부 이 꼴이다.
+            if words.count == 3, words[0] == "in", trimmed.hasSuffix(";"),
+               let (name, _, _) = declared(in: trimmed) {
+                if systemValueAttributes[name] != nil {
+                    parsed.systemValues.append((words[1], name))
+                }
+                bodyLines.append("")
+                continue
+            }
             // 선언은 한 줄에 끝난다. 그렇지 않은 줄은 본문으로 넘긴다.
             guard words.count >= 3, trimmed.hasSuffix(";"),
                   ["uniform", "varying", "attribute"].contains(words[0]),
-                  let (name, count) = declared(in: trimmed)
+                  let (name, count, sizeMacro) = declared(in: trimmed)
             else {
                 bodyLines.append(String(line))
                 continue
@@ -647,7 +1317,7 @@ public enum GLSLTranslator {
                     name: name, type: type,
                     materialKey: annotation?["material"] as? String,
                     defaultValue: annotation.flatMap { stringValue($0["default"]) },
-                    count: count))
+                    count: count, sizeMacro: sizeMacro))
             case "varying":
                 parsed.varyings.append((type, name, count))
             default:
@@ -750,10 +1420,17 @@ public enum GLSLTranslator {
             out += "};\n\n"
         }
 
+        // 배열 크기: 숫자면 그대로, 매크로 이름이면 그 글자를 그대로 대괄호에
+        // 넣는다 — 재질의 `combos`가 `#define BONECOUNT 64`로 미리 붙여 주므로
+        // Metal의 전처리기가 우리 대신 펼친다.
+        func arraySuffix(_ uniform: Uniform) -> String {
+            if let count = uniform.count { return "[\(count)]" }
+            if let macro = uniform.sizeMacro { return "[\(macro)]" }
+            return ""
+        }
         out += "struct Uniforms {\n"
         for uniform in parsed.uniforms {
-            let array = uniform.count.map { "[\($0)]" } ?? ""
-            out += "    \(uniform.type) \(uniform.name)\(array);\n"
+            out += "    \(uniform.type) \(uniform.name)\(arraySuffix(uniform));\n"
         }
         // 빈 구조체는 MSL이 거부한다.
         if parsed.uniforms.isEmpty { out += "    float _unused;\n" }
@@ -762,8 +1439,7 @@ public enum GLSLTranslator {
         // 셰이더 본문 전체를 담는 구조체. 여기서 전역이 멤버가 된다.
         out += "struct ShaderContext {\n"
         for uniform in parsed.uniforms {
-            let array = uniform.count.map { "[\($0)]" } ?? ""
-            out += "    \(uniform.type) \(uniform.name)\(array);\n"
+            out += "    \(uniform.type) \(uniform.name)\(arraySuffix(uniform));\n"
         }
         for texture in parsed.textures {
             out += "    texture2d<float> \(texture.name);\n"
@@ -778,6 +1454,9 @@ public enum GLSLTranslator {
                 let array = attribute.count.map { "[\($0)]" } ?? ""
                 out += "    \(attribute.type) \(attribute.name)\(array);\n"
             }
+            for systemValue in parsed.systemValues {
+                out += "    \(systemValue.type) \(systemValue.name);\n"
+            }
             out += "    float4 gl_Position;\n"
         } else {
             out += "    float4 gl_FragColor;\n"
@@ -791,6 +1470,12 @@ public enum GLSLTranslator {
         arguments.append(stage == .vertex
             ? "VertexIn vertexIn [[stage_in]]" : "Varyings varyingsIn [[stage_in]]")
         arguments.append("constant Uniforms& uniforms [[buffer(0)]]")
+        if stage == .vertex {
+            for systemValue in parsed.systemValues {
+                let attribute = systemValueAttributes[systemValue.name] ?? "vertex_id"
+                arguments.append("\(systemValue.type) \(systemValue.name) [[\(attribute)]]")
+            }
+        }
         for texture in parsed.textures {
             arguments.append("texture2d<float> \(texture.name) [[texture(\(texture.index))]]")
             arguments.append("sampler \(texture.name)Sampler [[sampler(\(texture.index))]]")
@@ -798,15 +1483,25 @@ public enum GLSLTranslator {
 
         var setup: [String] = []
         for uniform in parsed.uniforms {
-            guard let count = uniform.count else {
-                setup.append("    context.\(uniform.name) = uniforms.\(uniform.name);")
+            if let count = uniform.count {
+                // 배열은 통째로 대입할 수 없다. 성분마다 옮긴다.
+                for index in 0..<count {
+                    setup.append(
+                        "    context.\(uniform.name)[\(index)] = uniforms.\(uniform.name)[\(index)];"
+                    )
+                }
                 continue
             }
-            // 배열은 통째로 대입할 수 없다. 성분마다 옮긴다.
-            for index in 0..<count {
+            if let macro = uniform.sizeMacro {
+                // 크기를 몰라(매크로 이름뿐) 성분마다 펼쳐 쓸 수 없다 — 실행 시점
+                // for문으로 옮긴다. `#define BONECOUNT 64`가 이미 앞에 붙어 있어
+                // Metal 전처리기가 이 매크로도 똑같이 펼친다.
                 setup.append(
-                    "    context.\(uniform.name)[\(index)] = uniforms.\(uniform.name)[\(index)];")
+                    "    for (int i = 0; i < \(macro); ++i) "
+                        + "{ context.\(uniform.name)[i] = uniforms.\(uniform.name)[i]; }")
+                continue
             }
+            setup.append("    context.\(uniform.name) = uniforms.\(uniform.name);")
         }
         for texture in parsed.textures {
             setup.append("    context.\(texture.name) = \(texture.name);")
@@ -822,6 +1517,9 @@ public enum GLSLTranslator {
                         ? attribute.name : "\(attribute.name)[\(offset)]"
                     setup.append("    context.\(target) = vertexIn.\(name);")
                 }
+            }
+            for systemValue in parsed.systemValues {
+                setup.append("    context.\(systemValue.name) = \(systemValue.name);")
             }
             var copyOut: [String] = ["    varyingsOut.position = context.gl_Position;"]
             for varying in parsed.varyings {

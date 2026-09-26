@@ -88,6 +88,21 @@ final class EffectChain {
     /// 이 체인의 패스 수. 진단용이다.
     var passCount: Int { passes.count }
 
+    /// 다른 레이어의 합성 결과(`_rt_imageLayerComposite_<id>_a/_b`)를 읽는지,
+    /// 읽는다면 어느 레이어들을 읽는지. `SceneRenderer`가 그리기 순서를 정할
+    /// 때 쓴다 — 참조하는 레이어보다 참조당하는 레이어를 먼저 그려야 한다.
+    var referencedLayerIDs: Set<Int> {
+        Set(passes.flatMap {
+            $0.sceneTextures.compactMap { $0.flatMap(EffectDefinition.imageLayerCompositeID(for:)) }
+        })
+    }
+
+    /// 다른 이미지 레이어의 지금 결과(이펙트 있으면 그 출력, 없으면 원본)를
+    /// 묻는다. 씬이 렌더 타깃 이름(`_rt_imageLayerComposite_<id>_a/_b`)으로
+    /// 그 레이어를 가리키면 이걸로 찾는다. 기본은 nil — 이 레이어들을 모를 때는
+    /// 흰 판(placeholder)으로 채운다.
+    private let layerTexture: (Int) -> MTLTexture?
+
     /// 이 체인이 잡은 텍스처 메모리(바이트). 상시 구동 예산을 재는 근거다.
     var textureBytes: Int {
         let full = width * height * 4
@@ -100,8 +115,10 @@ final class EffectChain {
     init?(device: MTLDevice, effects: [EffectDefinition], effectBases: [String],
           source: MTLTexture, resolver: ReferenceResolver, includes: [String: String],
           makeTexture: (TextureData) throws -> MTLTexture,
-          diagnostics: inout [String]) {
+          diagnostics: inout [String],
+          layerTexture: @escaping (Int) -> MTLTexture? = { _ in nil }) {
         self.device = device
+        self.layerTexture = layerTexture
         guard source.width > 0, source.height > 0 else { return nil }
         // 긴 변을 상한에 맞춰 줄인다. 비율은 지킨다 — 안 지키면 이펙트가
         // 늘어난 좌표계에서 돌아 무늬가 찌그러진다.
@@ -113,20 +130,29 @@ final class EffectChain {
 
         var compiled: [CompiledPass] = []
         for (effect, base) in zip(effects, effectBases) {
+            // 이 이펙트만의 패스를 따로 모은다 — `compiled`에 바로 이어붙이면
+            // 나중에 이 이펙트가 실패했을 때 앞서 이미 성공한 다른 이펙트의
+            // 패스까지 같이 지워야 해서 그 이펙트도 통째로 사라진다(실물
+            // shine+godrays+waterwaves 체인에서 waterwaves 하나가 안 되면
+            // shine·godrays까지 다 날아갔던 결함).
+            var effectPasses: [CompiledPass] = []
+            var effectFailed = false
             for pass in effect.passes {
                 do {
-                    compiled.append(try Self.compile(
+                    effectPasses.append(try Self.compile(
                         pass, base: base, device: device,
                         resolver: resolver, includes: includes))
                 } catch {
-                    // 한 패스가 안 되면 그 이펙트는 반쪽이 된다. 통째로 버린다 —
-                    // 절반만 적용한 그림은 원본보다 나쁘다.
+                    // 한 패스가 안 되면 그 이펙트는 반쪽이 된다. 이 이펙트만
+                    // 버린다 — 절반만 적용한 그림은 원본보다 나쁘지만, 다른
+                    // 이펙트까지 같이 버릴 이유는 없다.
                     diagnostics.append("\(effect.name): \(pass.shaderName) 컴파일 실패")
-                    compiled.removeAll()
+                    effectFailed = true
                     break
                 }
             }
-            if compiled.isEmpty { continue }
+            guard !effectFailed else { continue }
+            compiled.append(contentsOf: effectPasses)
         }
         guard !compiled.isEmpty else { return nil }
         self.passes = compiled
@@ -183,6 +209,12 @@ final class EffectChain {
         // 미리 읽어 둔다. 슬롯마다 무엇이든 묶여 있어야 한다.
         for pass in compiled {
             for path in pass.sceneTextures.compactMap({ $0 }) where defaults[path] == nil {
+                if EffectDefinition.imageLayerCompositeID(for: path) != nil {
+                    // 파일이 아니라 다른 레이어의 렌더 타깃 참조다. 그 레이어의
+                    // 그림은 매 프레임 바뀔 수 있어 그리는 시점에 `layerTexture`로
+                    // 직접 묻는다 — 여기서 미리 읽어 캐시하면 안 된다.
+                    continue
+                }
                 for candidate in Self.textureCandidates(path, base: pass.base) {
                     guard let data = resolver.data(for: candidate),
                           let decoded = try? TexDecoder.decode(data),
@@ -423,14 +455,14 @@ final class EffectChain {
                 .contains { $0.name.hasPrefix("g_AudioSpectrum") })
     }
 
+    /// pkg를 모든 철자에 먼저 훑고 Assets는 그다음이다 — 배경화면이 들고 온
+    /// 자기 셰이더 사본이 있으면 그게 이겨야 한다(`ReferenceResolver.firstData`
+    /// 참고, 실물 1493910771 waterwaves).
     private static func firstText(
         of paths: [String], resolver: ReferenceResolver
     ) -> String? {
-        for path in paths {
-            if let data = resolver.data(for: path),
-               let text = String(data: data, encoding: .utf8) { return text }
-        }
-        return nil
+        guard let data = resolver.firstData(of: paths) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// 씬이 준 값을 유니폼 자리에 채운다.
@@ -446,7 +478,8 @@ final class EffectChain {
         var packed: [String: [Float]] = [:]
         for uniform in uniforms {
             guard let field = layout.field(named: uniform.name) else { continue }
-            let constant = uniform.materialKey.flatMap { pass.constants[$0] }
+            // 재질 키 대소문자 어긋남은 `EffectConstant.lookup` 문서 참고.
+            let constant = uniform.materialKey.flatMap { EffectConstant.lookup(materialKey: $0, in: pass.constants) }
                 ?? uniform.defaultValue.flatMap { EffectConstant.parse($0) }
             guard let constant else { continue }
             packed[uniform.name] = constant.components(field.count)
@@ -518,6 +551,13 @@ final class EffectChain {
                           let loaded = defaults[path] {
                     // 씬이 이 슬롯에 준 텍스처. 마스크가 여기로 온다.
                     texture = loaded
+                } else if slot.index < pass.sceneTextures.count,
+                          let path = pass.sceneTextures[slot.index],
+                          let layerID = EffectDefinition.imageLayerCompositeID(for: path),
+                          let referenced = layerTexture(layerID) {
+                    // 다른 이미지 레이어의 지금 합성 결과. 그 레이어가 이번
+                    // 프레임에 먼저 그려졌어야 한다 — `SceneRenderer`가 순서를 맞춘다.
+                    texture = referenced
                 } else if let path = slot.defaultPath, let loaded = defaults[path] {
                     texture = loaded
                 } else {

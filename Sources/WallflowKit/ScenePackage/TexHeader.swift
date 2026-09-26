@@ -110,6 +110,17 @@ public enum TexPixelFormat: Int32, Sendable {
     /// DXT1(BC1). 4x4 블록 하나가 8바이트다. 알파가 없거나 1비트다.
     /// 실물 `absbg.tex`(2560x1728)의 선언 크기가 정확히 8바이트/블록이다.
     case dxt1 = 7
+    /// DXT3(BC2). 블록 크기는 DXT5와 같은 16바이트라 크기만으로는 못 가른다.
+    ///
+    /// 실물 워크숍 3000562427의 `VinylDisc.tex`(format=6) 밉맵2(비압축, 76x76)를
+    /// 직접 까 보면 알파 8바이트가 `00 00 00 00 77 77 ff ff`처럼 니블 두 개씩
+    /// 4행이 나란히 반복되는 꼴이다 — DXT3가 4x4 블록의 각 픽셀 알파를 4비트
+    /// 그대로(0~15) 행 순서로 박아넣는 구조 그대로다(바이트[0..2)=1행,
+    /// [2..4)=2행, [4..6)=3행, [6..8)=4행, 같은 니블이 반복되면 그 행 전체가
+    /// 같은 알파라는 뜻). DXT5라면 이 8바이트가 [끝점 a0, 끝점 a1, 3비트 인덱스
+    /// 6바이트]라 이렇게 깔끔한 행 단위 반복이 나올 이유가 없다 — dxt5 케이스의
+    /// `flatnormal.tex`/`sphere.tex` 증거와 같은 방법으로 확인했다.
+    case dxt3 = 6
     /// 두 채널. 실물에서 light_shafts처럼 흑백+알파 파티클 텍스처가 쓴다.
     case rg88 = 8
     /// 단일 채널. 마스크에 쓰인다.
@@ -122,7 +133,7 @@ public enum TexPixelFormat: Int32, Sendable {
     public var bytesPerBlock: Int {
         switch self {
         case .dxt1: return 8
-        case .dxt5: return 16
+        case .dxt5, .dxt3: return 16
         case .rgba8888, .rg88, .r8: return 0
         }
     }
@@ -133,7 +144,7 @@ public enum TexPixelFormat: Int32, Sendable {
         case .rgba8888: return 4
         case .rg88: return 2
         case .r8: return 1
-        case .dxt5, .dxt1: return 0
+        case .dxt5, .dxt1, .dxt3: return 0
         }
     }
 
@@ -259,43 +270,55 @@ public struct TexHeader: Equatable, Sendable {
             throw TexError.unsupportedContainer(container)
         }
 
-        _ = try cursor.readInt32()          // imageCount. 실물은 항상 1이었다.
+        let imageCount = try cursor.readInt32()
         let freeImageFormat = hasFreeImageFormat ? try cursor.readInt32() : -1
         if hasExtraField { _ = try cursor.readInt32() }
-        let mipCount = try cursor.readInt32()
-        guard mipCount > 0 else { throw TexError.noMipmaps }
 
         // Bound mipCount: each mipmap is at least 12 bytes if no compression fields (w, h, size),
         // or 20 bytes with compression fields (w, h, lz4, decompressed, size)
         let bytesPerMip = hasCompressionFields ? 20 : 12
-        let remainingBytes = data.count - cursor.offset
-        let maxMipmaps = remainingBytes / bytesPerMip
-        guard Int(mipCount) <= maxMipmaps else { throw TexError.truncated }
 
+        // **imageCount가 1보다 클 수 있다.** 실물 대부분은 1이지만, 실물
+        // 픽셀 캐릭터 씬(2212279721)의 큰 스프라이트 시트 텍스처는 2다 —
+        // 이미지마다 자기 mipCount와 밉맵들을 따로 갖고 나란히 붙어 있다.
+        // 이걸 하나로 알고 첫 이미지 뒤를 바로 TEXS로 읽으면 두 번째
+        // 이미지의 밉맵 데이터를 시트 헤더로 오독해 파싱이 늘 실패하고,
+        // 결국 시트를 못 찾아 그림 전체(모든 칸이 든 원본)를 한 장으로
+        // 그려 격자 그대로 찍힌다. 첫 이미지의 밉맵만 쓰고(디코더가 늘
+        // 그래 왔다) 나머지는 커서만 밀어 건너뛴다.
+        guard imageCount > 0, imageCount <= 64 else { throw TexError.truncated }
         var mipmaps: [TexMipmap] = []
-        mipmaps.reserveCapacity(Int(mipCount))
-        for _ in 0..<mipCount {
-            let w = Int(try cursor.readInt32())
-            let h = Int(try cursor.readInt32())
-            let lz4: Int32
-            let decompressed: Int
-            if hasCompressionFields {
-                lz4 = try cursor.readInt32()
-                decompressed = Int(try cursor.readInt32())
-            } else {
-                lz4 = 0
-                decompressed = 0
+        for imageIndex in 0..<imageCount {
+            let mipCount = try cursor.readInt32()
+            guard mipCount > 0 else { throw TexError.noMipmaps }
+            let remainingBytes = data.count - cursor.offset
+            let maxMipmaps = remainingBytes / bytesPerMip
+            guard Int(mipCount) <= maxMipmaps else { throw TexError.truncated }
+
+            for _ in 0..<mipCount {
+                let w = Int(try cursor.readInt32())
+                let h = Int(try cursor.readInt32())
+                let lz4: Int32
+                let decompressed: Int
+                if hasCompressionFields {
+                    lz4 = try cursor.readInt32()
+                    decompressed = Int(try cursor.readInt32())
+                } else {
+                    lz4 = 0
+                    decompressed = 0
+                }
+                let size = Int(try cursor.readInt32())
+                guard size >= 0, cursor.offset + size <= data.count else {
+                    throw TexError.truncated
+                }
+                let start = cursor.offset
+                try cursor.skip(size)
+                guard imageIndex == 0 else { continue }
+                mipmaps.append(TexMipmap(
+                    width: w, height: h, isLZ4: lz4 == 1,
+                    decompressedSize: decompressed, range: start..<(start + size)
+                ))
             }
-            let size = Int(try cursor.readInt32())
-            guard size >= 0, cursor.offset + size <= data.count else {
-                throw TexError.truncated
-            }
-            let start = cursor.offset
-            try cursor.skip(size)
-            mipmaps.append(TexMipmap(
-                width: w, height: h, isLZ4: lz4 == 1,
-                decompressedSize: decompressed, range: start..<(start + size)
-            ))
         }
 
         /// flags 비트 4가 서면 밉맵 뒤에 TEXS 섹션이 붙는다.
