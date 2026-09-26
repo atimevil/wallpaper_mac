@@ -154,6 +154,53 @@ final class MDLModelTests: XCTestCase {
         XCTAssertEqual(extra.indices.max().map(Int.init), extra.vertexCount - 1)
     }
 
+    /// 실물 `scene.mdl`(3509243656 씬, `MDLV0023`, 서브메시 5개). 둘째 이후
+    /// 서브메시는 재질 문자열 앞에 0으로 채운 6바이트 여백이 낀다 — 안
+    /// 건너뛰면 빈 문자열을 재질로 읽고 커서가 밀려 다음 필드가 문자열
+    /// 조각으로 깨진다(`정점 …바이트 (형식 1702125933)` — 1702125933을
+    /// 리틀엔디언으로 풀면 "mate"다. 이 결함으로 처음 걸렸다).
+    func testParsesRealMultiSubmeshMDLV0023WithSeparatorGap() throws {
+        guard let root = ProcessInfo.processInfo.environment["WALLFLOW_TEST_SCENES"] else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES 미설정")
+        }
+        let url = URL(fileURLWithPath: root).appendingPathComponent("3589454154/scene.pkg")
+        guard let raw = try? Data(contentsOf: url) else { throw XCTSkip("3589454154 없음") }
+        let reader = try PkgReader(data: raw)
+        let model = try MDLModel.parse(try reader.data(for: "models/scene/scene.mdl"))
+        XCTAssertEqual(model.extraSubmeshes.count, 4, "서브메시 수 5 = 첫째 + extraSubmeshes 넷")
+        let expectedMaterials = (1...4).map { "materials/models/scene/material_\($0)_baseColor.json" }
+        // 셋째(material_2)는 baseColor 접미사가 없다 — 실물 그대로 확인한다.
+        XCTAssertEqual(model.extraSubmeshes[0].materialPath, expectedMaterials[0])
+        XCTAssertEqual(model.extraSubmeshes[1].materialPath, "materials/models/scene/material_2.json")
+        XCTAssertEqual(model.extraSubmeshes[2].materialPath, expectedMaterials[2])
+        XCTAssertEqual(model.extraSubmeshes[3].materialPath, expectedMaterials[3])
+        for submesh in model.extraSubmeshes {
+            XCTAssertEqual(submesh.indices.count % 3, 0, submesh.materialPath)
+            XCTAssertLessThan(Int(submesh.indices.max() ?? 0), submesh.vertexCount, submesh.materialPath)
+        }
+    }
+
+    /// 실물 `陨石.mdl`(3589454154 씬의 운석밭, 163MB, 정점 3,144,456개). 예전
+    /// 상한(64MiB)에 막혀 `tooLarge`였다 — 색인·꼬리까지 파일 끝과 정확히
+    /// 맞아떨어져 misparse가 아니라 진짜 이만큼 큰 실물임을 확인했다(보고서
+    /// 참고). 파일이 커서(163MB) 무거운 테스트만 따로 거는 두 번째 env로
+    /// 막는다.
+    func testParsesRealHugeSingleMeshDebris() throws {
+        guard let root = ProcessInfo.processInfo.environment["WALLFLOW_TEST_SCENES"],
+              ProcessInfo.processInfo.environment["WALLFLOW_TEST_BIG"] != nil else {
+            throw XCTSkip("WALLFLOW_TEST_SCENES/WALLFLOW_TEST_BIG 미설정 — 163MB라 기본은 건너뛴다")
+        }
+        let url = URL(fileURLWithPath: root).appendingPathComponent("3589454154/scene.pkg")
+        guard let raw = try? Data(contentsOf: url) else { throw XCTSkip("3589454154 없음") }
+        let reader = try PkgReader(data: raw)
+        let model = try MDLModel.parse(try reader.data(for: "models/陨石/陨石.mdl"))
+        XCTAssertEqual(model.boneCount, 1)
+        XCTAssertEqual(model.vertexCount, 3_144_456)
+        XCTAssertEqual(model.indices.count, 3_206_592)
+        XCTAssertEqual(model.indices.count % 3, 0, "삼각형 목록이어야 한다")
+        XCTAssertEqual(model.indices.max(), 3_144_455, "마지막 정점을 가리켜야 한다")
+    }
+
     func testRejectsBadMagic() {
         var d = build(); d.replaceSubrange(0..<4, with: Data("XXXX".utf8))
         XCTAssertThrowsError(try MDLModel.parse(d)) { XCTAssertEqual($0 as? MDLError, .badMagic("XXXX0023")) }
