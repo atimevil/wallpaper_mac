@@ -335,6 +335,12 @@ final class WorkshopWindowController: NSWindowController {
     }
 
     /// 탭에 따라 무엇을 보여 주고 어떤 조작을 열지 정한다.
+    /// 밖에서 탭을 고른다(확인용 환경 변수가 쓴다).
+    func selectTab(_ next: WorkshopTab) {
+        tabControl.selectedSegment = next.rawValue
+        showTab(next)
+    }
+
     private func showTab(_ next: WorkshopTab) {
         // 떠나는 탭의 검색어를 기억하고, 가는 탭의 것을 되살린다.
         searchTexts[tab] = searchField.stringValue
