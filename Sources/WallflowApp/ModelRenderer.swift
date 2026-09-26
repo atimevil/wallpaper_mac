@@ -335,6 +335,32 @@ final class ModelRenderer {
         return [t.columns.0, t.columns.1, t.columns.2, t.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] }
     }
 
+    private static func linear3x3(_ world: simd_float4x4) -> simd_float3x3 {
+        simd_float3x3(
+            SIMD3(world.columns.0.x, world.columns.0.y, world.columns.0.z),
+            SIMD3(world.columns.1.x, world.columns.1.y, world.columns.1.z),
+            SIMD3(world.columns.2.x, world.columns.2.y, world.columns.2.z))
+    }
+
+    /// `g_NormalModelMatrix`(`mat3`, `generic4.vert`가 `mul(localNormal, ...)`로
+    /// 쓴다). world의 3x3(선형) 부분의 **역행렬**을 준다 — 전치는 안 한다.
+    ///
+    /// 이유: 보통 표기(열벡터 `M*v`)에서 법선은 `(M^-1)^T * n`으로 옮긴다(비균등
+    /// 배율에서 법선이 안 비뚤어지려면 역전치가 필요하다). 그런데 이 셰이더는
+    /// 행벡터 관례라 `n * G`로 곱한다 — `v*G`는 `G^T*v`(열벡터)와 같으므로,
+    /// `G^T = (M^-1)^T`가 되려면 `G = M^-1`이어야 한다. `Self.floats(world)`가
+    /// `g_ModelMatrix`에 전치를 **한 번만** 넣는 것과 같은 이유(같은 행벡터
+    /// 관례)다. 이 유니폼을 빼먹으면(예전에 그랬다) 값이 0인 행렬로 남아
+    /// `normalize(vec3(0))`가 NaN을 내고, 그 NaN이 조명 전체에 번져 구가 텍스처
+    /// 없이 새하얗게 뜬다 — 토성 구가 그렇게 뜬 진짜 원인 중 하나였다(남은
+    /// 밝기 편차는 별개 사안이다. 아래 커밋 메시지 참고).
+    private static func normalMatrixFloats(_ world: simd_float4x4) -> [Float] {
+        let m3 = linear3x3(world)
+        // 특이 행렬(배율 0)은 못 뒤집는다 — 항등으로 물러나 NaN을 안 낸다.
+        let inv = abs(simd_determinant(m3)) > 1e-8 ? simd_inverse(m3) : matrix_identity_float3x3
+        return [inv.columns.0, inv.columns.1, inv.columns.2].flatMap { [$0.x, $0.y, $0.z] }
+    }
+
     func encode(into encoder: MTLRenderCommandEncoder, world: simd_float4x4,
                 viewProjection: simd_float4x4, alpha: Float, time: Float) {
         guard indexCount > 0 else { return }
@@ -342,6 +368,7 @@ final class ModelRenderer {
         let eye = eyeProvider()
         var engine: [String: [Float]] = [
             "g_ModelMatrix": Self.floats(world),
+            "g_NormalModelMatrix": Self.normalMatrixFloats(world),
             "g_ViewProjectionMatrix": Self.floats(viewProjection),
             "g_ModelViewProjectionMatrix": Self.floats(viewProjection * world),
             "g_EyePosition": [eye.x, eye.y, eye.z],
