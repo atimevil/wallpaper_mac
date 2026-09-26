@@ -30,13 +30,15 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
     public let presetValues: [String: UserPropertyValue]
     /// 프리셋 항목의 폴더. 프리셋이 든 그림·영상(`files/…`)이 여기 있다.
     public let presetDirectory: URL?
-    /// project.json의 `tags`. 사이드바 필터가 라이브러리 항목을 거를 때 쓴다.
+    /// project.json의 `tags`(장르뿐이다 — 종류·등급은 다른 키에 따로 있다).
     public let tags: [String]
+    /// project.json의 `contentrating`("Everyone"/"Questionable"/"Mature"). 없으면 nil.
+    public let contentRating: String?
 
     public init(id: String, title: String, type: WallpaperType, directory: URL,
                 contentURL: URL, previewURL: URL?, unsupportedReason: String? = nil,
                 dependencyID: String? = nil, presetValues: [String: UserPropertyValue] = [:],
-                presetDirectory: URL? = nil, tags: [String] = []) {
+                presetDirectory: URL? = nil, tags: [String] = [], contentRating: String? = nil) {
         self.id = id
         self.title = title
         self.type = type
@@ -48,6 +50,22 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
         self.presetValues = presetValues
         self.presetDirectory = presetDirectory
         self.tags = tags
+        self.contentRating = contentRating
+    }
+
+    /// `WorkshopFilterState.matches(tags:)`에 넘길 태그. project.json의 `tags`는
+    /// 장르뿐이라 종류(`type`)와 등급(`contentrating`)을 여기서 합쳐 준다 —
+    /// 안 그러면 기본 필터(등급=전체 이용가)만으로도 설치됨 탭이 통째로 빈다.
+    public var filterTags: [String] {
+        var out = tags
+        switch type {
+        case .video: out.append("Video")
+        case .web: out.append("Web")
+        case .scene: out.append("Scene")
+        case .unsupported: break
+        }
+        if let contentRating { out.append(contentRating) }
+        return out
     }
 
     /// 프리셋의 날것 값을 알맹이의 속성 종류에 맞춰 읽는다.
@@ -149,6 +167,7 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
 
         let contentURL = directory.appendingPathComponent(file)
         let tags = (dict["tags"] as? [String]) ?? []
+        let contentRating = dict["contentrating"] as? String
 
         // webm/mkv처럼 컨테이너 자체를 AVFoundation이 못 여는 것도 여기서는
         // 더 이상 .unsupported로 거르지 않는다. ffmpeg가 있으면 붙일 때
@@ -163,7 +182,8 @@ public struct WallpaperItem: Identifiable, Equatable, Sendable {
             directory: directory,
             contentURL: contentURL,
             previewURL: preview,
-            tags: tags
+            tags: tags,
+            contentRating: contentRating
         )
     }
 }

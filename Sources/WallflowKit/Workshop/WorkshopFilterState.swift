@@ -65,9 +65,13 @@ public struct WorkshopFilterState: Equatable, Sendable {
 
     /// 받아 온(또는 설치된) 항목이 조건에 맞는지. OR 섹션에서 둘 이상 골랐을
     /// 때는 서버가 거르지 못하므로 여기서 거른다.
-    public func matches(tags itemTags: [String]) -> Bool {
+    ///
+    /// `ignoring`에 넣은 섹션은 판정에서 빼 버린다. 라이브러리(설치됨 탭)는
+    /// `[.resolution]`을 넘긴다 — 해상도는 project.json 어디에도 없어서, 넣은
+    /// 채로 판정하면 해상도를 하나라도 고른 순간 설치된 항목이 전부 빠진다.
+    public func matches(tags itemTags: [String], ignoring: Set<WorkshopFilterSection> = []) -> Bool {
         let lowered = Set(itemTags.map { $0.lowercased() })
-        for section in WorkshopFilterSection.allCases {
+        for section in WorkshopFilterSection.allCases where !ignoring.contains(section) {
             let set = selected[section] ?? []
             guard !set.isEmpty else { continue }
             let wanted = Set(set.map { $0.lowercased() })
