@@ -25,13 +25,7 @@ final class SettingsWindowController: NSWindowController {
     private let onAudioChanged: (Bool) -> Void
 
     private let tabs = NSTabView()
-    private let propertiesStack = NSStackView()
-    private let propertiesTitle = NSTextField(labelWithString: "")
-    private var properties: [UserProperty] = []
-    private var values: [String: UserPropertyValue] = [:]
-    private var itemID: String?
-    /// 컨트롤 ↔ 속성 이름. 조건이 바뀌면 보이고 숨기는 데 쓴다.
-    private var rows: [(name: String, view: NSView)] = []
+    private lazy var propertyEditor = PropertyEditorView(store: store, onChanged: onPropertiesChanged)
 
     init(store: UserPropertyStore,
          currentItem: @escaping () -> WallpaperItem?,
@@ -60,38 +54,7 @@ final class SettingsWindowController: NSWindowController {
 
     /// 배경화면이 바뀌었을 때 속성 탭을 다시 채운다.
     func reloadProperties() {
-        rows.removeAll()
-        propertiesStack.arrangedSubviews.forEach {
-            propertiesStack.removeArrangedSubview($0); $0.removeFromSuperview()
-        }
-        guard let item = currentItem() else {
-            propertiesTitle.stringValue = "걸린 배경화면이 없다"
-            properties = []
-            return
-        }
-        itemID = item.id
-        let data = (try? Data(contentsOf: item.directory.appendingPathComponent("project.json")))
-            ?? Data()
-        properties = UserProperty.load(projectJSON: data)
-        let overrides = store.overrides(for: item.id)
-        // 프리셋 항목이면 프리셋의 값이 기본값 노릇을 한다.
-        values = Dictionary(uniqueKeysWithValues: properties.map {
-            ($0.name, overrides[$0.name] ?? item.presetValues[$0.name] ?? $0.defaultValue)
-        })
-        propertiesTitle.stringValue = properties.isEmpty
-            ? "\(item.title) — 이 배경화면은 조절할 것이 없다"
-            : item.title
-        for property in properties {
-            let row = makeRow(for: property)
-            rows.append((property.name, row))
-            propertiesStack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: propertiesStack.widthAnchor).isActive = true
-        }
-        if !properties.isEmpty {
-            let reset = NSButton(title: "기본값으로", target: self, action: #selector(resetAll))
-            propertiesStack.addArrangedSubview(reset)
-        }
-        applyConditions()
+        propertyEditor.show(item: currentItem())
     }
 
     /// 메뉴바에서 바꾼 값을 다시 읽는다. 창이 열린 채로 메뉴에서 바꾸면 여기 남은
@@ -229,123 +192,7 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private func makePropertiesTab() -> NSView {
-        propertiesStack.orientation = .vertical
-        propertiesStack.alignment = .leading
-        propertiesStack.spacing = 10
-        propertiesStack.edgeInsets = NSEdgeInsets(top: 12, left: 20, bottom: 16, right: 20)
-        propertiesTitle.font = .boldSystemFont(ofSize: 13)
-
-        let outer = NSStackView(views: [propertiesTitle, propertiesStack])
-        outer.orientation = .vertical
-        outer.alignment = .leading
-        outer.spacing = 4
-        outer.edgeInsets = NSEdgeInsets(top: 12, left: 0, bottom: 0, right: 0)
-        propertiesTitle.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let scroll = Self.scrolling(outer)
-        propertiesStack.widthAnchor.constraint(equalTo: outer.widthAnchor).isActive = true
-        propertiesTitle.leadingAnchor.constraint(
-            equalTo: outer.leadingAnchor, constant: 20).isActive = true
-        return scroll
-    }
-
-    /// 속성 하나의 줄. 종류마다 알맞은 컨트롤을 단다.
-    private func makeRow(for property: UserProperty) -> NSView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.spacing = 8
-        let value = values[property.name] ?? property.defaultValue
-        switch property.kind {
-        case .toggle:
-            let box = NSButton(checkboxWithTitle: property.label, target: self,
-                               action: #selector(controlChanged(_:)))
-            if case .toggle(let on) = value { box.state = on ? .on : .off }
-            box.identifier = NSUserInterfaceItemIdentifier(property.name)
-            row.addArrangedSubview(box)
-        case .slider(let lo, let hi, let step):
-            row.addArrangedSubview(label(property.label))
-            let slider = NSSlider(value: 0, minValue: lo, maxValue: hi, target: self,
-                                  action: #selector(controlChanged(_:)))
-            if case .number(let d) = value { slider.doubleValue = d }
-            if step > 0 {
-                slider.allowsTickMarkValuesOnly = false
-                slider.numberOfTickMarks = min(50, Int((hi - lo) / step) + 1)
-            }
-            slider.identifier = NSUserInterfaceItemIdentifier(property.name)
-            slider.widthAnchor.constraint(equalToConstant: 200).isActive = true
-            row.addArrangedSubview(slider)
-            let readout = NSTextField(labelWithString: Self.format(slider.doubleValue))
-            readout.identifier = NSUserInterfaceItemIdentifier(property.name + "::readout")
-            readout.textColor = .secondaryLabelColor
-            row.addArrangedSubview(readout)
-        case .color:
-            row.addArrangedSubview(label(property.label))
-            let well = NSColorWell()
-            if case .color(let c) = value {
-                well.color = NSColor(red: c.x, green: c.y, blue: c.z, alpha: 1)
-            }
-            well.target = self
-            well.action = #selector(controlChanged(_:))
-            well.identifier = NSUserInterfaceItemIdentifier(property.name)
-            well.widthAnchor.constraint(equalToConstant: 44).isActive = true
-            well.heightAnchor.constraint(equalToConstant: 24).isActive = true
-            row.addArrangedSubview(well)
-        case .combo(let options):
-            row.addArrangedSubview(label(property.label))
-            let popup = NSPopUpButton()
-            for option in options { popup.addItem(withTitle: option.label) }
-            if case .text(let current) = value,
-               let index = options.firstIndex(where: { $0.value == current }) {
-                popup.selectItem(at: index)
-            }
-            popup.target = self
-            popup.action = #selector(controlChanged(_:))
-            popup.identifier = NSUserInterfaceItemIdentifier(property.name)
-            row.addArrangedSubview(popup)
-        case .textInput:
-            row.addArrangedSubview(label(property.label))
-            let field = NSTextField()
-            if case .text(let text) = value { field.stringValue = text }
-            field.target = self
-            field.action = #selector(controlChanged(_:))
-            field.identifier = NSUserInterfaceItemIdentifier(property.name)
-            field.widthAnchor.constraint(equalToConstant: 240).isActive = true
-            row.addArrangedSubview(field)
-        case .text:
-            let note = NSTextField(wrappingLabelWithString: property.label)
-            note.textColor = .secondaryLabelColor
-            note.font = .systemFont(ofSize: 11)
-            row.addArrangedSubview(note)
-        case .texture:
-            // 파일 고르기는 아직 없다. 프리셋이 준 파일이면 그 이름을 보여 준다.
-            row.addArrangedSubview(label(property.label))
-            var name = "(기본 그림)"
-            if case .text(let path) = value, !path.isEmpty {
-                name = (path as NSString).lastPathComponent
-            }
-            let note = NSTextField(labelWithString: name)
-            note.textColor = .secondaryLabelColor
-            row.addArrangedSubview(note)
-        }
-        return row
-    }
-
-    private func label(_ text: String) -> NSTextField {
-        let field = NSTextField(labelWithString: text)
-        field.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
-        return field
-    }
-
-    private static func format(_ value: Double) -> String {
-        value == value.rounded() ? String(Int(value)) : String(format: "%.2f", value)
-    }
-
-    /// 조건에 따라 줄을 보이고 숨긴다. 값이 하나 바뀌면 다른 줄의 조건이 바뀐다.
-    private func applyConditions() {
-        for property in properties {
-            guard let row = rows.first(where: { $0.name == property.name }) else { continue }
-            row.view.isHidden = !UserProperty.isVisible(property, values: values)
-        }
+        Self.scrolling(propertyEditor)
     }
 
     // MARK: - 반응
@@ -402,64 +249,4 @@ final class SettingsWindowController: NSWindowController {
         loginBox?.state = LoginItem.isEnabled ? .on : .off
     }
 
-    @objc private func controlChanged(_ sender: NSControl) {
-        guard let name = sender.identifier?.rawValue,
-              let property = properties.first(where: { $0.name == name }) else { return }
-        switch (property.kind, sender) {
-        case (.toggle, let box as NSButton):
-            values[name] = .toggle(box.state == .on)
-        case (.slider(let lo, let hi, let step), let slider as NSSlider):
-            var v = slider.doubleValue
-            if step > 0 { v = lo + ((v - lo) / step).rounded() * step }
-            v = min(max(v, lo), hi)
-            values[name] = .number(v)
-            if let row = rows.first(where: { $0.name == name })?.view as? NSStackView,
-               let readout = row.arrangedSubviews.first(where: {
-                   $0.identifier?.rawValue == name + "::readout" }) as? NSTextField {
-                readout.stringValue = Self.format(v)
-            }
-        case (.color, let well as NSColorWell):
-            let c = well.color.usingColorSpace(.sRGB) ?? well.color
-            values[name] = .color(Vec3(x: Double(c.redComponent), y: Double(c.greenComponent),
-                                       z: Double(c.blueComponent)))
-        case (.combo(let options), let popup as NSPopUpButton):
-            let index = popup.indexOfSelectedItem
-            guard options.indices.contains(index) else { return }
-            values[name] = .text(options[index].value)
-        case (.textInput, let field as NSTextField):
-            values[name] = .text(field.stringValue)
-        default:
-            return
-        }
-        persistAndReload()
-    }
-
-    @objc private func resetAll() {
-        values = Dictionary(uniqueKeysWithValues: properties.map { ($0.name, $0.defaultValue) })
-        persistAndReload()
-        reloadProperties()
-    }
-
-    /// 기본값과 다른 것만 저장한다. 전부 저장하면 제작자가 기본값을 바꿔도
-    /// 옛 값에 묶인다.
-    private func persistAndReload() {
-        guard let itemID else { return }
-        var overrides: [String: UserPropertyValue] = [:]
-        for property in properties {
-            if let value = values[property.name], value != property.defaultValue {
-                overrides[property.name] = value
-            }
-        }
-        do {
-            try store.save(overrides, for: itemID)
-        } catch {
-            let alert = NSAlert()
-            alert.messageText = "설정을 저장하지 못했다"
-            alert.informativeText = "\(error)"
-            alert.runModal()
-            return
-        }
-        applyConditions()
-        onPropertiesChanged()
-    }
 }
