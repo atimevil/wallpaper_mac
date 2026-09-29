@@ -208,8 +208,9 @@ final class WorkshopWindowController: NSWindowController {
         // 검색은 Enter로만 돈다. 글자마다 요청하면 스팀에 부담이고 결과가 튄다.
         searchField.sendsWholeSearchString = true
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        // 좁은 창에서 다른 도구(정렬·칸 크기)에 밀려 120pt까지 찌그러지던 것을 막는다.
-        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        // 좁은 창에서 다른 도구(정렬·칸 크기)에 밀려 찌그러지던 것을 막는다. 더 크게
+        // 잡으면 도구 줄이 창 최소 폭(980)을 넘겨 창이 그만큼 안 줄어든다.
+        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
 
         for sort in WorkshopSort.allCases { sortPopup.addItem(withTitle: sort.label) }
         sortPopup.target = self
@@ -221,7 +222,7 @@ final class WorkshopWindowController: NSWindowController {
         cellSizeSlider.doubleValue = savedCellSize > 0 ? savedCellSize : 220
         cellSizeSlider.target = self
         cellSizeSlider.action = #selector(cellSizeChanged)
-        cellSizeSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        cellSizeSlider.widthAnchor.constraint(equalToConstant: 90).isActive = true
 
         accountField.placeholderString = "스팀 계정 이름"
         // 스팀 앱이 이미 로그인해 둔 계정 이름을 미리 채운다. 비밀번호가 아니다.
@@ -229,7 +230,7 @@ final class WorkshopWindowController: NSWindowController {
             ?? SteamCmdClient.detectAccountName() ?? ""
         accountField.target = self
         accountField.action = #selector(saveAccount)
-        accountField.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        accountField.widthAnchor.constraint(equalToConstant: 120).isActive = true
 
         loginButton.target = self
         loginButton.action = #selector(openLoginTerminal)
