@@ -30,12 +30,23 @@ final class PropertyEditorView: NSView {
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 20, bottom: 16, right: 20)
         titleLabel.font = .boldSystemFont(ofSize: 13)
         titleLabel.isHidden = !showsTitle
+        // 제목을 안 보이는 쪽은 상세 패널에 끼워 넣는 경우다 — 패널이 이미 좌우
+        // 여백을 두므로 또 들이면 패널의 다른 줄보다 20만큼 안으로 밀린다.
+        if !showsTitle {
+            stack.edgeInsets.left = 0
+            stack.edgeInsets.right = 0
+        }
 
         let outer = NSStackView(views: [titleLabel, stack])
         outer.orientation = .vertical
         outer.alignment = .leading
         outer.spacing = 4
         outer.edgeInsets = NSEdgeInsets(top: 12, left: 0, bottom: 0, right: 0)
+        // 상세 패널은 위에 "속성" 머리를 따로 달므로 위 여백까지 겹치면 크게 벌어진다.
+        if !showsTitle {
+            outer.edgeInsets.top = 0
+            stack.edgeInsets.top = 0
+        }
         titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         outer.translatesAutoresizingMaskIntoConstraints = false
 
@@ -52,6 +63,9 @@ final class PropertyEditorView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("스토리보드를 쓰지 않는다") }
+
+    /// 조절할 속성이 없는지. 상세 패널이 "속성" 머리를 숨길 때 본다.
+    var isEmpty: Bool { properties.isEmpty }
 
     /// 이 배경화면의 속성을 보여 준다. nil이면 "속성이 없다" 안내.
     func show(item: WallpaperItem?) {
@@ -82,7 +96,10 @@ final class PropertyEditorView: NSView {
             let row = makeRow(for: property)
             rows.append((property.name, row))
             stack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            // 좌우 여백을 빼야 줄이 "기본값으로" 버튼·제목과 같은 선에서 시작한다.
+            row.widthAnchor.constraint(
+                equalTo: stack.widthAnchor,
+                constant: -(stack.edgeInsets.left + stack.edgeInsets.right)).isActive = true
         }
         if !properties.isEmpty {
             let reset = NSButton(title: "기본값으로", target: self, action: #selector(resetAll))

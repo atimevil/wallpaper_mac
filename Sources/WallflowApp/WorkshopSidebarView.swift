@@ -74,11 +74,18 @@ final class WorkshopSidebarView: NSView {
         bottom.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 12, right: 12)
         bottom.translatesAutoresizingMaskIntoConstraints = false
 
-        let outer = NSStackView(views: [scroll, bottom])
+        // 목록이 아래 고정 줄 뒤로 반쯤 잘려 보이므로 경계를 긋는다.
+        let divider = NSBox()
+        divider.boxType = .separator
+        let outer = NSStackView(views: [scroll, divider, bottom])
         outer.orientation = .vertical
         outer.spacing = 0
         outer.translatesAutoresizingMaskIntoConstraints = false
         addSubview(outer)
+        // 세로 스택 기본 정렬은 가운데라 그대로 두면 아래 줄(초기화)이 가운데 뜬다.
+        for view in [divider, bottom] {
+            view.widthAnchor.constraint(equalTo: outer.widthAnchor).isActive = true
+        }
         NSLayoutConstraint.activate([
             outer.topAnchor.constraint(equalTo: topAnchor),
             outer.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -89,6 +96,11 @@ final class WorkshopSidebarView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("스토리보드를 쓰지 않는다") }
+
+    /// 설치됨 탭은 전부 받은 것이라 "받은 것 숨기기"가 뜻이 없다.
+    var showsHideInstalled = true {
+        didSet { hideInstalledCheckbox.isHidden = !showsHideInstalled }
+    }
 
     /// 바깥에서 상태를 되돌릴 때(예: 다른 탭으로 옮기며 초기화) 쓴다. 알림은
     /// 다시 보내지 않는다 — 그 상태를 만든 쪽이 이미 알고 있다.

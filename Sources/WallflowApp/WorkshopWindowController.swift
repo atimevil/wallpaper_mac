@@ -42,7 +42,7 @@ final class WorkshopWindowController: NSWindowController {
 
     private let tabControl = NSSegmentedControl(
         labels: WorkshopTab.allCases.map(\.label), trackingMode: .selectOne, target: nil, action: nil)
-    private let applyButton = NSButton(title: "배경화면으로 지정", target: nil, action: nil)
+    private let accountLabel = NSTextField(labelWithString: "계정:")
     private var tab: WorkshopTab = .installed
     private var localItems: [WallpaperItem] = []
     /// 탭마다 검색어를 따로 기억한다. 라이브러리에서 친 말이 창작마당으로
@@ -120,7 +120,7 @@ final class WorkshopWindowController: NSWindowController {
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        window.title = "Wallflow"
+        window.title = "창작마당"
         window.minSize = NSSize(width: 980, height: 600)
         window.center()
         super.init(window: window)
@@ -237,7 +237,7 @@ final class WorkshopWindowController: NSWindowController {
 
         // 계정·로그인은 창작마당 탭에서만 뜻이 있다. 위쪽 줄 오른쪽에 둔다.
         let accountRow = NSStackView(views: [
-            NSTextField(labelWithString: "계정:"), accountField, loginButton,
+            accountLabel, accountField, loginButton,
         ])
         accountRow.orientation = .horizontal
         accountRow.spacing = 8
@@ -301,12 +301,8 @@ final class WorkshopWindowController: NSWindowController {
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         statusLabel.textColor = .secondaryLabelColor
 
-        applyButton.target = self
-        applyButton.action = #selector(applySelected)
-        applyButton.keyEquivalent = "\r"
-
-        // "지우기"·"받아서 추가"는 뺐다 — 상세 패널의 버튼이 같은 일을 한다.
-        let bottom = NSStackView(views: [spinner, statusLabel, applyButton])
+        // 적용·지우기·받기는 상세 패널 버튼이 한다(Return도 그쪽 주 버튼).
+        let bottom = NSStackView(views: [spinner, statusLabel])
         bottom.orientation = .horizontal
         bottom.spacing = 8
 
@@ -349,11 +345,11 @@ final class WorkshopWindowController: NSWindowController {
 
         let isInstalled = next == .installed
         // 라이브러리는 내가 가진 것이라 정렬·계정이 필요 없다.
-        for control in [sortPopup, accountField, loginButton] {
+        for control in [sortPopup, accountLabel, accountField, loginButton] {
             control.isHidden = isInstalled
         }
         searchField.placeholderString = isInstalled ? "라이브러리에서 찾기" : "창작마당 검색"
-        applyButton.isHidden = !isInstalled
+        sidebar.showsHideInstalled = !isInstalled
 
         if isInstalled {
             reloadLibrary()
@@ -614,7 +610,6 @@ final class WorkshopWindowController: NSWindowController {
 
     /// 오른쪽 상세 패널에 지금 고른 항목을 알린다.
     private func selectionDidChange() {
-        updateDownloadButton()
         refreshDetailPanel()
     }
 
@@ -878,7 +873,6 @@ final class WorkshopWindowController: NSWindowController {
     private func setBusy(_ busy: Bool, status: String) {
         statusLabel.stringValue = status
         if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
-        updateDownloadButton()
     }
 
     /// 라이브러리에서 링크만 걷는다. 받아 둔 원본은 남겨 다시 받지 않아도 되게 한다.
@@ -911,10 +905,6 @@ final class WorkshopWindowController: NSWindowController {
         } catch {
             present(title: "지우지 못했다", message: Self.describe(error))
         }
-    }
-
-    private func updateDownloadButton() {
-        applyButton.isEnabled = selectedLibraryItem != nil
     }
 
     private func present(title: String, message: String) {

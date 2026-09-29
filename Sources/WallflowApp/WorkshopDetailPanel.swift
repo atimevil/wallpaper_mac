@@ -43,6 +43,19 @@ final class WorkshopDetailPanel: NSView {
 
     /// "Steam에서 열기"가 열 주소. 항목을 보여 줄 때마다 채운다.
     private var steamWorkshopID: String?
+    /// 속성 편집기 위 구분선+"속성" 제목. 버튼 줄 아래 속성 줄이 느닷없이 이어지지 않게 한다.
+    private lazy var editorHeader: NSView = {
+        let line = NSBox()
+        line.boxType = .separator
+        let label = NSTextField(labelWithString: "속성")
+        label.font = .boldSystemFont(ofSize: 13)
+        let header = NSStackView(views: [line, label])
+        header.orientation = .vertical
+        header.alignment = .leading
+        header.spacing = 10
+        line.widthAnchor.constraint(equalTo: header.widthAnchor).isActive = true
+        return header
+    }()
 
     init(editor: PropertyEditorView) {
         self.editor = editor
@@ -113,6 +126,8 @@ final class WorkshopDetailPanel: NSView {
 
         primaryButton.target = self
         primaryButton.action = #selector(primaryTapped)
+        // 받기/적용이 이 창의 기본 동작이다 — Return으로 누른다.
+        primaryButton.keyEquivalent = "\r"
         steamButton.target = self
         steamButton.action = #selector(steamTapped)
         removeButton.target = self
@@ -209,6 +224,7 @@ final class WorkshopDetailPanel: NSView {
         primaryButton.title = installed ? "적용" : "받기"
         steamButton.isHidden = false
         removeButton.isHidden = true
+        editorHeader.removeFromSuperview()
         editor.removeFromSuperview()
     }
 
@@ -216,7 +232,9 @@ final class WorkshopDetailPanel: NSView {
     func showInstalled(item: WallpaperItem, preview: NSImage?) {
         scrollView.isHidden = false
         emptyLabel.isHidden = true
-        steamWorkshopID = nil
+        // 창작마당에서 받은 것은 폴더 이름이 곧 창작마당 id(숫자)다.
+        let isWorkshop = !item.id.isEmpty && item.id.allSatisfy(\.isNumber)
+        steamWorkshopID = isWorkshop ? item.id : nil
 
         setPreview(preview)
         titleLabel.stringValue = item.title
@@ -226,28 +244,35 @@ final class WorkshopDetailPanel: NSView {
         sizeRow.isHidden = true
         createdRow.isHidden = true
         updatedRow.isHidden = true
-        tagsView.tags = []
+        // 종류·등급까지 합친 태그 — 창작마당 쪽 칩과 같은 모양이 된다.
+        tagsView.tags = item.filterTags
         descriptionView.string = ""
         descriptionView.isHidden = true
 
         progressBar.isHidden = true
         primaryButton.isEnabled = true
         primaryButton.title = "적용"
-        steamButton.isHidden = true
+        steamButton.isHidden = !isWorkshop
         removeButton.isHidden = false
 
         if editor.superview == nil {
-            stack.addArrangedSubview(editor)
-            editor.widthAnchor.constraint(
-                equalTo: stack.widthAnchor, constant: -contentInset * 2).isActive = true
+            for view in [editorHeader, editor] {
+                stack.addArrangedSubview(view)
+                view.widthAnchor.constraint(
+                    equalTo: stack.widthAnchor, constant: -contentInset * 2).isActive = true
+            }
         }
         editor.show(item: item)
+        // 조절할 것이 없으면 머리째 숨긴다 — 빈 "속성" 제목만 남으면 뭔가 빠진 것처럼 보인다.
+        editorHeader.isHidden = editor.isEmpty
+        editor.isHidden = editor.isEmpty
     }
 
     func showEmpty() {
         scrollView.isHidden = true
         emptyLabel.isHidden = false
         steamWorkshopID = nil
+        editorHeader.removeFromSuperview()
         editor.removeFromSuperview()
     }
 
