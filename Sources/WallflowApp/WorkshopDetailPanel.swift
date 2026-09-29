@@ -19,6 +19,7 @@ final class WorkshopDetailPanel: NSView {
     private let stack = FlippedStackView()
 
     private let previewContainer = NSView()
+    private var previewAspect: NSLayoutConstraint?
     private let previewImageView = NSImageView()
     private let titleLabel = NSTextField(wrappingLabelWithString: "")
     private let authorRow = NSStackView()
@@ -72,10 +73,8 @@ final class WorkshopDetailPanel: NSView {
             previewImageView.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor),
             previewImageView.leadingAnchor.constraint(equalTo: previewContainer.leadingAnchor),
             previewImageView.trailingAnchor.constraint(equalTo: previewContainer.trailingAnchor),
-            // 16:9 칸. 실제 배경화면 대부분이 이 비율이다.
-            previewContainer.heightAnchor.constraint(
-                equalTo: previewContainer.widthAnchor, multiplier: 9.0 / 16.0),
         ])
+        setPreview(nil)
 
         titleLabel.font = .boldSystemFont(ofSize: 15)
         // 줄바꿈 라벨도 한 줄 폭을 요구한다 — 버팀이 기본(750)이면 긴 제목이
@@ -185,7 +184,7 @@ final class WorkshopDetailPanel: NSView {
         emptyLabel.isHidden = true
         steamWorkshopID = item.id
 
-        previewImageView.image = preview
+        setPreview(preview)
         titleLabel.stringValue = item.title
         setRow(authorRow, hidden: page?.author == nil)
         authorLabel.stringValue = page?.author ?? ""
@@ -219,7 +218,7 @@ final class WorkshopDetailPanel: NSView {
         emptyLabel.isHidden = true
         steamWorkshopID = nil
 
-        previewImageView.image = preview
+        setPreview(preview)
         titleLabel.stringValue = item.title
         setRow(authorRow, hidden: true)
         setRating(nil, count: nil)
@@ -261,6 +260,22 @@ final class WorkshopDetailPanel: NSView {
                 systemSymbolName: symbols[index], accessibilityDescription: nil)
         }
         ratingCountLabel.stringValue = count.map { "(\($0.formatted()))" } ?? ""
+    }
+
+    /// 미리보기 칸 높이를 그림 비율에 맞춘다. 16:9 고정이면 창작마당에 흔한
+    /// 정사각 미리보기 양옆이 크게 빈다. 세로로 긴 그림은 정사각까지만 —
+    /// 더 길면 패널을 미리보기가 다 차지한다.
+    private func setPreview(_ image: NSImage?) {
+        previewImageView.image = image
+        var ratio: CGFloat = 9.0 / 16.0
+        if let size = image?.size, size.width > 0 {
+            ratio = min(max(size.height / size.width, 9.0 / 16.0), 1)
+        }
+        guard previewAspect?.multiplier != ratio else { return }
+        previewAspect?.isActive = false
+        previewAspect = previewContainer.heightAnchor.constraint(
+            equalTo: previewContainer.widthAnchor, multiplier: ratio)
+        previewAspect?.isActive = true
     }
 
     private func setRow(_ view: NSView, hidden: Bool) {
