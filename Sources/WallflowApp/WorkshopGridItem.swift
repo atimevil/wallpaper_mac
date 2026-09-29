@@ -14,8 +14,14 @@ struct GridEntry {
 /// 없어서, 16:9 배경화면이 정사각형 칸에서 위아래로 회색 띠를 남긴다.
 final class PreviewView: NSView {
     var image: NSImage? {
-        didSet { updateContents() }
+        didSet {
+            poster = image.flatMap(Self.posterFrame)
+            updateContents()
+        }
     }
+    /// 움직이는 GIF의 대표 그림. 멈춰 있는 칸은 첫 프레임을 보여 주는데, 서서히
+    /// 밝아지는 GIF는 첫 프레임이 통째로 검어서 칸이 까맣게 보인다.
+    private var poster: CGImage?
 
     override func layout() {
         super.layout()
@@ -34,8 +40,38 @@ final class PreviewView: NSView {
         // 칸 비율에 맞춰 CGImage를 꺼낸다. NSImage를 그대로 넣으면 표현이
         // 여럿일 때(아이콘 등) 어느 것이 쓰일지 정해지지 않는다.
         var rect = CGRect(origin: .zero, size: bounds.size)
-        layer?.contents = image.cgImage(
+        layer?.contents = poster ?? image.cgImage(
             forProposedRect: &rect, context: nil, hints: nil)
+    }
+
+    /// 여러 프레임 그림이고 첫 프레임이 거의 검으면, 앞쪽에서 처음 밝은 프레임을
+    /// 고른다. 한 프레임짜리거나 첫 프레임이 멀쩡하면 nil — 원래대로 그린다.
+    private static func posterFrame(of image: NSImage) -> CGImage? {
+        guard let rep = image.representations.lazy.compactMap({ $0 as? NSBitmapImageRep }).first,
+              let count = rep.value(forProperty: .frameCount) as? Int, count > 1
+        else { return nil }
+        // 같은 NSImage를 호버 애니메이션도 쓴다 — 고른 뒤 첫 프레임으로 돌려 둔다.
+        defer { rep.setProperty(.currentFrame, withValue: 0) }
+        // ponytail: 앞 12프레임만 본다. 더 길게 검은 GIF는 첫 프레임 그대로 둔다.
+        for frame in 0..<min(count, 12) {
+            rep.setProperty(.currentFrame, withValue: frame)
+            guard let cg = rep.cgImage else { continue }
+            if !isNearlyBlack(cg) { return frame == 0 ? nil : cg.copy() }
+        }
+        return nil
+    }
+
+    /// 1×1로 줄여 평균 색을 본다.
+    private static func isNearlyBlack(_ image: CGImage) -> Bool {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        guard let context = CGContext(
+            data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return false }
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        return max(pixel[0], pixel[1], pixel[2]) < 10
     }
 }
 
@@ -135,8 +171,9 @@ final class WorkshopGridItem: NSCollectionViewItem {
             progressBar.bottomAnchor.constraint(equalTo: imageBox.bottomAnchor, constant: -6),
 
             nameLabel.topAnchor.constraint(equalTo: imageBox.bottomAnchor, constant: 4),
-            nameLabel.leadingAnchor.constraint(equalTo: box.leadingAnchor),
-            nameLabel.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+            // 선택 테두리(2pt)가 칸 전체를 두르므로 붙이면 첫 글자가 가린다.
+            nameLabel.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 6),
+            nameLabel.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -6),
             nameLabel.bottomAnchor.constraint(lessThanOrEqualTo: box.bottomAnchor),
         ])
         view = box
