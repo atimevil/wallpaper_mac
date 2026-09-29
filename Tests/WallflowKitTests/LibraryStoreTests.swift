@@ -59,6 +59,49 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertNil(try WallpaperItem.load(from: dir).previewURL)
     }
 
+    func testLoadsTags() throws {
+        let dir = try makeItem(
+            id: "666",
+            json: #"{"type":"video","file":"bg.mp4","title":"T","tags":["Anime","Relaxing"]}"#,
+            files: ["bg.mp4"]
+        )
+        XCTAssertEqual(try WallpaperItem.load(from: dir).tags, ["Anime", "Relaxing"])
+    }
+
+    func testMissingTagsIsEmpty() throws {
+        let dir = try makeItem(
+            id: "667",
+            json: #"{"type":"video","file":"bg.mp4","title":"T"}"#,
+            files: ["bg.mp4"]
+        )
+        XCTAssertEqual(try WallpaperItem.load(from: dir).tags, [])
+    }
+
+    /// 실물 project.json은 종류·등급이 `tags`가 아니라 `type`/`contentrating`에
+    /// 따로 있다. `filterTags`가 이 셋을 합쳐야 사이드바 기본 필터(등급=전체
+    /// 이용가)로도 설치됨 탭이 비지 않는다.
+    func testFilterTagsCombinesTagsTypeAndRating() throws {
+        let dir = try makeItem(
+            id: "668",
+            json: #"{"type":"scene","file":"scene.json","title":"T","tags":["Game"],"contentrating":"Everyone"}"#,
+            files: ["scene.json", "scene.pkg"]
+        )
+        let item = try WallpaperItem.load(from: dir)
+        XCTAssertEqual(item.contentRating, "Everyone")
+        XCTAssertEqual(Set(item.filterTags), ["Game", "Scene", "Everyone"])
+    }
+
+    func testFilterTagsWithoutRating() throws {
+        let dir = try makeItem(
+            id: "669",
+            json: #"{"type":"video","file":"bg.mp4","title":"T"}"#,
+            files: ["bg.mp4"]
+        )
+        let item = try WallpaperItem.load(from: dir)
+        XCTAssertNil(item.contentRating)
+        XCTAssertEqual(Set(item.filterTags), ["Video", "Everyone"])
+    }
+
     func testTitleFallsBackToDirectoryName() throws {
         let dir = try makeItem(
             id: "444",

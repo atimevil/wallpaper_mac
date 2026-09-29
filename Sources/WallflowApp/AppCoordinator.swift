@@ -76,6 +76,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         displays.onConversionStateChanged = { [weak self] in self?.menuBar?.refreshStates() }
         refreshLibrary()
         restoreLastSelection()
+        // 확인용: 켜자마자 창작마당 창을 연다(`browse`면 창작마당 탭으로).
+        if let open = ProcessInfo.processInfo.environment["WALLFLOW_OPEN_WORKSHOP"] {
+            showWorkshop()
+            if open == "browse" { workshop?.selectTab(.browse) }
+            if let id = ProcessInfo.processInfo.environment["WALLFLOW_WORKSHOP_SELECT"] {
+                workshop?.selectItem(id: id)
+            }
+        }
     }
 
     /// 지난번에 쓰던 배경화면을 다시 건다.
@@ -99,9 +107,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         if workshop == nil {
             workshop = WorkshopWindowController(
                 installer: installer,
+                store: SceneRenderer.propertyStore,
                 libraryItems: { [weak self] in (try? self?.library.scan()) ?? [] },
                 onApply: { [weak self] item in self?.select(item) },
-                onLibraryChanged: { [weak self] in self?.refreshLibrary() })
+                onLibraryChanged: { [weak self] in self?.refreshLibrary() },
+                onPropertiesChanged: { [weak self] in self?.displays.reloadCurrent() })
         }
         // 메뉴바 전용 앱이라 창을 띄우려면 앱을 활성화해야 한다.
         NSApp.activate(ignoringOtherApps: true)
