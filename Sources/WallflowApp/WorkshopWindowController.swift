@@ -565,7 +565,9 @@ final class WorkshopWindowController: NSWindowController {
             return
         }
         pendingSelectID = nil
-        collectionView.selectionIndexPaths = [IndexPath(item: index, section: 0)]
+        let indexPath = IndexPath(item: index, section: 0)
+        collectionView.selectionIndexPaths = [indexPath]
+        collectionView.scrollToItems(at: [indexPath], scrollPosition: .centeredVertically)
         selectionDidChange()
     }
 
@@ -573,14 +575,18 @@ final class WorkshopWindowController: NSWindowController {
         // `reloadData()`는 선택을 잃는다(무한 스크롤 다음 페이지·다운로드 뒤
         // 갱신마다 불린다) — 골라 둔 id가 새 목록에도 있으면 되살린다. 안 그러면
         // 다운로드가 끝나자마자 상세 패널이 "적용"으로 안 바뀌고 빈 채로 간다.
-        let keepID = selectedEntry?.id ?? pendingSelectID
-        if pendingSelectID != nil, visibleEntries.contains(where: { $0.id == pendingSelectID }) {
-            pendingSelectID = nil
-        }
+        let pending = pendingSelectID.flatMap { id in visibleEntries.contains { $0.id == id } ? id : nil }
+        if pending != nil { pendingSelectID = nil }
+        let keepID = selectedEntry?.id ?? pending
         displayedEntries = visibleEntries
         collectionView.reloadData()
         if let keepID, let index = displayedEntries.firstIndex(where: { $0.id == keepID }) {
-            collectionView.selectionIndexPaths = [IndexPath(item: index, section: 0)]
+            let indexPath = IndexPath(item: index, section: 0)
+            collectionView.selectionIndexPaths = [indexPath]
+            // 밖에서 고른 항목은 화면 밖일 수 있다 — 보이게 내린다.
+            if pending != nil {
+                collectionView.scrollToItems(at: [indexPath], scrollPosition: .centeredVertically)
+            }
         }
         selectionDidChange()
     }

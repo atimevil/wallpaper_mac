@@ -61,6 +61,9 @@ final class WorkshopDetailPanel: NSView {
         previewContainer.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
         previewImageView.imageScaling = .scaleProportionallyUpOrDown
         previewImageView.animates = true
+        // 이미지 뷰는 원본 크기를 요구한다 — 큰 미리보기가 패널을 420까지 민다.
+        previewImageView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        previewImageView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         previewImageView.translatesAutoresizingMaskIntoConstraints = false
         previewContainer.addSubview(previewImageView)
         previewContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -75,6 +78,9 @@ final class WorkshopDetailPanel: NSView {
         ])
 
         titleLabel.font = .boldSystemFont(ofSize: 15)
+        // 줄바꿈 라벨도 한 줄 폭을 요구한다 — 버팀이 기본(750)이면 긴 제목이
+        // 패널 폭 제안(340)과 비겨 패널을 420까지 밀고 창 최소 폭도 늘린다.
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         authorLabel.textColor = .secondaryLabelColor
         authorRow.orientation = .horizontal
@@ -194,6 +200,8 @@ final class WorkshopDetailPanel: NSView {
 
         tagsView.tags = item.tags
         descriptionView.string = WorkshopText.plain(fromBBCode: item.description)
+        // 설명이 없으면 칸째 숨긴다 — 안 그러면 태그와 버튼 사이가 비어 보인다.
+        setRow(descriptionView, hidden: descriptionView.string.isEmpty)
 
         let isBusy = progress != nil
         progressBar.isHidden = !isBusy
@@ -221,6 +229,7 @@ final class WorkshopDetailPanel: NSView {
         updatedRow.isHidden = true
         tagsView.tags = []
         descriptionView.string = ""
+        descriptionView.isHidden = true
 
         progressBar.isHidden = true
         primaryButton.isEnabled = true
@@ -308,6 +317,8 @@ private final class InfoRow: NSStackView {
 private final class TagChipsView: NSView {
     var tags: [String] = [] { didSet { rebuild() } }
     private var chipLabels: [NSTextField] = []
+    // 뒤집지 않으면 y=0이 아래라 첫 줄이 맨 밑에 놓여 태그 순서가 거꾸로 보인다.
+    override var isFlipped: Bool { true }
 
     override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: height) }
     private var height: CGFloat = 0
@@ -318,6 +329,7 @@ private final class TagChipsView: NSView {
             let label = NSTextField(labelWithString: tag)
             label.font = .systemFont(ofSize: 11)
             label.textColor = .secondaryLabelColor
+            label.alignment = .center
             label.wantsLayer = true
             label.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
             label.layer?.cornerRadius = 8

@@ -21,15 +21,22 @@ final class WorkshopGridLayout: NSCollectionViewLayout {
     private var attributes: [NSCollectionViewLayoutAttributes] = []
     private var contentHeight: CGFloat = 0
 
+    /// 보이는 폭. 컬렉션 뷰 자기 폭을 쓰면 문서 폭이 내용 크기를 따라가므로
+    /// 상세 칸이 넓어져 보이는 자리가 줄어도 예전 폭에 머물러 오른쪽 칸이 잘린다.
+    private var visibleWidth: CGFloat {
+        collectionView?.enclosingScrollView?.contentView.bounds.width
+            ?? collectionView?.bounds.width ?? 0
+    }
+
     override var collectionViewContentSize: NSSize {
-        NSSize(width: collectionView?.bounds.width ?? 0, height: contentHeight)
+        NSSize(width: visibleWidth, height: contentHeight)
     }
 
     override func prepare() {
         attributes = []
         guard let collectionView else { contentHeight = 0; return }
         let count = collectionView.numberOfItems(inSection: 0)
-        let available = collectionView.bounds.width - sectionInset.left - sectionInset.right
+        let available = visibleWidth - sectionInset.left - sectionInset.right
         guard count > 0, available > 0 else { contentHeight = 0; return }
 
         let columns = Swift.max(1, Int((available + spacing) / (targetCellWidth + spacing)))
