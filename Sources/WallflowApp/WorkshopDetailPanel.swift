@@ -360,6 +360,12 @@ private final class AutoHeightTextView: NSTextView {
         return NSSize(width: NSView.noIntrinsicMetric, height: ceil(used.height))
     }
 
+    // 코드에서 `string`을 넣으면 `didChangeText`가 안 불려 높이가 그대로 남고
+    // 아래 버튼 줄과 겹친다.
+    override var string: String {
+        didSet { invalidateIntrinsicContentSize() }
+    }
+
     override func didChangeText() {
         super.didChangeText()
         invalidateIntrinsicContentSize()

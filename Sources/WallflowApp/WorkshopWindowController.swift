@@ -556,8 +556,15 @@ final class WorkshopWindowController: NSWindowController {
     }
 
     /// 밖에서 항목을 고른다(확인용 환경 변수가 쓴다). 목록에 없으면 아무것도 안 한다.
+    private var pendingSelectID: String?
+
     func selectItem(id: String) {
-        guard let index = displayedEntries.firstIndex(where: { $0.id == id }) else { return }
+        // 창작마당 목록은 비동기로 오니 아직 없으면 기억해 뒀다가 목록이 오면 고른다.
+        guard let index = displayedEntries.firstIndex(where: { $0.id == id }) else {
+            pendingSelectID = id
+            return
+        }
+        pendingSelectID = nil
         collectionView.selectionIndexPaths = [IndexPath(item: index, section: 0)]
         selectionDidChange()
     }
@@ -566,7 +573,10 @@ final class WorkshopWindowController: NSWindowController {
         // `reloadData()`는 선택을 잃는다(무한 스크롤 다음 페이지·다운로드 뒤
         // 갱신마다 불린다) — 골라 둔 id가 새 목록에도 있으면 되살린다. 안 그러면
         // 다운로드가 끝나자마자 상세 패널이 "적용"으로 안 바뀌고 빈 채로 간다.
-        let keepID = selectedEntry?.id
+        let keepID = selectedEntry?.id ?? pendingSelectID
+        if pendingSelectID != nil, visibleEntries.contains(where: { $0.id == pendingSelectID }) {
+            pendingSelectID = nil
+        }
         displayedEntries = visibleEntries
         collectionView.reloadData()
         if let keepID, let index = displayedEntries.firstIndex(where: { $0.id == keepID }) {
@@ -585,9 +595,10 @@ final class WorkshopWindowController: NSWindowController {
                 self.thumbnails.setObject(image, forKey: item.id as NSString)
                 // 그 칸만 다시 그린다. 전체 reload는 선택을 잃는다.
                 if let index = self.displayedEntries.firstIndex(where: { $0.id == item.id }) {
-                    self.collectionView.reloadItems(
-                        at: [IndexPath(item: index, section: 0)])
+                    self.reloadItemKeepingSelection(IndexPath(item: index, section: 0))
                 }
+                // 이미 골라 둔 항목이면 상세 패널의 빈 미리보기도 채운다.
+                if self.selectedEntry?.id == item.id { self.refreshDetailPanel() }
             }
         }
     }
@@ -767,6 +778,14 @@ final class WorkshopWindowController: NSWindowController {
 
     /// 진행률 줄마다 온다 — 칸을 통째로 다시 그리면 깜빡이고 호버 애니메이션도
     /// 끊긴다. 이미 화면에 있는 칸이면 진행 막대만 고쳐 그린다.
+    /// `reloadItems`는 그 칸이 골라져 있으면 선택을 푼다 — 썸네일이 늦게 오면
+    /// 고른 항목이 풀려 상세 패널의 미리보기·평점 갱신이 버려진다.
+    private func reloadItemKeepingSelection(_ indexPath: IndexPath) {
+        let kept = collectionView.selectionIndexPaths
+        collectionView.reloadItems(at: [indexPath])
+        collectionView.selectionIndexPaths = kept
+    }
+
     private func reloadDownloadingItem() {
         guard let id = downloadingID else { return }
         if let index = displayedEntries.firstIndex(where: { $0.id == id }) {
@@ -774,7 +793,7 @@ final class WorkshopWindowController: NSWindowController {
             if let cell = collectionView.item(at: indexPath) as? WorkshopGridItem {
                 cell.updateProgress(downloadFraction)
             } else {
-                collectionView.reloadItems(at: [indexPath])
+                reloadItemKeepingSelection(indexPath)
             }
         }
         // 지금 받는 항목이 고른 항목이면 상세 패널의 진행 막대도 같이 간다.
