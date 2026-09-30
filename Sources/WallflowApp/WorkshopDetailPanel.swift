@@ -43,6 +43,9 @@ final class WorkshopDetailPanel: NSView {
 
     /// "Steam에서 열기"가 열 주소. 항목을 보여 줄 때마다 채운다.
     private var steamWorkshopID: String?
+    /// 지금 보이는 항목 id. 다른 항목으로 바뀔 때만 맨 위로 올린다 — 같은 항목을
+    /// 다시 그릴 때(진행률·평점 도착)마다 올리면 읽던 자리가 튄다.
+    private var shownID: String?
     /// 속성 편집기 위 구분선+"속성" 제목. 버튼 줄 아래 속성 줄이 느닷없이 이어지지 않게 한다.
     private lazy var editorHeader: NSView = {
         let line = NSBox()
@@ -197,6 +200,7 @@ final class WorkshopDetailPanel: NSView {
     ) {
         scrollView.isHidden = false
         emptyLabel.isHidden = true
+        scrollToTopIfChanged(to: item.id)
         steamWorkshopID = item.id
 
         setPreview(preview)
@@ -231,6 +235,7 @@ final class WorkshopDetailPanel: NSView {
     func showInstalled(item: WallpaperItem, preview: NSImage?, isCurrent: Bool) {
         scrollView.isHidden = false
         emptyLabel.isHidden = true
+        scrollToTopIfChanged(to: item.id)
         // 창작마당에서 받은 것은 폴더 이름이 곧 창작마당 id(숫자)다.
         let isWorkshop = !item.id.isEmpty && item.id.allSatisfy(\.isNumber)
         steamWorkshopID = isWorkshop ? item.id : nil
@@ -267,6 +272,7 @@ final class WorkshopDetailPanel: NSView {
     }
 
     func showEmpty() {
+        shownID = nil
         scrollView.isHidden = true
         emptyLabel.isHidden = false
         steamWorkshopID = nil
@@ -299,6 +305,14 @@ final class WorkshopDetailPanel: NSView {
         previewAspect = previewContainer.heightAnchor.constraint(
             equalTo: previewContainer.widthAnchor, multiplier: ratio)
         previewAspect?.isActive = true
+    }
+
+    private func scrollToTopIfChanged(to id: String) {
+        guard id != shownID else { return }
+        shownID = id
+        // 뒤집힌 문서 뷰라 (0,0)이 맨 위다.
+        scrollView.contentView.scroll(to: .zero)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     private enum Primary { case download, apply, current }
