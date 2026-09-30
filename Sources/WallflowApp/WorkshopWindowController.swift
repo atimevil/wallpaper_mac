@@ -95,12 +95,17 @@ final class WorkshopWindowController: NSWindowController {
     /// 창작마당 항목 누적 목록. 무한 스크롤이라 페이지를 붙여 나간다
     /// (`WorkshopPaging.merge`). 탭·필터·검색·정렬이 바뀌면 통째로 비운다.
     fileprivate var items: [WorkshopItem] = []
-    /// `NSCache`로 개수 상한을 둔다 — 큰 GIF를 여럿 지나가도 메모리가 안 터진다.
+    /// `NSCache`로 개수·바이트 상한을 둔다 — 큰 GIF를 여럿 지나가도 메모리가 안 터진다.
+    /// 개수만으로는 부족했다: 창작마당 미리보기는 몇 MB짜리 GIF가 흔해 500개쯤
+    /// 스크롤하니 1GB를 넘겼다. 밀려난 것은 칸이 다시 보일 때 새로 받는다.
     private let thumbnails: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
         cache.countLimit = 600
+        cache.totalCostLimit = 96 * 1024 * 1024  // 압축 크기 기준 — 풀린 프레임까지 치면 실제로는 몇 배
         return cache
     }()
+    /// 받는 중인 썸네일 id. 같은 칸이 여러 번 그려져도 한 번만 받는다.
+    private var thumbnailsInFlight: Set<String> = []
     /// 진행 중인 목록 요청 세대. 필터를 빠르게 바꿀 때 늦게 온 옛 페이지가
     /// 새 결과에 섞이는 것을 막는다.
     private var loadGeneration = 0
@@ -483,7 +488,6 @@ final class WorkshopWindowController: NSWindowController {
                 self.items = merged
                 self.nextPage = requested + 1
                 self.refreshTable()
-                self.loadThumbnails(generation: generation)
 
                 // 클라이언트 OR 필터 뒤 이 페이지에서 새로 보일 칸이 없으면
                 // 한 번 더 다음 페이지를 청한다(연속 3회까지). 전부 중복이라
@@ -656,21 +660,26 @@ final class WorkshopWindowController: NSWindowController {
         filterChanged(to: reset)
     }
 
-    private func loadThumbnails(generation: Int) {
-        for item in items where thumbnails.object(forKey: item.id as NSString) == nil {
-            guard let url = item.previewURL else { continue }
-            Task { [weak self] in
-                guard let (data, _) = try? await URLSession.shared.data(from: url),
-                      let image = NSImage(data: data) else { return }
-                guard let self, generation == self.loadGeneration else { return }
-                self.thumbnails.setObject(image, forKey: item.id as NSString)
-                // 그 칸만 다시 그린다. 전체 reload는 선택을 잃는다.
-                if let index = self.displayedEntries.firstIndex(where: { $0.id == item.id }) {
-                    self.reloadItemKeepingSelection(IndexPath(item: index, section: 0))
-                }
-                // 이미 골라 둔 항목이면 상세 패널의 빈 미리보기도 채운다.
-                if self.selectedEntry?.id == item.id { self.refreshDetailPanel() }
+    /// 칸이 화면에 나올 때(또는 상세 패널이 필요할 때) 그 항목 것만 받는다.
+    /// 예전엔 페이지마다 쌓인 목록 전체를 훑어, 캐시에서 밀려난 수백 개를 매번 다시 받았다.
+    /// 캐시는 id로 찾으니 필터가 바뀌어도(세대가 달라도) 그대로 써도 된다.
+    private func requestThumbnail(for id: String) {
+        guard tab == .browse, thumbnails.object(forKey: id as NSString) == nil,
+              let url = items.first(where: { $0.id == id })?.previewURL,
+              thumbnailsInFlight.insert(id).inserted
+        else { return }
+        Task { [weak self] in
+            let fetched = try? await URLSession.shared.data(from: url)
+            guard let self else { return }
+            self.thumbnailsInFlight.remove(id)
+            guard let (data, _) = fetched, let image = NSImage(data: data) else { return }
+            self.thumbnails.setObject(image, forKey: id as NSString, cost: data.count)
+            // 그 칸만 다시 그린다. 전체 reload는 선택을 잃는다.
+            if let index = self.displayedEntries.firstIndex(where: { $0.id == id }) {
+                self.reloadItemKeepingSelection(IndexPath(item: index, section: 0))
             }
+            // 이미 골라 둔 항목이면 상세 패널의 빈 미리보기도 채운다.
+            if self.selectedEntry?.id == id { self.refreshDetailPanel() }
         }
     }
 
@@ -701,6 +710,7 @@ final class WorkshopWindowController: NSWindowController {
             if detailsPageCache[item.id] == nil {
                 loadDetailsPage(for: item.id)
             }
+            requestThumbnail(for: item.id)
         }
     }
 
@@ -1015,9 +1025,9 @@ extension WorkshopWindowController: NSCollectionViewDataSource, NSCollectionView
         if let grid = cell as? WorkshopGridItem, indexPath.item < list.count {
             let entry = list[indexPath.item]
             let progress = (entry.id == downloadingID) ? downloadFraction : nil
-            grid.configure(
-                entry: entry, image: thumbnails.object(forKey: entry.id as NSString),
-                downloadProgress: progress)
+            let image = thumbnails.object(forKey: entry.id as NSString)
+            grid.configure(entry: entry, image: image, downloadProgress: progress)
+            if image == nil { requestThumbnail(for: entry.id) }
         }
         return cell
     }
