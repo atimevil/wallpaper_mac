@@ -110,6 +110,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 store: SceneRenderer.propertyStore,
                 libraryItems: { [weak self] in (try? self?.library.scan()) ?? [] },
                 onApply: { [weak self] item in self?.select(item) },
+                currentItemID: { [weak self] in self?.displays.currentItem?.id },
                 onLibraryChanged: { [weak self] in self?.refreshLibrary() },
                 onPropertiesChanged: { [weak self] in self?.displays.reloadCurrent() })
         }

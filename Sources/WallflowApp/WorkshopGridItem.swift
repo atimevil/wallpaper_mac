@@ -6,6 +6,8 @@ struct GridEntry {
     let id: String
     let title: String
     let installed: Bool
+    /// 지금 켜진 배경화면인지.
+    var isCurrent = false
 }
 
 /// 칸을 꽉 채우는 그림. 비율을 지키고 넘치는 쪽을 자른다.
@@ -94,6 +96,7 @@ final class WorkshopGridItem: NSCollectionViewItem {
     private let animatedView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let badge = NSImageView()
+    private let currentPill = NSTextField(labelWithString: "사용 중")
     private let progressBar = NSProgressIndicator()
     private let box = NSView()
     private var trackingArea: NSTrackingArea?
@@ -130,6 +133,17 @@ final class WorkshopGridItem: NSCollectionViewItem {
         badge.translatesAutoresizingMaskIntoConstraints = false
         imageBox.addSubview(badge)
 
+        // 지금 켜진 배경화면 — 체크 배지(받음)만으로는 어느 게 켜져 있는지 모른다.
+        currentPill.font = .boldSystemFont(ofSize: 10)
+        currentPill.textColor = .white
+        currentPill.alignment = .center
+        currentPill.wantsLayer = true
+        currentPill.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        currentPill.layer?.cornerRadius = 8
+        currentPill.isHidden = true
+        currentPill.translatesAutoresizingMaskIntoConstraints = false
+        imageBox.addSubview(currentPill)
+
         progressBar.style = .bar
         progressBar.isIndeterminate = false
         progressBar.minValue = 0
@@ -161,6 +175,11 @@ final class WorkshopGridItem: NSCollectionViewItem {
             animatedView.leadingAnchor.constraint(equalTo: imageBox.leadingAnchor),
             animatedView.trailingAnchor.constraint(equalTo: imageBox.trailingAnchor),
 
+            currentPill.topAnchor.constraint(equalTo: imageBox.topAnchor, constant: 6),
+            currentPill.leadingAnchor.constraint(equalTo: imageBox.leadingAnchor, constant: 6),
+            currentPill.widthAnchor.constraint(equalToConstant: 52),
+            currentPill.heightAnchor.constraint(equalToConstant: 17),
+
             badge.topAnchor.constraint(equalTo: imageBox.topAnchor, constant: 4),
             badge.trailingAnchor.constraint(equalTo: imageBox.trailingAnchor, constant: -4),
             badge.widthAnchor.constraint(equalToConstant: 18),
@@ -191,6 +210,7 @@ final class WorkshopGridItem: NSCollectionViewItem {
         preview.image = image
         nameLabel.stringValue = entry.title
         badge.isHidden = downloadProgress != nil || !entry.installed
+        currentPill.isHidden = !entry.isCurrent
         if let progress = downloadProgress {
             progressBar.isHidden = false
             progressBar.doubleValue = progress

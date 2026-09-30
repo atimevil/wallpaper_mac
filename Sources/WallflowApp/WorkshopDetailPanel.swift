@@ -193,7 +193,7 @@ final class WorkshopDetailPanel: NSView {
     /// 창작마당 항목. `page`는 아직 안 왔으면 nil로 넘긴다 — 평점·작성자 줄만 숨는다.
     func showWorkshop(
         item: WorkshopItem, preview: NSImage?, page: WorkshopDetailsPage?,
-        installed: Bool, progress: Double?
+        installed: Bool, isCurrent: Bool, progress: Double?
     ) {
         scrollView.isHidden = false
         emptyLabel.isHidden = true
@@ -220,8 +220,7 @@ final class WorkshopDetailPanel: NSView {
         let isBusy = progress != nil
         progressBar.isHidden = !isBusy
         progressBar.doubleValue = progress ?? 0
-        primaryButton.isEnabled = !isBusy
-        primaryButton.title = installed ? "적용" : "받기"
+        setPrimary(installed ? (isCurrent ? .current : .apply) : .download, busy: isBusy)
         steamButton.isHidden = false
         removeButton.isHidden = true
         editorHeader.removeFromSuperview()
@@ -229,7 +228,7 @@ final class WorkshopDetailPanel: NSView {
     }
 
     /// 설치됨 탭. 속성 편집기는 이 배경화면 것으로 채워 버튼 줄 아래 붙인다.
-    func showInstalled(item: WallpaperItem, preview: NSImage?) {
+    func showInstalled(item: WallpaperItem, preview: NSImage?, isCurrent: Bool) {
         scrollView.isHidden = false
         emptyLabel.isHidden = true
         // 창작마당에서 받은 것은 폴더 이름이 곧 창작마당 id(숫자)다.
@@ -250,8 +249,7 @@ final class WorkshopDetailPanel: NSView {
         descriptionView.isHidden = true
 
         progressBar.isHidden = true
-        primaryButton.isEnabled = true
-        primaryButton.title = "적용"
+        setPrimary(isCurrent ? .current : .apply, busy: false)
         steamButton.isHidden = !isWorkshop
         removeButton.isHidden = false
 
@@ -301,6 +299,18 @@ final class WorkshopDetailPanel: NSView {
         previewAspect = previewContainer.heightAnchor.constraint(
             equalTo: previewContainer.widthAnchor, multiplier: ratio)
         previewAspect?.isActive = true
+    }
+
+    private enum Primary { case download, apply, current }
+
+    /// 이미 켜진 배경화면에 "적용"을 또 띄우면 눌러도 아무 일이 없어 헷갈린다.
+    private func setPrimary(_ kind: Primary, busy: Bool) {
+        switch kind {
+        case .download: primaryButton.title = "받기"
+        case .apply: primaryButton.title = "적용"
+        case .current: primaryButton.title = "사용 중"
+        }
+        primaryButton.isEnabled = !busy && kind != .current
     }
 
     private func setRow(_ view: NSView, hidden: Bool) {

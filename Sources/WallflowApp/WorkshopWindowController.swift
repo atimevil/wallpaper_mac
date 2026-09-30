@@ -39,6 +39,8 @@ final class WorkshopWindowController: NSWindowController {
     private let libraryItems: () -> [WallpaperItem]
     /// 라이브러리에서 고른 것을 배경화면으로 건다.
     private let onApply: (WallpaperItem) -> Void
+    /// 지금 켜진 배경화면 id. 격자·상세 패널이 "사용 중"을 가린다.
+    private let currentItemID: () -> String?
 
     private let tabControl = NSSegmentedControl(
         labels: WorkshopTab.allCases.map(\.label), trackingMode: .selectOne, target: nil, action: nil)
@@ -104,12 +106,14 @@ final class WorkshopWindowController: NSWindowController {
         store: UserPropertyStore,
         libraryItems: @escaping () -> [WallpaperItem],
         onApply: @escaping (WallpaperItem) -> Void,
+        currentItemID: @escaping () -> String?,
         onLibraryChanged: @escaping () -> Void,
         onPropertiesChanged: @escaping () -> Void
     ) {
         self.installer = installer
         self.libraryItems = libraryItems
         self.onApply = onApply
+        self.currentItemID = currentItemID
         self.onLibraryChanged = onLibraryChanged
         // 설정 창과 같은 저장소·같은 콜백 — 편집이 같은 곳에 저장되고 켜진
         // 배경화면에 그 즉시 반영된다.
@@ -515,6 +519,7 @@ final class WorkshopWindowController: NSWindowController {
 
     /// 지금 탭에서 보여 줄 칸들. `displayedEntries`를 새로 채울 때만 부른다.
     private var visibleEntries: [GridEntry] {
+        let current = currentItemID()
         if tab == .installed {
             let text = searchField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
             return localItems
@@ -522,11 +527,13 @@ final class WorkshopWindowController: NSWindowController {
                 // 해상도는 project.json 어디에도 없다 — 넣은 채로 거르면 하나라도
                 // 고른 순간 설치된 항목이 전부 빠진다.
                 .filter { filterState.matches(tags: $0.filterTags, ignoring: [.resolution]) }
-                .map { GridEntry(id: $0.id, title: $0.title, installed: true) }
+                .map { GridEntry(id: $0.id, title: $0.title, installed: true,
+                                 isCurrent: $0.id == current) }
         }
         return items
             .filter(itemPassesClientFilter)
-            .map { GridEntry(id: $0.id, title: $0.title, installed: installer.isInstalled(id: $0.id)) }
+            .map { GridEntry(id: $0.id, title: $0.title, installed: installer.isInstalled(id: $0.id),
+                             isCurrent: $0.id == current) }
     }
 
     /// 라이브러리에서 고른 배경화면.
@@ -550,6 +557,8 @@ final class WorkshopWindowController: NSWindowController {
         guard let item = selectedLibraryItem else { return }
         onApply(item)
         setBusy(false, status: "\(item.title) 적용")
+        // "사용 중" 표시를 새 배경화면으로 옮긴다.
+        refreshTable()
     }
 
     /// 밖에서 항목을 고른다(확인용 환경 변수가 쓴다). 목록에 없으면 아무것도 안 한다.
@@ -619,14 +628,17 @@ final class WorkshopWindowController: NSWindowController {
         switch tab {
         case .installed:
             guard let item = selectedLibraryItem else { detailPanel.showEmpty(); return }
-            detailPanel.showInstalled(item: item, preview: thumbnails.object(forKey: item.id as NSString))
+            detailPanel.showInstalled(
+                item: item, preview: thumbnails.object(forKey: item.id as NSString),
+                isCurrent: item.id == currentItemID())
         case .browse:
             guard let item = selectedItem else { detailPanel.showEmpty(); return }
             let progress = (item.id == downloadingID) ? downloadFraction : nil
             detailPanel.showWorkshop(
                 item: item, preview: thumbnails.object(forKey: item.id as NSString),
                 page: detailsPageCache[item.id],
-                installed: installer.isInstalled(id: item.id), progress: progress)
+                installed: installer.isInstalled(id: item.id),
+                isCurrent: item.id == currentItemID(), progress: progress)
             if detailsPageCache[item.id] == nil {
                 loadDetailsPage(for: item.id)
             }
@@ -663,6 +675,7 @@ final class WorkshopWindowController: NSWindowController {
             if entry.installed, let local = libraryItems().first(where: { $0.id == entry.id }) {
                 onApply(local)
                 setBusy(false, status: "\(local.title) 적용")
+                refreshTable()
             } else {
                 download()
             }
