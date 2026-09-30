@@ -228,17 +228,16 @@ public struct WorkshopClient: Sendable {
             URLQueryItem(name: "numperpage", value: "\(Self.pageSize)"),
             URLQueryItem(name: "p", value: "\(max(1, page))"),
         ]
+        query.append(URLQueryItem(name: "browsesort", value: sort.browseSort))
+        // 기간은 인기 정렬에만 붙는다. 다른 정렬에 붙이면 무시되지만,
+        // 안 보내는 편이 요청을 읽기 쉽다.
+        if let days = sort.days {
+            query.append(URLQueryItem(name: "days", value: "\(days)"))
+        }
+        // 검색어가 있어도 고른 정렬을 그대로 쓴다 — 스팀은 둘을 함께 받는다.
+        // 관련도로 바꿔 보내면 정렬 칸에 보이는 것과 결과 순서가 어긋난다.
         let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            query.append(URLQueryItem(name: "browsesort", value: sort.browseSort))
-            // 기간은 인기 정렬에만 붙는다. 다른 정렬에 붙이면 무시되지만,
-            // 안 보내는 편이 요청을 읽기 쉽다.
-            if let days = sort.days {
-                query.append(URLQueryItem(name: "days", value: "\(days)"))
-            }
-        } else {
-            // 검색어가 있으면 정렬은 스팀이 관련도로 정한다.
-            query.append(URLQueryItem(name: "browsesort", value: "textsearch"))
+        if !trimmed.isEmpty {
             query.append(URLQueryItem(name: "searchtext", value: trimmed))
         }
         // 태그는 검색과 함께 걸린다 — 검색어로 좁힌 뒤 종류로 또 좁힐 수 있다.

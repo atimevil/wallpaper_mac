@@ -133,12 +133,14 @@ extension WorkshopClientTests {
         XCTAssertFalse(rated.contains { $0.0 == "days" }, "기간은 인기 정렬에만 붙는다")
     }
 
-    /// 검색어가 있으면 정렬은 스팀이 관련도로 정한다. 그래도 태그는 함께 간다.
-    func testBrowseURLKeepsTagsWhileSearching() {
+    /// 검색해도 고른 정렬을 그대로 보낸다 — 스팀은 검색어와 정렬을 함께 받는다.
+    /// 예전엔 관련도로 바꿔 보내 정렬 칸에 보이는 것과 결과 순서가 달랐다. 태그도 함께 간다.
+    func testBrowseURLKeepsSortAndTagsWhileSearching() {
         let items = query(WorkshopClient.browseURL(
             sort: .topRated, filter: WorkshopFilter(tags: ["Scene", "Anime"]),
             searchText: " minecraft ", page: 2))
-        XCTAssertTrue(items.contains { $0 == ("browsesort", "textsearch") })
+        XCTAssertTrue(items.contains { $0 == ("browsesort", "toprated") })
+        XCTAssertFalse(items.contains { $0.1 == "textsearch" })
         XCTAssertTrue(items.contains { $0 == ("searchtext", "minecraft") })
         XCTAssertTrue(items.contains { $0 == ("requiredtags[]", "Scene") })
         XCTAssertTrue(items.contains { $0 == ("requiredtags[]", "Anime") })
