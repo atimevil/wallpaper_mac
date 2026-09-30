@@ -108,6 +108,16 @@ final class PropertyEditorView: NSView {
         applyConditions()
     }
 
+    /// 폭은 바라는 값일 뿐 최소만 지킨다. 고정 폭이면 좁은 상세 패널(340)에서
+    /// 라벨+컨트롤이 넘쳐 패널을 420까지 밀고 격자가 출렁인다.
+    private static func preferWidth(_ view: NSView, _ width: CGFloat, atLeast minimum: CGFloat) {
+        let preferred = view.widthAnchor.constraint(equalToConstant: width)
+        preferred.priority = .defaultLow
+        preferred.isActive = true
+        view.widthAnchor.constraint(greaterThanOrEqualToConstant: minimum).isActive = true
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+
     /// 속성 하나의 줄. 종류마다 알맞은 컨트롤을 단다.
     private func makeRow(for property: UserProperty) -> NSView {
         let row = NSStackView()
@@ -131,7 +141,7 @@ final class PropertyEditorView: NSView {
                 slider.numberOfTickMarks = min(50, Int((hi - lo) / step) + 1)
             }
             slider.identifier = NSUserInterfaceItemIdentifier(property.name)
-            slider.widthAnchor.constraint(equalToConstant: 200).isActive = true
+            Self.preferWidth(slider, 200, atLeast: 80)
             row.addArrangedSubview(slider)
             let readout = NSTextField(labelWithString: Self.format(slider.doubleValue))
             readout.identifier = NSUserInterfaceItemIdentifier(property.name + "::readout")
@@ -168,7 +178,7 @@ final class PropertyEditorView: NSView {
             field.target = self
             field.action = #selector(controlChanged(_:))
             field.identifier = NSUserInterfaceItemIdentifier(property.name)
-            field.widthAnchor.constraint(equalToConstant: 240).isActive = true
+            Self.preferWidth(field, 240, atLeast: 100)
             row.addArrangedSubview(field)
         case .text:
             let note = NSTextField(wrappingLabelWithString: property.label)
