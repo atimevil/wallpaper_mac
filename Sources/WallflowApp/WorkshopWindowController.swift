@@ -45,6 +45,11 @@ final class WorkshopWindowController: NSWindowController {
     private let tabControl = NSSegmentedControl(
         labels: WorkshopTab.allCases.map(\.label), trackingMode: .selectOne, target: nil, action: nil)
     private let accountLabel = NSTextField(labelWithString: "계정:")
+    /// 사이드바 접기. 분할 뷰 경계를 끌어 접게 하려면 사이드바 폭 제약 우선순위를
+    /// 끌기보다 낮춰야 해 배치가 튄다 — 숨기면 분할 뷰가 알아서 칸을 접는다.
+    private let sidebarToggle = NSButton(
+        image: NSImage(systemSymbolName: "sidebar.leading", accessibilityDescription: "사이드바")!,
+        target: nil, action: nil)
     private var tab: WorkshopTab = .installed
     private var localItems: [WallpaperItem] = []
     /// 탭마다 검색어를 따로 기억한다. 라이브러리에서 친 말이 창작마당으로
@@ -273,7 +278,12 @@ final class WorkshopWindowController: NSWindowController {
         // 스택 안에서 늘어날 유일한 뷰가 돼야 한다 — 다른 쪽은 hugging이
         // 기본값(250)이라 그대로 두면 동률로 tabControl이 대신 늘어난다.
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let topRow = NSStackView(views: [tabControl, spacer, accountRow])
+        sidebarToggle.bezelStyle = .texturedRounded
+        sidebarToggle.isBordered = false
+        sidebarToggle.toolTip = "필터 사이드바 숨기기/보이기"
+        sidebarToggle.target = self
+        sidebarToggle.action = #selector(toggleSidebar)
+        let topRow = NSStackView(views: [sidebarToggle, tabControl, spacer, accountRow])
         topRow.orientation = .horizontal
         topRow.spacing = 8
         topRow.distribution = .fill
@@ -411,6 +421,10 @@ final class WorkshopWindowController: NSWindowController {
         } else {
             resetAndLoadFirstPage()
         }
+    }
+
+    @objc private func toggleSidebar() {
+        sidebar.isHidden.toggle()
     }
 
     @objc private func sortChanged() {
