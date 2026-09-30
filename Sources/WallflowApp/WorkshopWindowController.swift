@@ -52,7 +52,7 @@ final class WorkshopWindowController: NSWindowController {
     private var sidebar: WorkshopSidebarView!
     private var filterState = WorkshopFilterState()
 
-    private let collectionView = NSCollectionView()
+    private let collectionView = DoubleClickCollectionView()
     private let gridLayout = WorkshopGridLayout()
     private let scrollView = NSScrollView()
     private let searchField = NSSearchField()
@@ -279,9 +279,9 @@ final class WorkshopWindowController: NSWindowController {
             WorkshopGridItem.self,
             forItemWithIdentifier: WorkshopGridItem.identifier)
 
-        let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(handleDoubleClick))
-        doubleClick.numberOfClicksRequired = 2
-        collectionView.addGestureRecognizer(doubleClick)
+        collectionView.onDoubleClick = { [weak self] indexPath in
+            self?.handleDoubleClick(at: indexPath)
+        }
 
         scrollView.documentView = collectionView
         scrollView.hasVerticalScroller = true
@@ -669,9 +669,7 @@ final class WorkshopWindowController: NSWindowController {
         }
     }
 
-    @objc private func handleDoubleClick(_ sender: NSClickGestureRecognizer) {
-        let point = sender.location(in: collectionView)
-        guard let indexPath = collectionView.indexPathForItem(at: point) else { return }
+    private func handleDoubleClick(at indexPath: IndexPath) {
         collectionView.selectionIndexPaths = [indexPath]
         selectionDidChange()
         activateSelected()
@@ -969,5 +967,21 @@ extension WorkshopWindowController: @preconcurrency NSSplitViewDelegate {
         forDoubleClickOnDividerAt dividerIndex: Int
     ) -> Bool {
         dividerIndex == 0
+    }
+}
+
+/// 칸 더블클릭을 알리는 격자.
+///
+/// `NSClickGestureRecognizer`를 붙였더니 여러 번에 한 번꼴로 더블클릭을 놓쳤다 —
+/// 컬렉션 뷰가 mouseDown에서 선택·드래그 추적 루프를 돌며 이벤트를 먼저 먹는다.
+/// 그 루프가 끝난 뒤 이벤트의 clickCount를 직접 본다.
+final class DoubleClickCollectionView: NSCollectionView {
+    var onDoubleClick: ((IndexPath) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        guard event.clickCount == 2 else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        if let indexPath = indexPathForItem(at: point) { onDoubleClick?(indexPath) }
     }
 }
