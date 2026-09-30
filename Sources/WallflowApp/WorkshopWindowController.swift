@@ -73,6 +73,24 @@ final class WorkshopWindowController: NSWindowController {
     private let accountField = NSTextField()
     fileprivate let statusLabel = NSTextField(labelWithString: "")
     private let spinner = NSProgressIndicator()
+    /// 격자가 비었을 때 가운데 띄우는 안내. 아래 상태 줄의 "0개"만으로는
+    /// 결과가 없는 건지, 아직 읽는 중인지, 못 읽은 건지 알 수 없다.
+    private let emptyMessage = NSTextField(wrappingLabelWithString: "")
+    private let emptyButton = NSButton(title: "", target: nil, action: nil)
+    private lazy var emptyState: NSStackView = {
+        let stack = NSStackView(views: [emptyMessage, emptyButton])
+        stack.orientation = .vertical
+        stack.spacing = 10
+        stack.isHidden = true
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        emptyMessage.alignment = .center
+        emptyMessage.textColor = .secondaryLabelColor
+        emptyButton.target = self
+        emptyButton.action = #selector(emptyButtonTapped)
+        return stack
+    }()
+    /// 마지막 목록 요청이 실패했을 때의 이유. 새 요청을 시작하면 지운다.
+    private var loadError: String?
 
     /// 창작마당 항목 누적 목록. 무한 스크롤이라 페이지를 붙여 나간다
     /// (`WorkshopPaging.merge`). 탭·필터·검색·정렬이 바뀌면 통째로 비운다.
@@ -318,11 +336,17 @@ final class WorkshopWindowController: NSWindowController {
 
         let root = NSView()
         root.addSubview(stack)
+        // 스크롤 뷰 안에 넣으면 스크롤 뷰가 제 하위 뷰를 직접 배치해 제약이 안 먹는다
+        // — 형제로 두고 가운데만 맞춘다.
+        root.addSubview(emptyState)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: root.topAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            emptyState.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            emptyState.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+            emptyState.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -40),
         ])
         return root
     }
@@ -368,6 +392,8 @@ final class WorkshopWindowController: NSWindowController {
         filterState = newState
         if tab == .installed {
             refreshTable()
+            // 검색처럼 개수도 고친다 — 안 그러면 1칸만 보여도 "5개"로 남는다.
+            setBusy(false, status: "\(displayedEntries.count)개")
         } else {
             resetAndLoadFirstPage()
         }
@@ -428,6 +454,7 @@ final class WorkshopWindowController: NSWindowController {
     private func loadNextPage() {
         guard tab == .browse, !reachedEnd, !isLoadingPage else { return }
         isLoadingPage = true
+        loadError = nil
         let generation = loadGeneration
         let sort = WorkshopSort.allCases[max(0, sortPopup.indexOfSelectedItem)]
         let filter = filterState.requestFilter
@@ -482,6 +509,7 @@ final class WorkshopWindowController: NSWindowController {
             } catch {
                 guard generation == self.loadGeneration else { return }
                 self.isLoadingPage = false
+                self.loadError = Self.describe(error)
                 self.setBusy(false, status: "목록을 읽지 못했다: \(Self.describe(error))")
             }
         }
@@ -595,6 +623,36 @@ final class WorkshopWindowController: NSWindowController {
             }
         }
         selectionDidChange()
+        updateEmptyState()
+    }
+
+    private func updateEmptyState() {
+        let empty = displayedEntries.isEmpty && !isLoadingPage
+        emptyState.isHidden = !empty
+        guard empty else { return }
+        if let loadError, tab == .browse {
+            emptyMessage.stringValue = "목록을 읽지 못했다\n\(loadError)"
+            emptyButton.title = "다시 시도"
+        } else {
+            emptyMessage.stringValue = tab == .installed && localItems.isEmpty
+                ? "받은 배경화면이 없다\n창작마당 탭에서 받아 온다"
+                : "맞는 배경화면이 없다\n검색어나 필터를 바꿔 본다"
+            emptyButton.title = "필터 초기화"
+        }
+        // 설치된 게 아예 없으면 거를 것도 없다.
+        emptyButton.isHidden = tab == .installed && localItems.isEmpty
+    }
+
+    @objc private func emptyButtonTapped() {
+        if loadError != nil, tab == .browse {
+            loadNextPage()
+            return
+        }
+        searchField.stringValue = ""
+        var reset = filterState
+        reset.reset()
+        sidebar.setState(reset)
+        filterChanged(to: reset)
     }
 
     private func loadThumbnails(generation: Int) {
@@ -884,6 +942,7 @@ final class WorkshopWindowController: NSWindowController {
     private func setBusy(_ busy: Bool, status: String) {
         statusLabel.stringValue = status
         if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        updateEmptyState()
     }
 
     /// 라이브러리에서 링크만 걷는다. 받아 둔 원본은 남겨 다시 받지 않아도 되게 한다.
