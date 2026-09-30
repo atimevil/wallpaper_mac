@@ -775,6 +775,9 @@ final class WorkshopWindowController: NSWindowController {
         downloadingID = item.id
         downloadFraction = 0
         setBusy(true, status: "\(item.title) 받는 중…")
+        // steamcmd는 처음 몇 초 자기 업데이트만 확인해 진행률 줄이 안 온다 — 그 사이
+        // 칸·패널이 "받기" 그대로면 받는지 모르고 또 누른다. 시작하자마자 받는 중으로 그린다.
+        reloadDownloadingItem()
 
         Task { [weak self] in
             // 진행률 줄은 임의 스레드에서 온다. 창을 직접 만지지 않고 메인으로 넘긴다.
