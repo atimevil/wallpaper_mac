@@ -209,6 +209,8 @@ final class WorkshopGridItem: NSCollectionViewItem {
         cachedImage = image
         preview.image = image
         nameLabel.stringValue = entry.title
+        // 한 줄로 잘리는 긴 제목(중국어·일본어 제목이 흔하다)을 올려서 다 볼 수 있게.
+        nameLabel.toolTip = entry.title
         badge.isHidden = downloadProgress != nil || !entry.installed
         currentPill.isHidden = !entry.isCurrent
         if let progress = downloadProgress {
