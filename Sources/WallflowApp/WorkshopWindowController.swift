@@ -973,8 +973,13 @@ final class WorkshopWindowController: NSWindowController {
             alert.informativeText += "\n\n지금 배경화면으로 쓰는 중입니다. 지우면 다음에 앱을 켤 때 "
                 + "이 배경화면이 뜨지 않습니다."
         }
-        alert.addButton(withTitle: "지우기")
-        alert.addButton(withTitle: "취소")
+        let deleteButton = alert.addButton(withTitle: "지우기")
+        let cancelButton = alert.addButton(withTitle: "취소")
+        // 되돌릴 수 없으니 Return으로 지워지면 안 된다 — 기본(Return)은 취소가 받고,
+        // 지우기는 빨갛게만 둔다.
+        deleteButton.hasDestructiveAction = true
+        deleteButton.keyEquivalent = ""
+        cancelButton.keyEquivalent = "\r"
         alert.alertStyle = .warning
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
