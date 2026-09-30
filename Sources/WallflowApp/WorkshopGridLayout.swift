@@ -39,7 +39,10 @@ final class WorkshopGridLayout: NSCollectionViewLayout {
         let available = visibleWidth - sectionInset.left - sectionInset.right
         guard count > 0, available > 0 else { contentHeight = 0; return }
 
-        let columns = Swift.max(1, Int((available + spacing) / (targetCellWidth + spacing)))
+        // 반올림 — 내림이면 2.9칸 자리에 2칸이 들어가 칸이 바란 크기보다 50%나
+        // 커진다(기본 220이 330으로). 반올림이면 바란 크기 ±절반 칸 안에 든다.
+        let fit = (available + spacing) / (targetCellWidth + spacing)
+        let columns = Swift.max(1, Int(fit.rounded()))
         let width = floor((available - spacing * CGFloat(columns - 1)) / CGFloat(columns))
         let height = width + titleRowHeight
 
