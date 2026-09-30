@@ -637,7 +637,8 @@ final class WorkshopWindowController: NSWindowController {
             emptyMessage.stringValue = tab == .installed && localItems.isEmpty
                 ? "받은 배경화면이 없다\n창작마당 탭에서 받아 온다"
                 : "맞는 배경화면이 없다\n검색어나 필터를 바꿔 본다"
-            emptyButton.title = "필터 초기화"
+            // 검색어도 같이 지우므로 있으면 그렇다고 적는다.
+            emptyButton.title = searchField.stringValue.isEmpty ? "필터 초기화" : "검색·필터 초기화"
         }
         // 설치된 게 아예 없으면 거를 것도 없다.
         emptyButton.isHidden = tab == .installed && localItems.isEmpty
