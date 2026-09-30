@@ -968,6 +968,11 @@ final class WorkshopWindowController: NSWindowController {
         alert.messageText = "\(item.title)을(를) 지울까요?"
         alert.informativeText = "라이브러리에서 빼고 받아 둔 파일도 지웁니다. "
             + "필요하면 창작마당에서 다시 받을 수 있습니다."
+        // 켜진 것을 지우면 지금은 계속 보이다가 다음에 켤 때 되살릴 게 없다 — 미리 알린다.
+        if item.id == currentItemID() {
+            alert.informativeText += "\n\n지금 배경화면으로 쓰는 중입니다. 지우면 다음에 앱을 켤 때 "
+                + "이 배경화면이 뜨지 않습니다."
+        }
         alert.addButton(withTitle: "지우기")
         alert.addButton(withTitle: "취소")
         alert.alertStyle = .warning
