@@ -279,8 +279,8 @@ final class WorkshopWindowController: NSWindowController {
             WorkshopGridItem.self,
             forItemWithIdentifier: WorkshopGridItem.identifier)
 
-        collectionView.onDoubleClick = { [weak self] indexPath in
-            self?.handleDoubleClick(at: indexPath)
+        collectionView.onActivate = { [weak self] indexPath in
+            self?.activate(at: indexPath)
         }
 
         scrollView.documentView = collectionView
@@ -669,7 +669,7 @@ final class WorkshopWindowController: NSWindowController {
         }
     }
 
-    private func handleDoubleClick(at indexPath: IndexPath) {
+    private func activate(at indexPath: IndexPath) {
         collectionView.selectionIndexPaths = [indexPath]
         selectionDidChange()
         activateSelected()
@@ -970,18 +970,29 @@ extension WorkshopWindowController: @preconcurrency NSSplitViewDelegate {
     }
 }
 
-/// 칸 더블클릭을 알리는 격자.
+/// 칸 더블클릭·Return을 알리는 격자.
 ///
 /// `NSClickGestureRecognizer`를 붙였더니 여러 번에 한 번꼴로 더블클릭을 놓쳤다 —
 /// 컬렉션 뷰가 mouseDown에서 선택·드래그 추적 루프를 돌며 이벤트를 먼저 먹는다.
 /// 그 루프가 끝난 뒤 이벤트의 clickCount를 직접 본다.
 final class DoubleClickCollectionView: NSCollectionView {
-    var onDoubleClick: ((IndexPath) -> Void)?
+    var onActivate: ((IndexPath) -> Void)?
 
     override func mouseDown(with event: NSEvent) {
         super.mouseDown(with: event)
         guard event.clickCount == 2 else { return }
         let point = convert(event.locationInWindow, from: nil)
-        if let indexPath = indexPathForItem(at: point) { onDoubleClick?(indexPath) }
+        if let indexPath = indexPathForItem(at: point) { onActivate?(indexPath) }
+    }
+
+    /// Return은 더블클릭과 같다. 격자가 키를 받는 동안엔 Return이 상세 패널
+    /// 기본 버튼까지 가지 않고 여기서 삼켜진다.
+    override func keyDown(with event: NSEvent) {
+        let isReturn = event.keyCode == 36 || event.keyCode == 76  // Return, 숫자판 Enter
+        if isReturn, let indexPath = selectionIndexPaths.first {
+            onActivate?(indexPath)
+        } else {
+            super.keyDown(with: event)
+        }
     }
 }
