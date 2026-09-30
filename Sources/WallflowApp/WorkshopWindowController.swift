@@ -148,7 +148,7 @@ final class WorkshopWindowController: NSWindowController {
         self.detailPanel = WorkshopDetailPanel(
             editor: PropertyEditorView(store: store, onChanged: onPropertiesChanged, showsTitle: false))
 
-        let window = NSWindow(
+        let window = UtilityWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)

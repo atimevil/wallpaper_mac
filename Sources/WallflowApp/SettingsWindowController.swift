@@ -39,7 +39,7 @@ final class SettingsWindowController: NSWindowController {
         self.onPowerChanged = onPowerChanged
         self.onSoundChanged = onSoundChanged
         self.onAudioChanged = onAudioChanged
-        let window = NSWindow(
+        let window = UtilityWindow(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 480),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered, defer: false)
