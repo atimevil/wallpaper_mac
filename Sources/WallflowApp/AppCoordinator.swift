@@ -76,6 +76,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         displays.onConversionStateChanged = { [weak self] in self?.menuBar?.refreshStates() }
         refreshLibrary()
         restoreLastSelection()
+        // 확인용: 켜자마자 설정 창을 연다(속성 편집기 배치 확인).
+        if ProcessInfo.processInfo.environment["WALLFLOW_OPEN_SETTINGS"] != nil {
+            showSettings()
+        }
         // 확인용: 켜자마자 창작마당 창을 연다(`browse`면 창작마당 탭으로).
         if let open = ProcessInfo.processInfo.environment["WALLFLOW_OPEN_WORKSHOP"] {
             showWorkshop()
