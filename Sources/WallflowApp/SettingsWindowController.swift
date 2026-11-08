@@ -154,7 +154,7 @@ final class SettingsWindowController: NSWindowController {
         stack.addArrangedSubview(batteryRow)
 
         heading("소리")
-        soundBox = check("씬 소리", on: UserDefaults.standard.bool(forKey: MenuBarController.soundKey),
+        soundBox = check("소리", on: UserDefaults.standard.bool(forKey: MenuBarController.soundKey),
                          #selector(soundChanged))
         let volumeRow = NSStackView()
         volumeRow.orientation = .horizontal

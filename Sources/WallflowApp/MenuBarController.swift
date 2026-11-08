@@ -145,7 +145,7 @@ final class MenuBarController {
         menu.addItem(idleFull)
 
         let sound = NSMenuItem(
-            title: "씬 소리", action: #selector(toggleSound), keyEquivalent: "s")
+            title: "소리", action: #selector(toggleSound), keyEquivalent: "s")
         sound.target = self
         // 배경화면이 로그인할 때마다 소리를 내면 곤란하므로 기본은 꺼짐이다.
         sound.state = UserDefaults.standard.bool(forKey: Self.soundKey) ? .on : .off

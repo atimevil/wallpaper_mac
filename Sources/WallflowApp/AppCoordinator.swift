@@ -242,6 +242,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             err.runModal()
             return
         }
+        // 지운 배경의 배경별 볼륨 설정도 함께 정리한다.
+        VolumePreferencesStore.clearVolume(for: item.id)
         // 지운 것이 지금 걸려 있던 것이면 남은 것 중 하나로 바꾼다.
         if displays.currentItem?.id == item.id,
            let next = ((try? library.scan()) ?? []).first(where: { $0.type != .unsupported }) {

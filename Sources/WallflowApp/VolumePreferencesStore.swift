@@ -23,6 +23,13 @@ enum VolumePreferencesStore {
             WallpaperVolume.setting(volume, for: wallpaperID, in: load()), forKey: key)
     }
 
+    /// 배경화면을 지울 때 그 배경별 볼륨 항목도 지운다(안 지우면 영구 누적된다).
+    static func clearVolume(for wallpaperID: String) {
+        var dict = load()
+        guard dict.removeValue(forKey: wallpaperID) != nil else { return }
+        UserDefaults.standard.set(dict, forKey: key)
+    }
+
     /// 슬라이더·메뉴에 보여줄 크기. 명시값이 있으면 그걸, 없으면 종류별 기본:
     /// 비디오는 음소거(0), 그 밖(씬·웹)은 기존 전역 크기.
     /// 전역 크기(`SceneRenderer.soundVolume`)가 MainActor라 이 함수도 그렇다.
