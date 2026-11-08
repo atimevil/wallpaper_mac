@@ -66,10 +66,20 @@ Workshop)이 그 역할이고 영상 수가 훨씬 많다.
 - 고르면: (App) 썸네일 먼저 구움 → `LocalVideoImporter.importVideo` 호출 →
   `refreshLibrary()` → 새 항목 `select`.
 
+**추가 — 실패·가장자리 (레드팀 경미4 반영):**
+- `project.json`은 **맨 마지막에 쓴다**(복사 성공 후). 중간 실패 시 `local-<uuid>`
+  폴더를 통째로 정리 — 깨진 폴더를 남기지 않는다.
+- 확장자 없는 파일: `source.pathExtension`이 비면 `.mp4`로 가정(AVFoundation이
+  대개 연다). 열 수 없으면 import 자체가 실패로 끝난다.
+- webm import: `.video`로 저장되면 재생은 ffmpeg 변환 경로로 됨. 단 썸네일
+  (AVAssetImageGenerator)은 webm을 못 열므로 **썸네일 실패를 조용히 삼키고**
+  미리보기 없이 진행(로더가 허용).
+
 **삭제 — `LocalVideoImporter.deleteLocal(_ item:) throws`:**
 - **안전 가드 전부 통과해야 지움:** (a) 항목 폴더가 심볼릭 링크가 **아님**(실제 폴더),
   (b) `project.json`에 `wallflow_local == true`, (c) 폴더가 Library root 바로 아래.
   하나라도 아니면 `throw`(창작마당 링크·사용자 수동 폴더를 절대 안 건드림).
+  *(레드팀 확인: 이 가드는 구멍 없음. `local-` 접두사 id는 숫자 workshop id와 안 겹침.)*
 - UI: 로컬 항목에 한해 삭제. 기존 창작마당 창 삭제 경로는 실제 폴더를 거부하므로
   재사용 불가 → 메뉴바에서 로컬 항목 전용 삭제 제공. **기본 설계:** `동영상 추가…`
   아래 `로컬 영상 관리…`(또는 현재 걸린 항목이 로컬이면 `이 로컬 영상 삭제`).
@@ -85,49 +95,72 @@ Workshop)이 그 역할이고 영상 수가 훨씬 많다.
 **기존과의 충돌이 핵심:** Wallflow는 이미 유휴 15분(`PowerPolicy.idlePauseSeconds=900`)에
 배경을 **일시정지**한다(절전). "유휴 전체화면"과 정면 충돌(정지 vs 보여주기).
 
-**통합 규칙:**
-- 유휴 전체화면 **켜짐**일 때: 유휴 `threshold`(기본 60초) 도달 →
-  배경화면 창을 **전체화면 위로 올림**(기존 `WallpaperWindow`의 window level을
-  데스크톱→화면 최상위로; 새 렌더러를 만들지 않는다 = lazy). 렌더링은 계속.
-- 전체화면이 떠 있는 동안은 **유휴 일시정지를 보류**(정지되면 감상 모드가 얼어붙는다).
-- 아무 입력(마우스 이동·키·클릭) → 즉시 창 level을 데스크톱으로 되돌리고 종료.
-- 유휴 감지는 **기존 경로 재사용**(`PowerSignals.idleSeconds` / `PowerMonitor`),
-  새 이벤트 모니터를 새로 만들지 않는다.
-- 멀티 모니터: 각 화면의 배경 창을 동시에 올린다.
-- **대안(통합 실패 시):** 별도 오버레이 창을 `.screenSaver` level로 띄워 같은 항목을
-  다시 렌더. window-level 승격이 데스크톱 창에서 안정적이지 않으면 이쪽으로.
-- 토글: 메뉴바 `유휴 시 전체화면` + 설정 창에 분(threshold) 입력. 기본 **꺼짐**
-  (기능은 넣되 사용자가 켜야 작동 — 자리 비웠다고 갑자기 화면 덮으면 놀란다).
+**⚠️ 레드팀 심각1 반영 — 종료 신호를 창에서 못 받는다:** `WallpaperWindow`는
+`ignoresMouseEvents = true`(WallpaperWindow.swift:41) + `[.borderless]`라 마우스·키
+이벤트를 **아예 받지 않는다**(키 윈도우도 못 됨). 창 레벨을 올려도 자기 입력으로
+종료를 못 잡는다. 그리고 전역 이벤트 모니터(`NSEvent.addGlobalMonitor…`)는
+**입력 모니터링 권한 프롬프트**를 띄워 이 앱의 권한 절약 원칙을 깬다 — 금지.
 
-**테스트:** 유휴/활동 판정 로직(threshold 비교, 일시정지 보류 플래그)을 순수 함수로
-빼서 단위 테스트. 실제 창 level 승격은 실물 확인(`shoot` 스크립트).
+**통합 규칙(수정판):**
+- 토글 **켜짐** + 유휴 `threshold`(기본 60초) 도달 → 배경 창을 **전체화면 위로 올림**
+  (기존 `WallpaperWindow` window level 데스크톱→최상위; 새 렌더러 없음 = lazy). 렌더 계속.
+- **종료 감지:** 전체화면이 떠 있는 **동안에만** 도는 **빠른 타이머(0.2~0.3초)**로
+  `idleSeconds()`(`CGEventSource.secondsSinceLastEventType`, **권한 불요**, 이미 유휴
+  읽는 경로)를 폴링 → 임계 아래로 떨어지면 즉시 창 레벨 복귀·종료. 기존 5초 폴링으론
+  마우스 움직여도 최대 5초 안 사라져 먹통처럼 느껴짐(레드팀 지적) → 빠른 타이머 필수.
+  평소엔 안 돌려 전력 낭비 없음.
+- **유휴 일시정지 보류(레드팀 경미3):** `PowerPolicy`(Kit, 순수)는 **안 건드린다.**
+  App의 `PowerMonitor`에서 전체화면 활성 플래그가 켜져 있으면 idle-pause 분기를
+  건너뛴다(한 곳에서만 — 플래그 on이면 `.paused` directive 무시). 단일 진실원천 유지.
+- 멀티 모니터: 각 화면의 배경 창을 동시에 올린다.
+- **대안(폴백 유지):** 창 레벨 승격이 `.canJoinAllSpaces/.stationary` 창에서
+  실물상 최상위로 안 뜨면, 별도 오버레이 창을 `.screenSaver` level로 띄워 같은 항목을
+  다시 렌더. **실물 확인 전까지 이 폴백을 설계에 남긴다.**
+- 토글: 메뉴바 `유휴 시 전체화면` + 설정 창에 분(threshold) 입력. 기본 **꺼짐**.
+
+**테스트:** 유휴/활동 판정(threshold 비교, 일시정지 보류 플래그)을 순수 함수로 빼서
+단위 테스트. 실제 창 레벨 승격·종료 반응은 실물 확인(`shoot` 스크립트).
 
 ### F3. 바탕화면 아이콘 숨기기
 
 - 메뉴바 토글 `바탕화면 아이콘 숨기기`. 상태 `UserDefaults`(`wallflow.hideDesktopIcons`).
 - 적용: `defaults write com.apple.finder CreateDesktop -bool <!hidden>` 후
   `killall Finder`(macOS 공개 API 없음 — 표준 방식). App 계층의 작은 헬퍼
-  `DesktopIcons.setHidden(_:)`.
+  `DesktopIcons.setHidden(_:)` / `DesktopIcons.isHidden`.
 - 토글 시에만 적용. 앱 시작/종료 때 강제하지 않는다(사용자 수동 상태 존중).
   `killall Finder` 부작용(파인더 창 재시작)은 알려진 비용 — 토글 설명 툴팁에 적음.
+- **메뉴 체크 표시는 우리 bool이 아니라 실제 `defaults read com.apple.finder
+  CreateDesktop`로 그린다(레드팀 경미5)** — 손으로 바꾸거나 다른 앱이 토글해도
+  표시가 거짓말하지 않게.
 
 ### F4. 배경별 볼륨 슬라이더
 
 지금은 전역: `SceneRenderer.soundVolume`(`UserDefaults wallflow.soundVolume`),
 메뉴바 프리셋(0/25/50/75/100%) + 설정 창 슬라이더가 이미 있다.
 
-- **`VolumePreferencesStore`**(App, `CanvasFitPreferencesStore` 패턴 그대로):
-  `wallflow.volumeByWallpaper` 사전, `volume(for id) / setVolume(_:for:)`.
-  기존 전역 `wallflow.soundVolume`를 기본값(마이그레이션)으로.
-- 적용: 배경 선택 시 그 id의 볼륨을 렌더러에 주입(화면맞춤이 `displays.applyCanvasFit`
-  로 하는 것과 대칭 → `displays.applyVolume(_:toWallpaperID:)`). SceneRenderer는
-  현재 걸린 배경의 볼륨을 쓴다.
-- **비디오도 적용:** 지금 전역 볼륨은 씬 오디오에만 적용된다. 로컬 영상(=video)이
-  소리를 내므로 `VideoRenderer`의 `AVPlayer.volume`에도 배경별 볼륨을 반영한다.
-- UI: 설정 창 슬라이더·메뉴바 "소리 크기"를 **현재 배경 기준**으로(화면 맞춤처럼
-  `currentItem` 게이트). 프리셋 유지 + 설정 창은 슬라이더.
+**⚠️ 레드팀 심각2 반영 — 비디오는 일부러 음소거다:** `VideoRenderer.swift:36`
+`player.isMuted = true // 배경화면이 소리를 내면 안 된다`. `DisplayManager.
+applySoundSetting()`은 SceneRenderer에만 소리를 적용(비디오 제외). 전역 볼륨 기본은
+100%라, per-id 기본을 전역에서 그냥 가져오면 **로컬 mp4를 추가하는 순간 바탕화면에서
+소리 100% 폭발**(최악의 첫인상).
 
-**테스트:** `VolumePreferencesStore` per-id 저장/기본값 마이그레이션 단위 테스트.
+**수정판 — 전역을 들어내지 않고 그 위에 per-id를 얹는다:**
+- **`VolumePreferencesStore`**(App, `CanvasFitPreferencesStore` 패턴): `wallflow.
+  volumeByWallpaper` 사전, `volume(for id)` / `setVolume(_:for:)`. **전역 키
+  `wallflow.soundVolume`는 그대로 둔다** — per-id 엔트리가 **없을 때의 seed(기본값)**.
+  그러면 씬의 기존 동작과 `SoundVolumeTests`가 안 깨진다.
+- **SceneRenderer 접점 1곳만:** 소리 적용부에서 `Self.soundVolume` → 현재 item 기준
+  `VolumePreferencesStore.volume(for: item.id)`(없으면 전역). static 전역을 들어내지 않음.
+- **비디오는 기본 음소거 유지.** per-id 슬라이더로 **사용자가 그 배경에 볼륨을
+  명시적으로 준 경우에만 unmute**(opt-in). 로컬 영상 항목의 볼륨 슬라이더 기본은
+  **음소거(0)**. 0 초과로 올리면 그때 `VideoRenderer`가 unmute + 그 볼륨 적용.
+- 적용 주입: 화면맞춤이 `displays.applyCanvasFit`로 하는 것과 대칭 →
+  `displays.applyVolume(_:toWallpaperID:)`.
+- UI: 설정 창 슬라이더·메뉴바 "소리 크기"를 **현재 배경 기준**으로(화면 맞춤처럼
+  `currentItem` 게이트).
+
+**테스트:** `VolumePreferencesStore` per-id 저장 + **전역 seed 폴백**(엔트리 없으면
+전역 값, 전역도 없으면 1.0) 단위 테스트. 기존 `SoundVolumeTests`가 그대로 통과함을 확인.
 
 ## 빌더에게 남김 (left to builder)
 
@@ -138,6 +171,8 @@ Workshop)이 그 역할이고 영상 수가 훨씬 많다.
 
 ## 작업 방식
 
+- **웨이브 순서(레드팀 권고): F1 → F4 → F3 → F2.** 값이 분명하고 안전한 것부터
+  끝내 커밋하고, 가장 복잡·실물검증 부담 큰 유휴 전체화면(F2)을 마지막에.
 - 브랜치 `feat/local-video-and-desktop-extras`(생성됨). main 안 건드림, 푸시/릴리스
   안 함.
 - TDD(`superpowers:test-driven-development`), 기능별 커밋. 커밋에 Claude 서명·모델
