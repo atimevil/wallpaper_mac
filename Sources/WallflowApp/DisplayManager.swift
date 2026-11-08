@@ -346,11 +346,12 @@ final class DisplayManager {
         window.setContent(view)
     }
 
-    /// 소리 설정이 바뀌면 씬 렌더러들에게 알린다.
-    /// 씬만 소리를 낸다 — 비디오는 자체 오디오 트랙을 쓰고 웹은 해당 없다.
+    /// 소리 설정이 바뀌면 소리를 내는 렌더러들에게 알린다. 씬은 기존 전역/배경별
+    /// 크기를, 비디오는 배경별 명시값(없으면 음소거)을 반영한다. 웹은 해당 없다.
     func applySoundSetting() {
         for renderer in renderers.values {
             (renderer as? SceneRenderer)?.applySoundSetting()
+            (renderer as? VideoRenderer)?.applySoundSetting()
         }
     }
 

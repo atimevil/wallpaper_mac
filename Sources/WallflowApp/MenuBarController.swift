@@ -133,7 +133,8 @@ final class MenuBarController {
         // 씬이 정한 볼륨에 곱해지므로, 씬 안의 균형은 그대로 남는다.
         let volumeItem = NSMenuItem(title: "소리 크기", action: nil, keyEquivalent: "")
         let volumeMenu = NSMenu()
-        let current = SceneRenderer.soundVolume
+        // 지금 걸린 배경화면 기준(배경마다 따로 저장된다). 없으면 전역 기본.
+        let current = VolumePreferencesStore.displayVolume(for: currentItem())
         for percent in [0, 25, 50, 75, 100] {
             let entry = NSMenuItem(
                 title: "\(percent)%", action: #selector(setVolume), keyEquivalent: "")
@@ -291,8 +292,13 @@ final class MenuBarController {
     @objc private func openSettings() { onOpenSettings() }
 
     @objc private func setVolume(_ sender: NSMenuItem) {
-        UserDefaults.standard.set(
-            Double(sender.tag) / 100, forKey: SceneRenderer.volumeKey)
+        let volume = Double(sender.tag) / 100
+        // 지금 걸린 배경화면에 저장한다(배경마다 따로). 걸린 게 없으면 전역 기본에.
+        if let item = currentItem() {
+            VolumePreferencesStore.setVolume(volume, for: item.id)
+        } else {
+            UserDefaults.standard.set(volume, forKey: SceneRenderer.volumeKey)
+        }
         rebuildMenu()
         // 소리 설정을 다시 적용하는 경로가 이것뿐이다. 켬/끔과 같은 길을 쓴다.
         onToggleSound(UserDefaults.standard.bool(forKey: Self.soundKey))

@@ -374,10 +374,16 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         return nil
     }
 
+    /// 이 씬에 적용할 소리 크기. 배경별 명시값이 있으면 그걸, 없으면 기존 전역
+    /// 크기로 폴백한다(하위호환 — 전역을 쓰던 씬은 그대로 동작한다).
+    private var effectiveVolume: Float {
+        Float(VolumePreferencesStore.explicitVolume(for: item.id) ?? Self.soundVolume)
+    }
+
     /// 소리 설정과 재생 상태를 맞춘다.
     func applySoundSetting() {
         let on = Self.soundEnabled && !playbackPaused
-        let volume = Float(Self.soundVolume)
+        let volume = effectiveVolume
         var failed = 0
         for entry in sounds {
             let player = entry.player
@@ -396,7 +402,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
         // "안 난다"와 "이미 나고 있다"를 구별할 수 있다.
         var line = "씬 \(item.title)의 소리 \(sounds.count)개 중 \(playing)개 재생 중"
         line += " (설정 \(Self.soundEnabled ? "켬" : "끔"), 크기 "
-            + "\(Int((Self.soundVolume * 100).rounded()))%"
+            + "\(Int((effectiveVolume * 100).rounded()))%"
         line += playbackPaused ? ", 전력 정책이 멈춤)" : ")"
         if failed > 0 { line += " — \(failed)개는 재생을 시작하지 못했다" }
         FileHandle.standardError.write(Data((line + "\n").utf8))
@@ -910,7 +916,7 @@ final class SceneRenderer: NSObject, WallpaperRenderer {
             if let playing = state.playing, playing != entry.wanted {
                 entry.wanted = playing
             }
-            entry.player.volume = entry.sceneVolume * Float(Self.soundVolume)
+            entry.player.volume = entry.sceneVolume * effectiveVolume
             let on = Self.soundEnabled && !playbackPaused && entry.wanted
             if on, !entry.player.isPlaying { _ = entry.player.play() }
             if !on, entry.player.isPlaying { entry.player.pause() }

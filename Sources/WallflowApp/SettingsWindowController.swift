@@ -55,6 +55,8 @@ final class SettingsWindowController: NSWindowController {
     /// 배경화면이 바뀌었을 때 속성 탭을 다시 채운다.
     func reloadProperties() {
         propertyEditor.show(item: currentItem())
+        // 배경화면이 바뀌면 소리 크기 슬라이더도 그 배경 값으로(배경마다 따로다).
+        volumeSlider.doubleValue = VolumePreferencesStore.displayVolume(for: currentItem())
     }
 
     /// 메뉴바에서 바꾼 값을 다시 읽는다. 창이 열린 채로 메뉴에서 바꾸면 여기 남은
@@ -156,7 +158,7 @@ final class SettingsWindowController: NSWindowController {
         volumeRow.addArrangedSubview(NSTextField(labelWithString: "크기:"))
         volumeSlider.minValue = 0
         volumeSlider.maxValue = 1
-        volumeSlider.doubleValue = SceneRenderer.soundVolume
+        volumeSlider.doubleValue = VolumePreferencesStore.displayVolume(for: currentItem())
         volumeSlider.target = self
         volumeSlider.action = #selector(soundChanged)
         volumeSlider.widthAnchor.constraint(equalToConstant: 200).isActive = true
@@ -223,7 +225,12 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func soundChanged() {
         UserDefaults.standard.set(soundBox?.state == .on, forKey: MenuBarController.soundKey)
-        UserDefaults.standard.set(volumeSlider.doubleValue, forKey: SceneRenderer.volumeKey)
+        // 크기는 지금 걸린 배경화면에 저장한다(배경마다 따로). 없으면 전역 기본에.
+        if let item = currentItem() {
+            VolumePreferencesStore.setVolume(volumeSlider.doubleValue, for: item.id)
+        } else {
+            UserDefaults.standard.set(volumeSlider.doubleValue, forKey: SceneRenderer.volumeKey)
+        }
         onSoundChanged()
     }
 
