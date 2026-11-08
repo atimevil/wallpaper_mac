@@ -8,6 +8,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private let displays = DisplayManager()
     private var menuBar: MenuBarController?
     private var power: PowerMonitor?
+    private var idleFullscreen: IdleFullscreenController?
     private let library: LibraryStore
     private let installer: WorkshopInstaller
     private var workshop: WorkshopWindowController?
@@ -41,12 +42,18 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
         displays.rebuildWindows()
 
+        let idleFullscreen = IdleFullscreenController(
+            setRaised: { [weak self] raised in self?.displays.setWallpaperWindowsRaised(raised) })
+        self.idleFullscreen = idleFullscreen
+
         let power = PowerMonitor(
             occlusionProvider: { [weak self] in self?.displays.isOccluded ?? false },
+            fullscreenShowcaseActive: { [weak self] in self?.idleFullscreen?.isActive ?? false },
             onChange: { [weak self] directive in self?.displays.apply(directive) }
         )
         power.start()
         self.power = power
+        idleFullscreen.reload()   // 설정이 켜져 있으면 감시를 시작한다
 
         // 소리는 **쓰는 씬을 걸었을 때만** 듣는다. 앱이 뜰 때 무조건 켜면 오디오를
         // 안 쓰는 배경화면에서도 macOS가 화면 녹화 권한을 물어 "시스템 설정 열기"
@@ -72,6 +79,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             onSetCanvasFit: { [weak self] item, mode in self?.setCanvasFit(mode, for: item) },
             onAddLocalVideo: { [weak self] in self?.addLocalVideo() },
             onDeleteLocalVideo: { [weak self] item in self?.deleteLocalVideo(item) },
+            onIdleFullscreenChanged: { [weak self] in self?.idleFullscreen?.reload() },
             onQuit: { NSApp.terminate(nil) }
         )
         // 변환이 시작/성공/실패할 때마다 메뉴의 "(변환 중)" 같은 표시를
@@ -106,6 +114,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         power?.stop()
+        idleFullscreen?.stop()
         displays.stopAll()
     }
 
@@ -164,7 +173,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                     self?.displays.applySoundSetting()
                     self?.menuBar?.refreshStates()
                 },
-                onAudioChanged: { [weak self] enabled in self?.setAudioCapture(enabled) })
+                onAudioChanged: { [weak self] enabled in self?.setAudioCapture(enabled) },
+                onIdleFullscreenChanged: { [weak self] in
+                    self?.idleFullscreen?.reload()
+                    self?.menuBar?.refreshStates()
+                })
         }
         settings?.reloadProperties()
         NSApp.activate(ignoringOtherApps: true)

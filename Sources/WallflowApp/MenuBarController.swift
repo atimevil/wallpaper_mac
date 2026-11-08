@@ -21,6 +21,8 @@ final class MenuBarController {
     private let onSetCanvasFit: (WallpaperItem, CanvasFit.Mode) -> Void
     private let onAddLocalVideo: () -> Void
     private let onDeleteLocalVideo: (WallpaperItem) -> Void
+    /// 유휴 전체화면(감상 모드) 토글이 바뀌면 컨트롤러를 다시 걸어야 한다.
+    private let onIdleFullscreenChanged: () -> Void
     private var items: [WallpaperItem] = []
 
     /// "화면 맞춤" 메뉴 항목의 이름과 값. 채우기가 기본이라 맨 앞이다.
@@ -41,6 +43,7 @@ final class MenuBarController {
         onSetCanvasFit: @escaping (WallpaperItem, CanvasFit.Mode) -> Void,
         onAddLocalVideo: @escaping () -> Void,
         onDeleteLocalVideo: @escaping (WallpaperItem) -> Void,
+        onIdleFullscreenChanged: @escaping () -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.onToggleSound = onToggleSound
@@ -55,6 +58,7 @@ final class MenuBarController {
         self.onSetCanvasFit = onSetCanvasFit
         self.onAddLocalVideo = onAddLocalVideo
         self.onDeleteLocalVideo = onDeleteLocalVideo
+        self.onIdleFullscreenChanged = onIdleFullscreenChanged
         self.onQuit = onQuit
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(
@@ -129,6 +133,16 @@ final class MenuBarController {
         hideIcons.state = DesktopIcons.isHidden ? .on : .off
         hideIcons.toolTip = "파인더를 잠깐 다시 띄웁니다(열린 파인더 창이 닫혔다 열립니다)."
         menu.addItem(hideIcons)
+
+        // 유휴 전체화면(감상 모드). 자리를 비우면 배경을 전체화면으로 올리고,
+        // 입력이 들어오면 바로 내린다. 시간은 설정 창에서 고른다.
+        let idleFull = NSMenuItem(
+            title: "유휴 시 전체화면", action: #selector(toggleIdleFullscreen), keyEquivalent: "")
+        idleFull.target = self
+        idleFull.state = IdleFullscreenController.isEnabled ? .on : .off
+        idleFull.toolTip = "자리를 비우면 배경화면을 전체화면으로 보여 줍니다. "
+            + "마우스·키를 움직이면 사라집니다. 시간은 설정에서 바꿉니다."
+        menu.addItem(idleFull)
 
         let sound = NSMenuItem(
             title: "씬 소리", action: #selector(toggleSound), keyEquivalent: "s")
@@ -300,6 +314,13 @@ final class MenuBarController {
     @objc private func toggleDesktopIcons(_ sender: NSMenuItem) {
         DesktopIcons.setHidden(sender.state != .on)
         sender.state = DesktopIcons.isHidden ? .on : .off
+    }
+
+    @objc private func toggleIdleFullscreen(_ sender: NSMenuItem) {
+        let enabled = sender.state != .on
+        UserDefaults.standard.set(enabled, forKey: IdleFullscreenController.enabledKey)
+        sender.state = enabled ? .on : .off
+        onIdleFullscreenChanged()
     }
 
     @objc private func openSettings() { onOpenSettings() }

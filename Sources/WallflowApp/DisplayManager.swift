@@ -346,6 +346,13 @@ final class DisplayManager {
         window.setContent(view)
     }
 
+    /// 감상 모드: 배경 창을 전부 최상위로 올리거나(true) 데스크톱 레벨로 되돌린다(false).
+    func setWallpaperWindowsRaised(_ raised: Bool) {
+        for window in windows.values {
+            window.setRaisedAboveEverything(raised)
+        }
+    }
+
     /// 소리 설정이 바뀌면 소리를 내는 렌더러들에게 알린다. 씬은 기존 전역/배경별
     /// 크기를, 비디오는 배경별 명시값(없으면 음소거)을 반영한다. 웹은 해당 없다.
     func applySoundSetting() {
