@@ -3,7 +3,7 @@ import WallflowKit
 
 /// 메뉴바 아이콘과 배경화면 목록 메뉴.
 @MainActor
-final class MenuBarController {
+final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let onSelect: (WallpaperItem) -> Void
     /// webm/mkv 변환 대상의 지금 상태(ffmpeg 없음/변환 중/실패). 그런 항목이
@@ -61,6 +61,7 @@ final class MenuBarController {
         self.onIdleFullscreenChanged = onIdleFullscreenChanged
         self.onQuit = onQuit
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
         statusItem.button?.image = NSImage(
             systemSymbolName: "photo.on.rectangle.angled", accessibilityDescription: "Wallflow"
         )
@@ -259,7 +260,21 @@ final class MenuBarController {
         quit.target = self
         menu.addItem(quit)
 
+        menu.delegate = self
         statusItem.menu = menu
+    }
+
+    /// 메뉴가 열리기 직전에, 앱 밖에서 바뀔 수 있는 체크 표시를 실제 상태로 다시
+    /// 맞춘다. 메뉴는 앱 안 동작 때만 다시 만들어져서, 터미널·다른 앱·시스템 설정에서
+    /// 바꾼 바탕화면 아이콘·로그인 항목은 안 그러면 옛 표시로 남는다.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        for item in menu.items {
+            switch item.action {
+            case #selector(toggleDesktopIcons(_:)): item.state = DesktopIcons.isHidden ? .on : .off
+            case #selector(toggleLogin(_:)): item.state = LoginItem.isEnabled ? .on : .off
+            default: break
+            }
+        }
     }
 
     static let soundKey = "wallflow.soundEnabled"
