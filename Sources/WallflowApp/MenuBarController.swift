@@ -19,6 +19,8 @@ final class MenuBarController {
     /// 지금 모든 화면에 걸린 배경화면. "화면 맞춤" 메뉴가 무엇에 적용할지 정한다.
     private let currentItem: () -> WallpaperItem?
     private let onSetCanvasFit: (WallpaperItem, CanvasFit.Mode) -> Void
+    private let onAddLocalVideo: () -> Void
+    private let onDeleteLocalVideo: (WallpaperItem) -> Void
     private var items: [WallpaperItem] = []
 
     /// "화면 맞춤" 메뉴 항목의 이름과 값. 채우기가 기본이라 맨 앞이다.
@@ -37,6 +39,8 @@ final class MenuBarController {
         onPowerChanged: @escaping () -> Void,
         currentItem: @escaping () -> WallpaperItem?,
         onSetCanvasFit: @escaping (WallpaperItem, CanvasFit.Mode) -> Void,
+        onAddLocalVideo: @escaping () -> Void,
+        onDeleteLocalVideo: @escaping (WallpaperItem) -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.onToggleSound = onToggleSound
@@ -49,6 +53,8 @@ final class MenuBarController {
         self.onBrowseWorkshop = onBrowseWorkshop
         self.currentItem = currentItem
         self.onSetCanvasFit = onSetCanvasFit
+        self.onAddLocalVideo = onAddLocalVideo
+        self.onDeleteLocalVideo = onDeleteLocalVideo
         self.onQuit = onQuit
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(
@@ -206,6 +212,22 @@ final class MenuBarController {
         browse.target = self
         menu.addItem(browse)
 
+        // 내 동영상 파일을 바로 배경화면으로 추가한다(창작마당을 거치지 않는다).
+        let addLocal = NSMenuItem(
+            title: "동영상 추가…", action: #selector(addLocalVideo), keyEquivalent: "")
+        addLocal.target = self
+        menu.addItem(addLocal)
+
+        // 지금 걸린 것이 내가 추가한 로컬 영상이면 지우는 길을 둔다. 창작마당
+        // 항목에는 안 뜬다(그건 창작마당 창에서 지운다). 다른 로컬 영상을 지우려면
+        // 먼저 그걸 고른 뒤 이 항목을 쓴다.
+        if let current = currentItem(), LocalVideoImporter.isLocal(current) {
+            let delete = NSMenuItem(
+                title: "이 로컬 영상 삭제…", action: #selector(deleteLocalVideo), keyEquivalent: "")
+            delete.target = self
+            menu.addItem(delete)
+        }
+
         let refresh = NSMenuItem(title: "라이브러리 새로고침", action: #selector(refresh), keyEquivalent: "r")
         refresh.target = self
         menu.addItem(refresh)
@@ -300,6 +322,13 @@ final class MenuBarController {
     }
 
     @objc private func browseWorkshop() { onBrowseWorkshop() }
+
+    @objc private func addLocalVideo() { onAddLocalVideo() }
+
+    @objc private func deleteLocalVideo() {
+        guard let current = currentItem(), LocalVideoImporter.isLocal(current) else { return }
+        onDeleteLocalVideo(current)
+    }
 
     @objc private func select(_ sender: NSMenuItem) {
         guard items.indices.contains(sender.tag) else { return }

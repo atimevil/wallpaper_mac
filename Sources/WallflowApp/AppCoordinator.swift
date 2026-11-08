@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import WallflowKit
 
 /// 앱 전체를 조립하고 수명을 관리한다.
@@ -69,6 +70,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             },
             currentItem: { [weak self] in self?.displays.currentItem },
             onSetCanvasFit: { [weak self] item, mode in self?.setCanvasFit(mode, for: item) },
+            onAddLocalVideo: { [weak self] in self?.addLocalVideo() },
+            onDeleteLocalVideo: { [weak self] item in self?.deleteLocalVideo(item) },
             onQuit: { NSApp.terminate(nil) }
         )
         // 변환이 시작/성공/실패할 때마다 메뉴의 "(변환 중)" 같은 표시를
@@ -172,6 +175,66 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private func refreshLibrary() {
         let items = (try? library.scan()) ?? []
         menuBar?.setItems(items)
+    }
+
+    /// 내 동영상 파일을 골라 라이브러리에 추가한다. 여럿 고를 수 있고 마지막 것을 건다.
+    private func addLocalVideo() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.movie, .video, .mpeg4Movie, .quickTimeMovie]
+        panel.prompt = "추가"
+        panel.message = "배경화면으로 쓸 동영상을 고르세요"
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK else { return }
+
+        var added: WallpaperItem?
+        var failures: [String] = []
+        for url in panel.urls {
+            do {
+                let item = try LocalVideoImporter.importVideo(
+                    from: url, title: nil, into: library.root)
+                // 썸네일은 실패해도 조용히 넘어간다(webm 등). 미리보기 없이도 뜬다.
+                LocalVideoThumbnail.generate(forVideoAt: item.contentURL, into: item.directory)
+                added = item
+            } catch {
+                failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        refreshLibrary()
+        if let added { select(added) }
+        if !failures.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "일부 동영상을 추가하지 못했습니다"
+            alert.informativeText = failures.joined(separator: "\n")
+            alert.runModal()
+        }
+    }
+
+    /// 내가 추가한 로컬 영상을 지운다. 창작마당 링크·사용자 폴더는
+    /// `LocalVideoImporter.deleteLocal`의 가드가 거부하므로 안전하다.
+    private func deleteLocalVideo(_ item: WallpaperItem) {
+        let alert = NSAlert()
+        alert.messageText = "‘\(item.title)’을(를) 삭제할까요?"
+        alert.informativeText = "이 로컬 영상이 라이브러리에서 영구히 지워집니다."
+        alert.addButton(withTitle: "삭제")
+        alert.addButton(withTitle: "취소")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try LocalVideoImporter.deleteLocal(item, root: library.root)
+        } catch {
+            let err = NSAlert()
+            err.messageText = "삭제하지 못했습니다"
+            err.informativeText = error.localizedDescription
+            err.runModal()
+            return
+        }
+        // 지운 것이 지금 걸려 있던 것이면 남은 것 중 하나로 바꾼다.
+        if displays.currentItem?.id == item.id,
+           let next = ((try? library.scan()) ?? []).first(where: { $0.type != .unsupported }) {
+            select(next)
+        }
+        refreshLibrary()
     }
 
     /// 메뉴의 "화면 맞춤"이 부른다. 저장하고, 지금 그 배경화면을 보여주는
