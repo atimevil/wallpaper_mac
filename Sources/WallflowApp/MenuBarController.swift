@@ -122,6 +122,14 @@ final class MenuBarController {
         login.state = LoginItem.isEnabled ? .on : .off
         menu.addItem(login)
 
+        // 바탕화면 아이콘 숨기기. 실제 파인더 설정을 읽어 표시한다.
+        let hideIcons = NSMenuItem(
+            title: "바탕화면 아이콘 숨기기", action: #selector(toggleDesktopIcons), keyEquivalent: "")
+        hideIcons.target = self
+        hideIcons.state = DesktopIcons.isHidden ? .on : .off
+        hideIcons.toolTip = "파인더를 잠깐 다시 띄웁니다(열린 파인더 창이 닫혔다 열립니다)."
+        menu.addItem(hideIcons)
+
         let sound = NSMenuItem(
             title: "씬 소리", action: #selector(toggleSound), keyEquivalent: "s")
         sound.target = self
@@ -287,6 +295,11 @@ final class MenuBarController {
         UserDefaults.standard.set(enabled, forKey: AudioSpectrum.enabledKey)
         sender.state = enabled ? .on : .off
         onToggleAudio(enabled)
+    }
+
+    @objc private func toggleDesktopIcons(_ sender: NSMenuItem) {
+        DesktopIcons.setHidden(sender.state != .on)
+        sender.state = DesktopIcons.isHidden ? .on : .off
     }
 
     @objc private func openSettings() { onOpenSettings() }
