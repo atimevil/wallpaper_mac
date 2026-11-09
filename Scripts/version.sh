@@ -5,5 +5,5 @@
 #
 #   source "$(dirname "${BASH_SOURCE[0]}")/version.sh"
 WALLFLOW_BUNDLE_ID="dev.timevil.wallflow"
-WALLFLOW_VERSION="0.2.0"
-WALLFLOW_BUILD="4"
+WALLFLOW_VERSION="0.2.1"
+WALLFLOW_BUILD="5"
