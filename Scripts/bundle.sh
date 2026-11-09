@@ -27,6 +27,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>$WALLFLOW_BUNDLE_ID</string>
     <key>CFBundleExecutable</key><string>Wallflow</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
+    <!-- 앱 말은 한국어다. 없으면 AppKit이 영어로 잡아 열기 패널의 버튼이 "Cancel"로 나오고,
+         확인창에서 Esc가 "취소" 버튼을 못 찾아 아무 일도 안 한다(실측). -->
+    <key>CFBundleDevelopmentRegion</key><string>ko</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$WALLFLOW_VERSION</string>
     <key>CFBundleVersion</key><string>$WALLFLOW_BUILD</string>

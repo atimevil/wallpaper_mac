@@ -618,6 +618,13 @@ final class WorkshopWindowController: NSWindowController {
     /// 밖에서 항목을 고른다(확인용 환경 변수가 쓴다). 목록에 없으면 아무것도 안 한다.
     private var pendingSelectID: String?
 
+    /// 배경이 메뉴·자동 바꾸기·"다음 배경으로"로 바뀌었을 때 "사용 중" 표시와 상세 패널의
+    /// 적용 버튼을 다시 맞춘다(창이 떠 있는 동안 옛 표시가 남지 않게).
+    func refreshInUse() {
+        refreshTable()
+        refreshDetailPanel()
+    }
+
     func selectItem(id: String) {
         // 창작마당 목록은 비동기로 오니 아직 없으면 기억해 뒀다가 목록이 오면 고른다.
         guard let index = displayedEntries.firstIndex(where: { $0.id == id }) else {
@@ -1003,7 +1010,7 @@ final class WorkshopWindowController: NSWindowController {
         deleteButton.keyEquivalent = ""
         cancelButton.keyEquivalent = "\r"
         alert.alertStyle = .warning
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal(escapeReturns: .alertSecondButtonReturn) == .alertFirstButtonReturn else { return }
         do {
             switch try installer.remove(id: item.id) {
             case .deletedDownload:
