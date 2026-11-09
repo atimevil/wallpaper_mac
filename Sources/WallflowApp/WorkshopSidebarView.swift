@@ -83,7 +83,9 @@ final class WorkshopSidebarView: NSView {
         outer.translatesAutoresizingMaskIntoConstraints = false
         addSubview(outer)
         // 세로 스택 기본 정렬은 가운데라 그대로 두면 아래 줄(초기화)이 가운데 뜬다.
-        for view in [divider, bottom] {
+        // 목록(스크롤)도 꽉 채운다 — 안 그러면 내용 폭으로 줄어 가운데 놓여, 사이드바가 넓어도
+        // 긴 이름("울트라와이드 3440 x 1440")이 잘린다.
+        for view in [scroll, divider, bottom] {
             view.widthAnchor.constraint(equalTo: outer.widthAnchor).isActive = true
         }
         NSLayoutConstraint.activate([
