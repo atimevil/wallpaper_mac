@@ -23,6 +23,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let onDeleteLocalVideo: (WallpaperItem) -> Void
     /// 유휴 전체화면(감상 모드) 토글이 바뀌면 컨트롤러를 다시 걸어야 한다.
     private let onIdleFullscreenChanged: () -> Void
+    /// 화면이 둘 이상일 때 "적용할 화면" 메뉴에 쓴다.
+    private let screens: () -> [DisplayManager.ScreenInfo]
+    /// 배경을 고르면 걸 대상. nil이면 모든 화면.
+    private let applyTarget: () -> CGDirectDisplayID?
+    private let onSetTarget: (CGDirectDisplayID?) -> Void
+    /// 자동으로 바꾸기 설정이 바뀌면 컨트롤러를 다시 걸어야 한다.
+    private let onRotationChanged: () -> Void
     private var items: [WallpaperItem] = []
 
     /// "화면 맞춤" 메뉴 항목의 이름과 값. 채우기가 기본이라 맨 앞이다.
@@ -44,6 +51,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         onAddLocalVideo: @escaping () -> Void,
         onDeleteLocalVideo: @escaping (WallpaperItem) -> Void,
         onIdleFullscreenChanged: @escaping () -> Void,
+        screens: @escaping () -> [DisplayManager.ScreenInfo],
+        applyTarget: @escaping () -> CGDirectDisplayID?,
+        onSetTarget: @escaping (CGDirectDisplayID?) -> Void,
+        onRotationChanged: @escaping () -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.onToggleSound = onToggleSound
@@ -59,6 +70,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         self.onAddLocalVideo = onAddLocalVideo
         self.onDeleteLocalVideo = onDeleteLocalVideo
         self.onIdleFullscreenChanged = onIdleFullscreenChanged
+        self.screens = screens
+        self.applyTarget = applyTarget
+        self.onSetTarget = onSetTarget
+        self.onRotationChanged = onRotationChanged
         self.onQuit = onQuit
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
@@ -80,6 +95,34 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let menu = NSMenu()
         // 항목을 직접 활성/비활성 하려면 자동 활성화를 꺼야 한다.
         menu.autoenablesItems = false
+
+        // 화면이 둘 이상일 때만: 목록에서 고른 배경을 어느 화면에 걸지. 고른 대상을
+        // 제목에 보여 준다 — 숨은 상태로 두면 "모든 화면"에 걸려던 게 한 화면에만 간다.
+        // 한 화면이면 메뉴가 예전과 똑같다.
+        let screenList = screens()
+        if screenList.count > 1 {
+            let target = applyTarget()
+            let targetName = screenList.first { $0.id == target }?.name ?? "모든 화면"
+            let targetItem = NSMenuItem(
+                title: "적용할 화면: \(targetName)", action: nil, keyEquivalent: "")
+            let targetMenu = NSMenu()
+            let all = NSMenuItem(title: "모든 화면", action: #selector(setTarget(_:)), keyEquivalent: "")
+            all.target = self
+            all.state = target == nil ? .on : .off
+            targetMenu.addItem(all)
+            targetMenu.addItem(.separator())
+            for screen in screenList {
+                let entry = NSMenuItem(
+                    title: screen.name, action: #selector(setTarget(_:)), keyEquivalent: "")
+                entry.target = self
+                entry.representedObject = NSNumber(value: screen.id)
+                entry.state = target == screen.id ? .on : .off
+                targetMenu.addItem(entry)
+            }
+            targetItem.submenu = targetMenu
+            menu.addItem(targetItem)
+            menu.addItem(.separator())
+        }
 
         if items.isEmpty {
             let empty = NSMenuItem(title: "배경화면 없음", action: nil, keyEquivalent: "")
@@ -116,6 +159,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 // 왜 못 여는지는 마우스를 올리면 보인다. 메뉴 이름에 다 적으면
                 // 목록이 읽기 어려워진다.
                 menuItem.toolTip = toolTip
+                // 지금 대상에 걸린 배경에 체크 — 화면마다 다를 수 있어 무엇이 걸렸는지 보여야 한다.
+                menuItem.state = item.id == currentItem()?.id ? .on : .off
                 menu.addItem(menuItem)
             }
         }
@@ -144,6 +189,39 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         idleFull.toolTip = "자리를 비우면 배경화면을 전체화면으로 보여 줍니다. "
             + "마우스·키를 움직이면 사라집니다. 시간은 설정에서 바꿉니다."
         menu.addItem(idleFull)
+
+        // 자동으로 바꾸기: 간격(하나만 체크), 무작위 순서, 지금 배경 빼기.
+        let rotation = NSMenuItem(title: "자동으로 바꾸기", action: nil, keyEquivalent: "")
+        let rotationMenu = NSMenu()
+        let interval = RotationController.interval
+        for (label, seconds) in RotationController.choices {
+            let entry = NSMenuItem(
+                title: label, action: #selector(setRotationInterval(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.tag = Int(seconds)
+            entry.state = Int(interval) == Int(seconds) ? .on : .off
+            rotationMenu.addItem(entry)
+        }
+        rotationMenu.addItem(.separator())
+        let shuffle = NSMenuItem(
+            title: "무작위 순서", action: #selector(toggleRotationShuffle(_:)), keyEquivalent: "")
+        shuffle.target = self
+        shuffle.state = RotationController.shuffle ? .on : .off
+        rotationMenu.addItem(shuffle)
+        if let current = currentItem() {
+            let exclude = NSMenuItem(
+                title: "이 배경은 빼기", action: #selector(toggleRotationExcluded(_:)), keyEquivalent: "")
+            exclude.target = self
+            exclude.state = RotationController.excluded.contains(current.id) ? .on : .off
+            exclude.toolTip = "자동으로 바꿀 때 \(current.title)은(는) 건너뜁니다."
+            rotationMenu.addItem(exclude)
+        }
+        rotation.submenu = rotationMenu
+        // 켜져 있으면 제목에 간격을 보인다 — 왜 배경이 저절로 바뀌는지 메뉴만 봐도 알게.
+        if let label = RotationController.choices.first(where: { $0.1 == interval && interval > 0 })?.0 {
+            rotation.title = "자동으로 바꾸기: \(label)"
+        }
+        menu.addItem(rotation)
 
         let sound = NSMenuItem(
             title: "소리", action: #selector(toggleSound), keyEquivalent: "s")
@@ -329,6 +407,30 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func toggleDesktopIcons(_ sender: NSMenuItem) {
         DesktopIcons.setHidden(sender.state != .on)
         sender.state = DesktopIcons.isHidden ? .on : .off
+    }
+
+    @objc private func setTarget(_ sender: NSMenuItem) {
+        onSetTarget((sender.representedObject as? NSNumber)?.uint32Value)
+        rebuildMenu()
+    }
+
+    @objc private func setRotationInterval(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(Double(sender.tag), forKey: RotationController.intervalKey)
+        // 켜는 순간부터 센다 — 예전 기준 시각이 남아 있으면 켜자마자 바뀐다.
+        RotationController.markChanged()
+        onRotationChanged()
+        rebuildMenu()
+    }
+
+    @objc private func toggleRotationShuffle(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(sender.state != .on, forKey: RotationController.shuffleKey)
+        rebuildMenu()
+    }
+
+    @objc private func toggleRotationExcluded(_ sender: NSMenuItem) {
+        guard let current = currentItem() else { return }
+        RotationController.setExcluded(current.id, sender.state != .on)
+        rebuildMenu()
     }
 
     @objc private func toggleIdleFullscreen(_ sender: NSMenuItem) {

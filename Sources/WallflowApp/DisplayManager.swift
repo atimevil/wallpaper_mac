@@ -31,14 +31,67 @@ final class DisplayManager {
     /// 기본 바탕화면이 보인다. 쓰던 배경화면이 확장되는 것이 기대에 맞다.
     private var defaultItem: WallpaperItem?
 
-    /// 지금 모든 화면에 걸린 배경화면. 설정 창이 속성 탭을 채울 때 본다.
+    /// "모든 화면" 배경(화면별 지정이 없는 화면과 새로 꽂은 화면에 건다).
     var currentItem: WallpaperItem? { defaultItem }
 
-    /// 걸린 배경화면을 다시 연다. 사용자 속성은 씬을 읽을 때 얹히므로,
-    /// 값이 바뀌면 이렇게 다시 읽어야 먹는다.
-    func reloadCurrent() {
-        guard let item = defaultItem else { return }
-        try? assign(item, toDisplay: nil)
+    /// 이 화면에 지금 걸린 배경.
+    func item(onDisplay id: CGDirectDisplayID) -> WallpaperItem? { assignments[id] }
+
+    /// 어느 화면에든 걸려 있거나 "모든 화면" 배경인 id들.
+    var assignedItemIDs: Set<String> {
+        Set(assignments.values.map(\.id) + [defaultItem?.id].compactMap { $0 })
+    }
+
+    /// 새로 붙은 화면(재연결 포함)에 걸 배경을 묻는다. 저장된 화면별 지정을 찾는 데 쓴다.
+    /// nil을 주면 "모든 화면" 배경을 건다.
+    var itemForNewDisplay: ((CGDirectDisplayID) -> WallpaperItem?)?
+
+    /// 이 배경이 걸린 화면만 다시 연다. 사용자 속성은 씬을 읽을 때 얹히므로,
+    /// 값이 바뀌면 이렇게 다시 읽어야 먹는다. (예전 `reloadCurrent`는 기본 배경을 모든
+    /// 화면에 다시 걸어 화면별 지정을 덮어썼다.)
+    func reload(itemID: String) {
+        for (id, item) in assignments where item.id == itemID {
+            try? attach(item, to: id)
+        }
+    }
+
+    /// 지운 배경을 내린다. 그 배경이 걸린 화면은 `replacement`로 바꾸고, 없으면 렌더러를
+    /// 멈추고 창을 내린다(macOS 기본 바탕화면이 보인다). "모든 화면" 배경이면 그것도 바꾼다 —
+    /// 안 그러면 새로 꽂은 모니터에 지운 파일이 걸려 검게 뜬다.
+    func unassign(itemID: String, replacement: WallpaperItem?) {
+        if defaultItem?.id == itemID { defaultItem = replacement }
+        for (id, item) in assignments where item.id == itemID {
+            if let replacement {
+                assignments[id] = replacement
+                try? attach(replacement, to: id)
+            } else {
+                renderers[id]?.stop()
+                renderers[id] = nil
+                assignments[id] = nil
+                windows[id]?.orderOut(nil)
+            }
+        }
+    }
+
+    /// 메뉴의 "적용할 화면"에 보일 화면들(화면 순서). 키는 저장용(`DisplaySelection.keys`).
+    struct ScreenInfo {
+        let id: CGDirectDisplayID
+        let key: String
+        let name: String
+    }
+
+    func screensInfo() -> [ScreenInfo] {
+        let screens = NSScreen.screens.compactMap { s in Self.displayID(of: s).map { (s, $0) } }
+        let keys = DisplaySelection.keys(forUUIDs: screens.map { Self.uuid(of: $0.1) })
+        return zip(screens, keys).map { ScreenInfo(id: $0.0.1, key: $0.1, name: $0.0.0.localizedName) }
+    }
+
+    /// 재연결·재부팅에도 같은 화면이면 같은 값(EDID 기반). 못 얻으면 번호로 대신한다.
+    static func uuid(of id: CGDirectDisplayID) -> String {
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else {
+            return "display-\(id)"
+        }
+        return CFUUIDCreateString(nil, uuid) as String
     }
 
     /// 배경 윈도우가 전부 가려졌는지. PowerMonitor가 poll 시점에 읽는다.
@@ -133,6 +186,9 @@ final class DisplayManager {
             renderers[id] = nil
             windows[id]?.orderOut(nil)
             windows[id] = nil
+            // 번호는 재연결 때 다른 화면에 다시 쓰일 수 있다 — 낡은 배정이 저장된 화면별
+            // 지정을 가리지 않게 지운다. 다시 붙으면 itemForNewDisplay로 찾는다.
+            assignments[id] = nil
         }
 
         // 새 화면에 윈도우를 만든다.
@@ -146,8 +202,9 @@ final class DisplayManager {
             window.orderFront(nil)
             windows[id] = window
 
-            // 이 화면에 배정이 있었으면 그것을, 없으면 지금 쓰는 것을 건다.
-            if let item = assignments[id] ?? defaultItem {
+            // 이 화면에 배정이 있었으면 그것을, 저장된 화면별 지정이 있으면 그것을,
+            // 없으면 "모든 화면" 배경을 건다.
+            if let item = assignments[id] ?? itemForNewDisplay?(id) ?? defaultItem {
                 assignments[id] = item
                 try? attach(item, to: id)
             }
@@ -175,6 +232,8 @@ final class DisplayManager {
 
     private func attach(_ item: WallpaperItem, to id: CGDirectDisplayID) throws {
         guard let window = windows[id] else { return }
+        // 배경을 지워 내려 둔 창이면 다시 올린다.
+        if !window.isVisible { window.orderFront(nil) }
 
         renderers[id]?.stop()
         renderers[id] = nil
@@ -348,7 +407,9 @@ final class DisplayManager {
 
     /// 감상 모드: 배경 창을 전부 최상위로 올리거나(true) 데스크톱 레벨로 되돌린다(false).
     func setWallpaperWindowsRaised(_ raised: Bool) {
-        for window in windows.values {
+        // 올릴 때는 보이는 창만 — 배경을 지워 내려 둔 창을 올리면 빈 검은 창이 화면을 덮는다.
+        // 내릴 때는 전부 원래 레벨로(내린 창은 내린 채로 남는다).
+        for window in windows.values where !raised || window.isVisible {
             window.setRaisedAboveEverything(raised)
         }
     }

@@ -41,6 +41,8 @@ final class WorkshopWindowController: NSWindowController {
     private let onApply: (WallpaperItem) -> Void
     /// 지금 켜진 배경화면 id. 격자·상세 패널이 "사용 중"을 가린다.
     private let currentItemID: () -> String?
+    /// 어느 화면에든 걸려 있나. 지울 때 "지금 쓰는 중" 경고에 쓴다(화면별 배경).
+    private let isItemInUse: (String) -> Bool
 
     private let tabControl = NSSegmentedControl(
         labels: WorkshopTab.allCases.map(\.label), trackingMode: .selectOne, target: nil, action: nil)
@@ -135,13 +137,15 @@ final class WorkshopWindowController: NSWindowController {
         libraryItems: @escaping () -> [WallpaperItem],
         onApply: @escaping (WallpaperItem) -> Void,
         currentItemID: @escaping () -> String?,
+        isItemInUse: @escaping (String) -> Bool,
         onLibraryChanged: @escaping () -> Void,
-        onPropertiesChanged: @escaping () -> Void
+        onPropertiesChanged: @escaping (String) -> Void
     ) {
         self.installer = installer
         self.libraryItems = libraryItems
         self.onApply = onApply
         self.currentItemID = currentItemID
+        self.isItemInUse = isItemInUse
         self.onLibraryChanged = onLibraryChanged
         // 설정 창과 같은 저장소·같은 콜백 — 편집이 같은 곳에 저장되고 켜진
         // 배경화면에 그 즉시 반영된다.
@@ -983,7 +987,7 @@ final class WorkshopWindowController: NSWindowController {
         alert.informativeText = "라이브러리에서 빼고 받아 둔 파일도 지웁니다. "
             + "필요하면 창작마당에서 다시 받을 수 있습니다."
         // 켜진 것을 지우면 지금은 계속 보이다가 다음에 켤 때 되살릴 게 없다 — 미리 알린다.
-        if item.id == currentItemID() {
+        if isItemInUse(item.id) {
             alert.informativeText += "\n\n지금 배경화면으로 쓰는 중입니다. 지우면 다음에 앱을 켤 때 "
                 + "이 배경화면이 뜨지 않습니다."
         }

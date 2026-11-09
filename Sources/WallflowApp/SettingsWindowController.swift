@@ -19,7 +19,7 @@ final class SettingsWindowController: NSWindowController {
     private let currentItem: () -> WallpaperItem?
     /// 속성이 바뀌면 배경화면을 다시 연다. 값은 씬을 읽을 때 얹히므로 다시
     /// 읽어야 먹는다.
-    private let onPropertiesChanged: () -> Void
+    private let onPropertiesChanged: (String) -> Void
     private let onPowerChanged: () -> Void
     private let onSoundChanged: () -> Void
     private let onAudioChanged: (Bool) -> Void
@@ -30,7 +30,7 @@ final class SettingsWindowController: NSWindowController {
 
     init(store: UserPropertyStore,
          currentItem: @escaping () -> WallpaperItem?,
-         onPropertiesChanged: @escaping () -> Void,
+         onPropertiesChanged: @escaping (String) -> Void,
          onPowerChanged: @escaping () -> Void,
          onSoundChanged: @escaping () -> Void,
          onAudioChanged: @escaping (Bool) -> Void,
