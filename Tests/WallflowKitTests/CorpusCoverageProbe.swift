@@ -13,8 +13,12 @@ final class CorpusCoverageProbe: XCTestCase {
             roots.append(URL(fileURLWithPath: NSString(string: path).expandingTildeInPath))
         }
         // 앱이 창작마당에서 받아 둔 자리. 여기가 실제로 쓰는 씬이다.
-        roots.append(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
-            "Library/Application Support/Wallflow/workshop/steamapps/workshop/content/431960"))
+        // 환경변수가 같은 곳을 가리키면(README의 테스트 명령이 그렇다) 두 번 세지 않는다.
+        let workshop = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
+            "Library/Application Support/Wallflow/workshop/steamapps/workshop/content/431960")
+        if !roots.contains(where: { $0.standardizedFileURL.path == workshop.standardizedFileURL.path }) {
+            roots.append(workshop)
+        }
         guard let assetsPath = ProcessInfo.processInfo.environment["WALLFLOW_TEST_ASSETS"] else {
             throw XCTSkip("WALLFLOW_TEST_ASSETS 미설정")
         }
