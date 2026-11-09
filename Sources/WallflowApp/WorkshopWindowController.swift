@@ -241,6 +241,7 @@ final class WorkshopWindowController: NSWindowController {
         searchField.placeholderString = "검색"
         searchField.target = self
         searchField.action = #selector(searchChanged)
+        searchField.setAccessibilityLabel("검색")
         // 검색은 Enter로만 돈다. 글자마다 요청하면 스팀에 부담이고 결과가 튄다.
         searchField.sendsWholeSearchString = true
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -256,6 +257,8 @@ final class WorkshopWindowController: NSWindowController {
         cellSizeSlider.minValue = Double(Self.minCellSize)
         cellSizeSlider.maxValue = Double(Self.maxCellSize)
         cellSizeSlider.doubleValue = savedCellSize > 0 ? savedCellSize : 220
+        // 옆 "칸 크기" 글자는 따로 놓인 라벨이라 VoiceOver가 묶지 못한다 — 이름을 직접 준다.
+        cellSizeSlider.setAccessibilityLabel("칸 크기")
         cellSizeSlider.target = self
         cellSizeSlider.action = #selector(cellSizeChanged)
         cellSizeSlider.widthAnchor.constraint(equalToConstant: 90).isActive = true
@@ -569,7 +572,8 @@ final class WorkshopWindowController: NSWindowController {
 
     /// 지금 탭에서 보여 줄 칸들. `displayedEntries`를 새로 채울 때만 부른다.
     private var visibleEntries: [GridEntry] {
-        let current = currentItemID()
+        // "사용 중"은 어느 화면에든 걸린 것 — 화면별 배경이면 대상 화면 것만 표시하면 헷갈린다.
+        let inUse = isItemInUse
         if tab == .installed {
             let text = searchField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
             return localItems
@@ -578,12 +582,12 @@ final class WorkshopWindowController: NSWindowController {
                 // 고른 순간 설치된 항목이 전부 빠진다.
                 .filter { filterState.matches(tags: $0.filterTags, ignoring: [.resolution]) }
                 .map { GridEntry(id: $0.id, title: $0.title, installed: true,
-                                 isCurrent: $0.id == current) }
+                                 isCurrent: inUse($0.id), showsInstalledBadge: false) }
         }
         return items
             .filter(itemPassesClientFilter)
             .map { GridEntry(id: $0.id, title: $0.title, installed: installer.isInstalled(id: $0.id),
-                             isCurrent: $0.id == current) }
+                             isCurrent: inUse($0.id)) }
     }
 
     /// 라이브러리에서 고른 배경화면.

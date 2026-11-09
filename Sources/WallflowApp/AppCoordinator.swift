@@ -36,6 +36,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private static let lastSelectionKey = "wallflow.lastSelectedID"
 
     override init() {
+        // macOS 26은 "설정…" 같은 표준 동작 항목에 아이콘을 저절로 붙인다. 메뉴의 나머지는
+        // 아이콘이 없어 그 칸만 들여 쓰여 줄이 어긋난다 — 저절로 붙는 아이콘을 끈다.
+        UserDefaults.standard.register(defaults: ["NSMenuEnableActionImages": false])
         let root = FileManager.default
             .homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Wallflow/Library")
@@ -111,6 +114,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 self?.settings?.reloadProperties()
             },
             onRotationChanged: { [weak self] in self?.rotation?.reload() },
+            onNextWallpaper: { [weak self] in
+                RotationController.markChanged()   // 직접 넘겼으니 자동 바꾸기는 지금부터 다시 센다
+                self?.rotate()
+            },
             onQuit: { NSApp.terminate(nil) }
         )
         // 변환이 시작/성공/실패할 때마다 메뉴의 "(변환 중)" 같은 표시를
@@ -227,6 +234,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 onAudioChanged: { [weak self] enabled in self?.setAudioCapture(enabled) },
                 onIdleFullscreenChanged: { [weak self] in
                     self?.idleFullscreen?.reload()
+                    self?.menuBar?.refreshStates()
+                },
+                onDisplayOptionsChanged: { [weak self] in
+                    self?.rotation?.reload()
                     self?.menuBar?.refreshStates()
                 })
         }
@@ -372,8 +383,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "‘\(item.title)’을(를) 삭제할까요?"
         alert.informativeText = "이 로컬 영상이 라이브러리에서 영구히 지워집니다."
-        alert.addButton(withTitle: "삭제")
-        alert.addButton(withTitle: "취소")
+        let deleteButton = alert.addButton(withTitle: "삭제")
+        let cancelButton = alert.addButton(withTitle: "취소")
+        // 창작마당 창의 지우기와 같게: 되돌릴 수 없으니 Return은 취소가 받고, 삭제는 빨갛게만.
+        deleteButton.hasDestructiveAction = true
+        deleteButton.keyEquivalent = ""
+        cancelButton.keyEquivalent = "\r"
+        alert.alertStyle = .warning
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
             try LocalVideoImporter.deleteLocal(item, root: library.root)

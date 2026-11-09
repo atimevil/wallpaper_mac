@@ -6,8 +6,10 @@ struct GridEntry {
     let id: String
     let title: String
     let installed: Bool
-    /// 지금 켜진 배경화면인지.
+    /// 어느 화면에든 걸려 있는지("사용 중" 표시).
     var isCurrent = false
+    /// "받음" 표시를 보일지. 설치됨 탭은 전부 받은 것이라 표시가 뜻이 없어 끈다.
+    var showsInstalledBadge = true
 }
 
 /// 칸을 꽉 채우는 그림. 비율을 지키고 넘치는 쪽을 자른다.
@@ -211,7 +213,7 @@ final class WorkshopGridItem: NSCollectionViewItem {
         nameLabel.stringValue = entry.title
         // 한 줄로 잘리는 긴 제목(중국어·일본어 제목이 흔하다)을 올려서 다 볼 수 있게.
         nameLabel.toolTip = entry.title
-        badge.isHidden = downloadProgress != nil || !entry.installed
+        badge.isHidden = downloadProgress != nil || !entry.installed || !entry.showsInstalledBadge
         currentPill.isHidden = !entry.isCurrent
         if let progress = downloadProgress {
             progressBar.isHidden = false
