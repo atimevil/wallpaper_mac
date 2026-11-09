@@ -4,6 +4,8 @@ import AppKit
 /// 데스크톱 아이콘 바로 아래 레벨에 놓여 모든 스페이스에 머문다.
 final class WallpaperWindow: NSWindow {
     let screenID: CGDirectDisplayID
+    /// 평소(데스크톱 아이콘 아래) 레벨. 감상 모드에서 올렸다가 이 값으로 되돌린다.
+    private var desktopLevel: NSWindow.Level = .normal
 
     init(screen: NSScreen) {
         let key = NSDeviceDescriptionKey("NSScreenNumber")
@@ -20,6 +22,7 @@ final class WallpaperWindow: NSWindow {
         level = NSWindow.Level(
             rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) - 1
         )
+        desktopLevel = level
 
         // 모든 스페이스에 머물고, Mission Control과 창 순환에서 빠진다.
         collectionBehavior = [
@@ -35,6 +38,20 @@ final class WallpaperWindow: NSWindow {
         isReleasedWhenClosed = false
         backgroundColor = .black
         setFrame(screen.frame, display: true)
+    }
+
+    /// 감상 모드: 전체화면으로 최상위에 올리거나(true) 평소 데스크톱 레벨로
+    /// 되돌린다(false). 올리는 동안은 클릭을 삼켜(뒤 앱으로 새지 않게), 내리면
+    /// 다시 데스크톱으로 통과시킨다.
+    func setRaisedAboveEverything(_ raised: Bool) {
+        if raised {
+            level = .screenSaver
+            ignoresMouseEvents = false
+            orderFront(nil)
+        } else {
+            level = desktopLevel
+            ignoresMouseEvents = true
+        }
     }
 
     /// 이 윈도우의 내용을 교체한다. 렌더러가 뷰를 넘긴다.

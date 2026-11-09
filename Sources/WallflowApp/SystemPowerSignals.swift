@@ -11,15 +11,20 @@ import WallflowKit
 @MainActor
 final class PowerMonitor {
     private let occlusionProvider: () -> Bool
+    /// 유휴 전체화면(감상 모드)이 떠 있는 동안은 전력 정책의 멈춤을 보류한다 —
+    /// 감상 중에 화면이 얼어붙으면 안 된다. 켜고 내리는 쪽은 IdleFullscreenController다.
+    private let fullscreenShowcaseActive: () -> Bool
     private let onChange: (PlaybackDirective) -> Void
     private var timer: Timer?
     private var last: PlaybackDirective?
 
     init(
         occlusionProvider: @escaping () -> Bool,
+        fullscreenShowcaseActive: @escaping () -> Bool = { false },
         onChange: @escaping (PlaybackDirective) -> Void
     ) {
         self.occlusionProvider = occlusionProvider
+        self.fullscreenShowcaseActive = fullscreenShowcaseActive
         self.onChange = onChange
     }
 
@@ -50,8 +55,13 @@ final class PowerMonitor {
         )
         // 사용자가 설정 창에서 고른 규칙을 매번 읽는다. 5초에 한 번이라 값싸고,
         // 캐시하면 설정을 바꾼 뒤 재시작해야 먹는다.
-        let directive = PowerPolicy.directive(
-            for: signals, preferences: PowerPreferencesStore.load())
+        let preferences = PowerPreferencesStore.load()
+        var directive = PowerPolicy.directive(for: signals, preferences: preferences)
+        // 감상 모드가 떠 있으면 멈춤만 덮어 계속 재생한다(이미 재생 중이면 그 프레임을
+        // 그대로 둔다). 한 곳에서만 보류 — 단일 진실원천인 PowerPolicy는 건드리지 않는다.
+        if fullscreenShowcaseActive(), directive == .paused {
+            directive = .playing(fps: preferences.targetFPS)
+        }
         guard directive != last else { return }
         last = directive
         onChange(directive)
@@ -60,7 +70,9 @@ final class PowerMonitor {
     /// 마지막 사용자 입력 이후 경과 시간.
     /// kCGAnyInputEventType은 Swift에서 CGEventType으로 안전하게 만들 수 없으므로
     /// 관심 있는 이벤트들 중 가장 최근 것을 고른다.
-    private static func idleSeconds() -> TimeInterval {
+    /// `IdleFullscreenController`도 이 값을 빠르게 폴링한다 — CGEventSource는 권한이
+    /// 필요 없어, 전역 이벤트 모니터(권한 프롬프트)를 들이지 않고 종료를 감지한다.
+    static func idleSeconds() -> TimeInterval {
         let types: [CGEventType] = [
             .mouseMoved, .leftMouseDown, .rightMouseDown,
             .keyDown, .flagsChanged, .scrollWheel,

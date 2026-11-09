@@ -30,9 +30,20 @@ final class VideoRenderer: WallpaperRenderer {
         let template = AVPlayerItem(asset: asset)
         // AVPlayerLooper가 큐를 관리해 이음매 없는 반복을 만든다.
         looper = AVPlayerLooper(player: player, templateItem: template)
-        player.isMuted = true              // 배경화면이 소리를 내면 안 된다
         player.actionAtItemEnd = .advance
+        applySoundSetting()                // 기본 음소거, 배경별 볼륨이 있으면 반영
         player.play()
+    }
+
+    /// 배경별 소리 크기를 반영한다. **비디오는 기본 음소거** — 소리 마스터가
+    /// 켜져 있고(씬·비디오 공통) 사용자가 이 배경에 볼륨을 명시적으로 준
+    /// 경우에만(>0) 소리를 낸다. 마스터를 끄면 비디오 소리도 꺼진다 — 안 그러면
+    /// 볼륨 준 영상 소리를 끌 길을 사용자가 스스로 찾아야 한다. 로컬 영상을
+    /// 추가하자마자 바탕화면에서 소리가 터지지 않게 하기 위한 기본 음소거도 겸한다.
+    func applySoundSetting() {
+        let volume = VolumePreferencesStore.explicitVolume(for: item.id) ?? 0
+        player.isMuted = !SceneRenderer.soundEnabled || volume <= 0
+        player.volume = Float(volume)
     }
 
     func apply(_ directive: PlaybackDirective) {

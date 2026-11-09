@@ -6,7 +6,8 @@ import WallflowKit
 @MainActor
 final class PropertyEditorView: NSView {
     private let store: UserPropertyStore
-    private let onChanged: () -> Void
+    /// 편집 중인 배경 id를 넘긴다 — 그 배경이 걸린 화면만 다시 열게(화면별 배경).
+    private let onChanged: (String) -> Void
 
     private let titleLabel = NSTextField(labelWithString: "")
     private let stack = NSStackView()
@@ -19,7 +20,7 @@ final class PropertyEditorView: NSView {
 
     /// 창작마당 상세 패널은 자기 제목을 이미 보여 주므로 여기서 또 안 보여 준다
     /// — 설정 창 속성 탭은 계속 보여 준다(기본값).
-    init(store: UserPropertyStore, onChanged: @escaping () -> Void, showsTitle: Bool = true) {
+    init(store: UserPropertyStore, onChanged: @escaping (String) -> Void, showsTitle: Bool = true) {
         self.store = store
         self.onChanged = onChanged
         super.init(frame: .zero)
@@ -275,6 +276,6 @@ final class PropertyEditorView: NSView {
             return
         }
         applyConditions()
-        onChanged()
+        onChanged(itemID)
     }
 }

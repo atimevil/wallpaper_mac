@@ -19,26 +19,29 @@ final class SettingsWindowController: NSWindowController {
     private let currentItem: () -> WallpaperItem?
     /// 속성이 바뀌면 배경화면을 다시 연다. 값은 씬을 읽을 때 얹히므로 다시
     /// 읽어야 먹는다.
-    private let onPropertiesChanged: () -> Void
+    private let onPropertiesChanged: (String) -> Void
     private let onPowerChanged: () -> Void
     private let onSoundChanged: () -> Void
     private let onAudioChanged: (Bool) -> Void
+    private let onIdleFullscreenChanged: () -> Void
 
     private let tabs = NSTabView()
     private lazy var propertyEditor = PropertyEditorView(store: store, onChanged: onPropertiesChanged)
 
     init(store: UserPropertyStore,
          currentItem: @escaping () -> WallpaperItem?,
-         onPropertiesChanged: @escaping () -> Void,
+         onPropertiesChanged: @escaping (String) -> Void,
          onPowerChanged: @escaping () -> Void,
          onSoundChanged: @escaping () -> Void,
-         onAudioChanged: @escaping (Bool) -> Void) {
+         onAudioChanged: @escaping (Bool) -> Void,
+         onIdleFullscreenChanged: @escaping () -> Void) {
         self.store = store
         self.currentItem = currentItem
         self.onPropertiesChanged = onPropertiesChanged
         self.onPowerChanged = onPowerChanged
         self.onSoundChanged = onSoundChanged
         self.onAudioChanged = onAudioChanged
+        self.onIdleFullscreenChanged = onIdleFullscreenChanged
         let window = UtilityWindow(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 480),
             styleMask: [.titled, .closable, .resizable],
@@ -55,6 +58,8 @@ final class SettingsWindowController: NSWindowController {
     /// 배경화면이 바뀌었을 때 속성 탭을 다시 채운다.
     func reloadProperties() {
         propertyEditor.show(item: currentItem())
+        // 배경화면이 바뀌면 소리 크기 슬라이더도 그 배경 값으로(배경마다 따로다).
+        volumeSlider.doubleValue = VolumePreferencesStore.displayVolume(for: currentItem())
     }
 
     /// 메뉴바에서 바꾼 값을 다시 읽는다. 창이 열린 채로 메뉴에서 바꾸면 여기 남은
@@ -149,14 +154,14 @@ final class SettingsWindowController: NSWindowController {
         stack.addArrangedSubview(batteryRow)
 
         heading("소리")
-        soundBox = check("씬 소리", on: UserDefaults.standard.bool(forKey: MenuBarController.soundKey),
+        soundBox = check("소리", on: UserDefaults.standard.bool(forKey: MenuBarController.soundKey),
                          #selector(soundChanged))
         let volumeRow = NSStackView()
         volumeRow.orientation = .horizontal
         volumeRow.addArrangedSubview(NSTextField(labelWithString: "크기:"))
         volumeSlider.minValue = 0
         volumeSlider.maxValue = 1
-        volumeSlider.doubleValue = SceneRenderer.soundVolume
+        volumeSlider.doubleValue = VolumePreferencesStore.displayVolume(for: currentItem())
         volumeSlider.target = self
         volumeSlider.action = #selector(soundChanged)
         volumeSlider.widthAnchor.constraint(equalToConstant: 200).isActive = true
@@ -167,6 +172,24 @@ final class SettingsWindowController: NSWindowController {
 
         heading("시작")
         loginBox = check("로그인할 때 시작", on: LoginItem.isEnabled, #selector(loginChanged))
+
+        heading("감상 모드")
+        idleFullscreenBox = check(
+            "유휴 시 전체화면 (자리를 비우면 배경을 전체화면으로)",
+            on: IdleFullscreenController.isEnabled, #selector(idleFullscreenChanged))
+        let idleFullRow = NSStackView()
+        idleFullRow.orientation = .horizontal
+        idleFullRow.addArrangedSubview(NSTextField(labelWithString: "입력이 없고 이만큼 지나면:"))
+        for (label, seconds) in Self.idleFullscreenChoices {
+            idleFullscreenPopup.addItem(withTitle: label)
+            idleFullscreenPopup.lastItem?.tag = Int(seconds)
+        }
+        idleFullscreenPopup.selectItem(withTag: Int(IdleFullscreenController.thresholdSeconds))
+        if idleFullscreenPopup.indexOfSelectedItem < 0 { idleFullscreenPopup.selectItem(at: 1) }
+        idleFullscreenPopup.target = self
+        idleFullscreenPopup.action = #selector(idleFullscreenChanged)
+        idleFullRow.addArrangedSubview(idleFullscreenPopup)
+        stack.addArrangedSubview(idleFullRow)
 
         return Self.scrolling(stack)
     }
@@ -202,6 +225,8 @@ final class SettingsWindowController: NSWindowController {
     private var soundBox: NSButton?
     private var audioBox: NSButton?
     private var loginBox: NSButton?
+    private var idleFullscreenBox: NSButton?
+    private let idleFullscreenPopup = NSPopUpButton()
     private let idlePopup = NSPopUpButton()
     private let fpsPopup = NSPopUpButton()
     private let batteryPopup = NSPopUpButton()
@@ -209,6 +234,18 @@ final class SettingsWindowController: NSWindowController {
     static let idleChoices: [(String, TimeInterval)] = [
         ("안 함", 0), ("5분", 300), ("15분", 900), ("30분", 1800), ("1시간", 3600),
     ]
+
+    static let idleFullscreenChoices: [(String, TimeInterval)] = [
+        ("30초", 30), ("1분", 60), ("2분", 120), ("5분", 300), ("10분", 600),
+    ]
+
+    @objc private func idleFullscreenChanged() {
+        UserDefaults.standard.set(
+            idleFullscreenBox?.state == .on, forKey: IdleFullscreenController.enabledKey)
+        UserDefaults.standard.set(
+            Double(idleFullscreenPopup.selectedTag()), forKey: IdleFullscreenController.thresholdKey)
+        onIdleFullscreenChanged()
+    }
 
     @objc private func powerChanged() {
         var prefs = PowerPreferences()
@@ -223,7 +260,12 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func soundChanged() {
         UserDefaults.standard.set(soundBox?.state == .on, forKey: MenuBarController.soundKey)
-        UserDefaults.standard.set(volumeSlider.doubleValue, forKey: SceneRenderer.volumeKey)
+        // 크기는 지금 걸린 배경화면에 저장한다(배경마다 따로). 없으면 전역 기본에.
+        if let item = currentItem() {
+            VolumePreferencesStore.setVolume(volumeSlider.doubleValue, for: item.id)
+        } else {
+            UserDefaults.standard.set(volumeSlider.doubleValue, forKey: SceneRenderer.volumeKey)
+        }
         onSoundChanged()
     }
 

@@ -3,7 +3,7 @@ import WallflowKit
 
 /// 메뉴바 아이콘과 배경화면 목록 메뉴.
 @MainActor
-final class MenuBarController {
+final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let onSelect: (WallpaperItem) -> Void
     /// webm/mkv 변환 대상의 지금 상태(ffmpeg 없음/변환 중/실패). 그런 항목이
@@ -19,6 +19,17 @@ final class MenuBarController {
     /// 지금 모든 화면에 걸린 배경화면. "화면 맞춤" 메뉴가 무엇에 적용할지 정한다.
     private let currentItem: () -> WallpaperItem?
     private let onSetCanvasFit: (WallpaperItem, CanvasFit.Mode) -> Void
+    private let onAddLocalVideo: () -> Void
+    private let onDeleteLocalVideo: (WallpaperItem) -> Void
+    /// 유휴 전체화면(감상 모드) 토글이 바뀌면 컨트롤러를 다시 걸어야 한다.
+    private let onIdleFullscreenChanged: () -> Void
+    /// 화면이 둘 이상일 때 "적용할 화면" 메뉴에 쓴다.
+    private let screens: () -> [DisplayManager.ScreenInfo]
+    /// 배경을 고르면 걸 대상. nil이면 모든 화면.
+    private let applyTarget: () -> CGDirectDisplayID?
+    private let onSetTarget: (CGDirectDisplayID?) -> Void
+    /// 자동으로 바꾸기 설정이 바뀌면 컨트롤러를 다시 걸어야 한다.
+    private let onRotationChanged: () -> Void
     private var items: [WallpaperItem] = []
 
     /// "화면 맞춤" 메뉴 항목의 이름과 값. 채우기가 기본이라 맨 앞이다.
@@ -37,6 +48,13 @@ final class MenuBarController {
         onPowerChanged: @escaping () -> Void,
         currentItem: @escaping () -> WallpaperItem?,
         onSetCanvasFit: @escaping (WallpaperItem, CanvasFit.Mode) -> Void,
+        onAddLocalVideo: @escaping () -> Void,
+        onDeleteLocalVideo: @escaping (WallpaperItem) -> Void,
+        onIdleFullscreenChanged: @escaping () -> Void,
+        screens: @escaping () -> [DisplayManager.ScreenInfo],
+        applyTarget: @escaping () -> CGDirectDisplayID?,
+        onSetTarget: @escaping (CGDirectDisplayID?) -> Void,
+        onRotationChanged: @escaping () -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.onToggleSound = onToggleSound
@@ -49,8 +67,16 @@ final class MenuBarController {
         self.onBrowseWorkshop = onBrowseWorkshop
         self.currentItem = currentItem
         self.onSetCanvasFit = onSetCanvasFit
+        self.onAddLocalVideo = onAddLocalVideo
+        self.onDeleteLocalVideo = onDeleteLocalVideo
+        self.onIdleFullscreenChanged = onIdleFullscreenChanged
+        self.screens = screens
+        self.applyTarget = applyTarget
+        self.onSetTarget = onSetTarget
+        self.onRotationChanged = onRotationChanged
         self.onQuit = onQuit
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
         statusItem.button?.image = NSImage(
             systemSymbolName: "photo.on.rectangle.angled", accessibilityDescription: "Wallflow"
         )
@@ -70,11 +96,41 @@ final class MenuBarController {
         // 항목을 직접 활성/비활성 하려면 자동 활성화를 꺼야 한다.
         menu.autoenablesItems = false
 
+        // 화면이 둘 이상일 때만: 목록에서 고른 배경을 어느 화면에 걸지. 고른 대상을
+        // 제목에 보여 준다 — 숨은 상태로 두면 "모든 화면"에 걸려던 게 한 화면에만 간다.
+        // 한 화면이면 메뉴가 예전과 똑같다.
+        let screenList = screens()
+        if screenList.count > 1 {
+            let target = applyTarget()
+            let targetName = screenList.first { $0.id == target }?.name ?? "모든 화면"
+            let targetItem = NSMenuItem(
+                title: "적용할 화면: \(targetName)", action: nil, keyEquivalent: "")
+            let targetMenu = NSMenu()
+            let all = NSMenuItem(title: "모든 화면", action: #selector(setTarget(_:)), keyEquivalent: "")
+            all.target = self
+            all.state = target == nil ? .on : .off
+            targetMenu.addItem(all)
+            targetMenu.addItem(.separator())
+            for screen in screenList {
+                let entry = NSMenuItem(
+                    title: screen.name, action: #selector(setTarget(_:)), keyEquivalent: "")
+                entry.target = self
+                entry.representedObject = NSNumber(value: screen.id)
+                entry.state = target == screen.id ? .on : .off
+                targetMenu.addItem(entry)
+            }
+            targetItem.submenu = targetMenu
+            menu.addItem(targetItem)
+            menu.addItem(.separator())
+        }
+
         if items.isEmpty {
             let empty = NSMenuItem(title: "배경화면 없음", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
         } else {
+            // 체크 표시 기준. 항목마다 물으면 화면 수만큼 UUID 조회를 반복한다.
+            let currentID = currentItem()?.id
             for (index, item) in items.enumerated() {
                 // 열 수 없는 것은 그렇다고 적는다. 목록에서 빼면 사용자는 자기가
                 // 받은 것이 왜 안 보이는지 알 수 없고, 아무 표시 없이 두면
@@ -105,6 +161,8 @@ final class MenuBarController {
                 // 왜 못 여는지는 마우스를 올리면 보인다. 메뉴 이름에 다 적으면
                 // 목록이 읽기 어려워진다.
                 menuItem.toolTip = toolTip
+                // 지금 대상에 걸린 배경에 체크 — 화면마다 다를 수 있어 무엇이 걸렸는지 보여야 한다.
+                menuItem.state = item.id == currentID ? .on : .off
                 menu.addItem(menuItem)
             }
         }
@@ -116,8 +174,59 @@ final class MenuBarController {
         login.state = LoginItem.isEnabled ? .on : .off
         menu.addItem(login)
 
+        // 바탕화면 아이콘 숨기기. 실제 파인더 설정을 읽어 표시한다.
+        let hideIcons = NSMenuItem(
+            title: "바탕화면 아이콘 숨기기", action: #selector(toggleDesktopIcons), keyEquivalent: "")
+        hideIcons.target = self
+        hideIcons.state = DesktopIcons.isHidden ? .on : .off
+        hideIcons.toolTip = "파인더를 잠깐 다시 띄웁니다(열린 파인더 창이 닫혔다 열립니다)."
+        menu.addItem(hideIcons)
+
+        // 유휴 전체화면(감상 모드). 자리를 비우면 배경을 전체화면으로 올리고,
+        // 입력이 들어오면 바로 내린다. 시간은 설정 창에서 고른다.
+        let idleFull = NSMenuItem(
+            title: "유휴 시 전체화면", action: #selector(toggleIdleFullscreen), keyEquivalent: "")
+        idleFull.target = self
+        idleFull.state = IdleFullscreenController.isEnabled ? .on : .off
+        idleFull.toolTip = "자리를 비우면 배경화면을 전체화면으로 보여 줍니다. "
+            + "마우스·키를 움직이면 사라집니다. 시간은 설정에서 바꿉니다."
+        menu.addItem(idleFull)
+
+        // 자동으로 바꾸기: 간격(하나만 체크), 무작위 순서, 지금 배경 빼기.
+        let rotation = NSMenuItem(title: "자동으로 바꾸기", action: nil, keyEquivalent: "")
+        let rotationMenu = NSMenu()
+        let interval = RotationController.interval
+        for (label, seconds) in RotationController.choices {
+            let entry = NSMenuItem(
+                title: label, action: #selector(setRotationInterval(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.tag = Int(seconds)
+            entry.state = Int(interval) == Int(seconds) ? .on : .off
+            rotationMenu.addItem(entry)
+        }
+        rotationMenu.addItem(.separator())
+        let shuffle = NSMenuItem(
+            title: "무작위 순서", action: #selector(toggleRotationShuffle(_:)), keyEquivalent: "")
+        shuffle.target = self
+        shuffle.state = RotationController.shuffle ? .on : .off
+        rotationMenu.addItem(shuffle)
+        if let current = currentItem() {
+            let exclude = NSMenuItem(
+                title: "이 배경은 빼기", action: #selector(toggleRotationExcluded(_:)), keyEquivalent: "")
+            exclude.target = self
+            exclude.state = RotationController.excluded.contains(current.id) ? .on : .off
+            exclude.toolTip = "자동으로 바꿀 때 \(current.title)은(는) 건너뜁니다."
+            rotationMenu.addItem(exclude)
+        }
+        rotation.submenu = rotationMenu
+        // 켜져 있으면 제목에 간격을 보인다 — 왜 배경이 저절로 바뀌는지 메뉴만 봐도 알게.
+        if let label = RotationController.choices.first(where: { $0.1 == interval && interval > 0 })?.0 {
+            rotation.title = "자동으로 바꾸기: \(label)"
+        }
+        menu.addItem(rotation)
+
         let sound = NSMenuItem(
-            title: "씬 소리", action: #selector(toggleSound), keyEquivalent: "s")
+            title: "소리", action: #selector(toggleSound), keyEquivalent: "s")
         sound.target = self
         // 배경화면이 로그인할 때마다 소리를 내면 곤란하므로 기본은 꺼짐이다.
         sound.state = UserDefaults.standard.bool(forKey: Self.soundKey) ? .on : .off
@@ -127,7 +236,8 @@ final class MenuBarController {
         // 씬이 정한 볼륨에 곱해지므로, 씬 안의 균형은 그대로 남는다.
         let volumeItem = NSMenuItem(title: "소리 크기", action: nil, keyEquivalent: "")
         let volumeMenu = NSMenu()
-        let current = SceneRenderer.soundVolume
+        // 지금 걸린 배경화면 기준(배경마다 따로 저장된다). 없으면 전역 기본.
+        let current = VolumePreferencesStore.displayVolume(for: currentItem())
         for percent in [0, 25, 50, 75, 100] {
             let entry = NSMenuItem(
                 title: "\(percent)%", action: #selector(setVolume), keyEquivalent: "")
@@ -206,6 +316,22 @@ final class MenuBarController {
         browse.target = self
         menu.addItem(browse)
 
+        // 내 동영상 파일을 바로 배경화면으로 추가한다(창작마당을 거치지 않는다).
+        let addLocal = NSMenuItem(
+            title: "동영상 추가…", action: #selector(addLocalVideo), keyEquivalent: "")
+        addLocal.target = self
+        menu.addItem(addLocal)
+
+        // 지금 걸린 것이 내가 추가한 로컬 영상이면 지우는 길을 둔다. 창작마당
+        // 항목에는 안 뜬다(그건 창작마당 창에서 지운다). 다른 로컬 영상을 지우려면
+        // 먼저 그걸 고른 뒤 이 항목을 쓴다.
+        if let current = currentItem(), LocalVideoImporter.isLocal(current) {
+            let delete = NSMenuItem(
+                title: "이 로컬 영상 삭제…", action: #selector(deleteLocalVideo), keyEquivalent: "")
+            delete.target = self
+            menu.addItem(delete)
+        }
+
         let refresh = NSMenuItem(title: "라이브러리 새로고침", action: #selector(refresh), keyEquivalent: "r")
         refresh.target = self
         menu.addItem(refresh)
@@ -214,7 +340,21 @@ final class MenuBarController {
         quit.target = self
         menu.addItem(quit)
 
+        menu.delegate = self
         statusItem.menu = menu
+    }
+
+    /// 메뉴가 열리기 직전에, 앱 밖에서 바뀔 수 있는 체크 표시를 실제 상태로 다시
+    /// 맞춘다. 메뉴는 앱 안 동작 때만 다시 만들어져서, 터미널·다른 앱·시스템 설정에서
+    /// 바꾼 바탕화면 아이콘·로그인 항목은 안 그러면 옛 표시로 남는다.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        for item in menu.items {
+            switch item.action {
+            case #selector(toggleDesktopIcons(_:)): item.state = DesktopIcons.isHidden ? .on : .off
+            case #selector(toggleLogin(_:)): item.state = LoginItem.isEnabled ? .on : .off
+            default: break
+            }
+        }
     }
 
     static let soundKey = "wallflow.soundEnabled"
@@ -266,11 +406,52 @@ final class MenuBarController {
         onToggleAudio(enabled)
     }
 
+    @objc private func toggleDesktopIcons(_ sender: NSMenuItem) {
+        DesktopIcons.setHidden(sender.state != .on)
+        sender.state = DesktopIcons.isHidden ? .on : .off
+    }
+
+    @objc private func setTarget(_ sender: NSMenuItem) {
+        onSetTarget((sender.representedObject as? NSNumber)?.uint32Value)
+        rebuildMenu()
+    }
+
+    @objc private func setRotationInterval(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(Double(sender.tag), forKey: RotationController.intervalKey)
+        // 켜는 순간부터 센다 — 예전 기준 시각이 남아 있으면 켜자마자 바뀐다.
+        RotationController.markChanged()
+        onRotationChanged()
+        rebuildMenu()
+    }
+
+    @objc private func toggleRotationShuffle(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(sender.state != .on, forKey: RotationController.shuffleKey)
+        rebuildMenu()
+    }
+
+    @objc private func toggleRotationExcluded(_ sender: NSMenuItem) {
+        guard let current = currentItem() else { return }
+        RotationController.setExcluded(current.id, sender.state != .on)
+        rebuildMenu()
+    }
+
+    @objc private func toggleIdleFullscreen(_ sender: NSMenuItem) {
+        let enabled = sender.state != .on
+        UserDefaults.standard.set(enabled, forKey: IdleFullscreenController.enabledKey)
+        sender.state = enabled ? .on : .off
+        onIdleFullscreenChanged()
+    }
+
     @objc private func openSettings() { onOpenSettings() }
 
     @objc private func setVolume(_ sender: NSMenuItem) {
-        UserDefaults.standard.set(
-            Double(sender.tag) / 100, forKey: SceneRenderer.volumeKey)
+        let volume = Double(sender.tag) / 100
+        // 지금 걸린 배경화면에 저장한다(배경마다 따로). 걸린 게 없으면 전역 기본에.
+        if let item = currentItem() {
+            VolumePreferencesStore.setVolume(volume, for: item.id)
+        } else {
+            UserDefaults.standard.set(volume, forKey: SceneRenderer.volumeKey)
+        }
         rebuildMenu()
         // 소리 설정을 다시 적용하는 경로가 이것뿐이다. 켬/끔과 같은 길을 쓴다.
         onToggleSound(UserDefaults.standard.bool(forKey: Self.soundKey))
@@ -300,6 +481,13 @@ final class MenuBarController {
     }
 
     @objc private func browseWorkshop() { onBrowseWorkshop() }
+
+    @objc private func addLocalVideo() { onAddLocalVideo() }
+
+    @objc private func deleteLocalVideo() {
+        guard let current = currentItem(), LocalVideoImporter.isLocal(current) else { return }
+        onDeleteLocalVideo(current)
+    }
 
     @objc private func select(_ sender: NSMenuItem) {
         guard items.indices.contains(sender.tag) else { return }
