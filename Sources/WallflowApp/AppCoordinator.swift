@@ -316,6 +316,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         defer {
             settings?.reloadProperties()
             menuBar?.refreshStates()
+            workshop?.refreshInUse()
         }
         if !screens.contains(where: { map[$0.key] != nil }) {
             guard let item = next(displays.currentItem?.id) else { return }
@@ -390,7 +391,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         deleteButton.keyEquivalent = ""
         cancelButton.keyEquivalent = "\r"
         alert.alertStyle = .warning
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal(escapeReturns: .alertSecondButtonReturn) == .alertFirstButtonReturn else { return }
         do {
             try LocalVideoImporter.deleteLocal(item, root: library.root)
         } catch {
@@ -419,8 +420,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private func select(_ item: WallpaperItem) {
         // displays.currentItem은 toDisplay가 nil이면 assign이 실패해도 이미
         // 바뀌어 있다 — 메뉴의 "화면 맞춤" 체크 표시·활성 상태가 새 배경화면
-        // 것을 보게 성공·실패 양쪽에서 갱신한다.
-        defer { menuBar?.refreshStates() }
+        // 것을 보게 성공·실패 양쪽에서 갱신한다. 창작마당 창의 "사용 중"도.
+        defer {
+            menuBar?.refreshStates()
+            workshop?.refreshInUse()
+        }
         let target = effectiveTarget
         do {
             try displays.assign(item, toDisplay: target)

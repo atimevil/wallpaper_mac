@@ -81,7 +81,7 @@ final class SettingsWindowController: NSWindowController {
         let prefs = PowerPreferencesStore.load()
         occludedBox?.state = prefs.pauseWhenOccluded ? .on : .off
         fullscreenBox?.state = prefs.pauseInFullscreen ? .on : .off
-        idlePopup.selectItem(withTag: Int(prefs.idlePauseSeconds))
+        Self.select(idlePopup, tag: Int(prefs.idlePauseSeconds), fallback: 0)
         fpsPopup.selectItem(withTag: prefs.targetFPS)
         batteryPopup.selectItem(withTag: prefs.batteryFPS)
         soundBox?.state = UserDefaults.standard.bool(forKey: MenuBarController.soundKey) ? .on : .off
@@ -89,15 +89,22 @@ final class SettingsWindowController: NSWindowController {
         loginBox?.state = LoginItem.isEnabled ? .on : .off
         let idleFullscreen = IdleFullscreenController.isEnabled
         idleFullscreenBox?.state = idleFullscreen ? .on : .off
-        idleFullscreenPopup.selectItem(withTag: Int(IdleFullscreenController.thresholdSeconds))
+        Self.select(idleFullscreenPopup, tag: Int(IdleFullscreenController.thresholdSeconds), fallback: 1)
         // 감상 모드를 꺼 두면 기다릴 시간은 뜻이 없다 — 쓸 수 있어 보이면 헷갈린다.
         idleFullscreenPopup.isEnabled = idleFullscreen
-        rotationPopup.selectItem(withTag: Int(RotationController.interval))
+        Self.select(rotationPopup, tag: Int(RotationController.interval), fallback: 0)
         shuffleBox?.state = RotationController.shuffle ? .on : .off
         desktopIconsBox?.state = DesktopIcons.isHidden ? .on : .off
         let item = currentItem()
         volumeSlider.doubleValue = VolumePreferencesStore.displayVolume(for: item)
         updateVolumeLabels(for: item)
+    }
+
+    /// 저장값이 선택지에 없으면(손으로 고친 값 등) `selectItem(withTag:)`가 선택을 비워 칸이 빈다 —
+    /// 그때는 기본 선택지를 보인다. 이 상태로 다른 값을 바꿔도 -1이 저장되지 않는다.
+    private static func select(_ popup: NSPopUpButton, tag: Int, fallback: Int) {
+        popup.selectItem(withTag: tag)
+        if popup.indexOfSelectedItem < 0 { popup.selectItem(at: fallback) }
     }
 
     /// "지금 배경 크기"의 % 값과, 어느 배경에 적용되는지 알려 주는 도움말.

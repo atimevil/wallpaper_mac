@@ -60,7 +60,8 @@ final class WorkshopSidebarView: NSView {
         scroll.documentView = list
         scroll.translatesAutoresizingMaskIntoConstraints = false
         list.translatesAutoresizingMaskIntoConstraints = false
-        list.widthAnchor.constraint(equalTo: scroll.widthAnchor).isActive = true
+        // 보이는 영역 폭에 맞춘다 — 스크롤 막대가 늘 보이는 설정(마우스)에서 막대 밑에 글이 깔리지 않게.
+        list.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor).isActive = true
         list.topAnchor.constraint(equalTo: scroll.contentView.topAnchor).isActive = true
 
         hideInstalledCheckbox.target = self
