@@ -261,7 +261,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private func forgetRemoved(_ id: String, remaining: [WallpaperItem]) {
         // 살아 있으면 "모든 화면" 배경으로 바꾼다 — 화면별 지정은 아래에서 지우므로, 재시작하면
         // 그 화면은 기본 배경으로 돌아간다. 지금도 같은 걸 걸어야 재시작 전후가 같다.
-        let fallback = displays.currentItem.flatMap { $0.id == id ? nil : $0 }
+        // 같이 지워진 것(한 번에 여럿 지울 때)은 대신 걸지 않는다.
+        let fallback = displays.currentItem.flatMap { item in
+            item.id != id && remaining.contains { $0.id == item.id } ? item : nil
+        }
         let replacement = fallback ?? remaining.first { $0.type != .unsupported && $0.id != id }
         displays.unassign(itemID: id, replacement: replacement)
         if UserDefaults.standard.string(forKey: Self.lastSelectionKey) == id {
