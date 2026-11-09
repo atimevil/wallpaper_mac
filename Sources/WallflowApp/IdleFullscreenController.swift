@@ -1,4 +1,5 @@
 import AppKit
+import IOKit.pwr_mgt
 import WallflowKit
 
 /// 유휴 전체화면(감상 모드). 켜져 있고 일정 시간 입력이 없으면 배경 창을 전체화면
@@ -59,10 +60,23 @@ final class IdleFullscreenController {
     }
 
     private func shouldShow() -> Bool {
-        IdleFullscreen.shouldShow(
+        guard IdleFullscreen.shouldShow(
             enabled: Self.isEnabled,
             idleSeconds: PowerMonitor.idleSeconds(),
-            thresholdSeconds: Self.thresholdSeconds)
+            thresholdSeconds: Self.thresholdSeconds) else { return false }
+        // 영상을 보는 중이면 입력이 없어도 비켜 준다. 어서션 조회는 유휴 조건이 찬 뒤에만.
+        return !Self.otherAppKeepsDisplayAwake()
+    }
+
+    /// 다른 앱이 화면을 켜 두라는 전원 어서션을 들고 있나(영상 재생 등).
+    private static func otherAppKeepsDisplayAwake() -> Bool {
+        var unmanaged: Unmanaged<CFDictionary>?
+        guard IOPMCopyAssertionsByProcess(&unmanaged) == kIOReturnSuccess,
+              let raw = unmanaged?.takeRetainedValue() as? [NSNumber: [[String: Any]]]
+        else { return false }
+        let byPID = Dictionary(uniqueKeysWithValues: raw.map { ($0.key.int32Value, $0.value) })
+        return IdleFullscreen.otherAppKeepsDisplayAwake(
+            assertionsByPID: byPID, selfPID: ProcessInfo.processInfo.processIdentifier)
     }
 
     private func activate() {

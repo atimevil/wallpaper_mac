@@ -113,9 +113,23 @@ Workshop)이 그 역할이고 영상 수가 훨씬 많다.
   App의 `PowerMonitor`에서 전체화면 활성 플래그가 켜져 있으면 idle-pause 분기를
   건너뛴다(한 곳에서만 — 플래그 on이면 `.paused` directive 무시). 단일 진실원천 유지.
 - 멀티 모니터: 각 화면의 배경 창을 동시에 올린다.
-- **대안(폴백 유지):** 창 레벨 승격이 `.canJoinAllSpaces/.stationary` 창에서
-  실물상 최상위로 안 뜨면, 별도 오버레이 창을 `.screenSaver` level로 띄워 같은 항목을
-  다시 렌더. **실물 확인 전까지 이 폴백을 설계에 남긴다.**
+- **영상 재생 중에는 안 뜬다(실물에서 찾은 결함을 고침):** 영상을 볼 때는 입력이 없어
+  유휴가 쌓이므로, 그냥 두면 보던 영상을 덮는다. 다른 앱이 화면 유지 전원 어서션
+  (`PreventUserIdleDisplaySleep`, `NoDisplaySleepAssertion`)을 들고 있으면 안 띄우고, 떠 있으면
+  내린다(`IdleFullscreen.otherAppKeepsDisplayAwake`, 자기 PID·자기 대신 만든 것 제외, 시스템
+  잠자기만 막는 것과 powerd 내부용 `InternalPreventDisplaySleep`은 세지 않음). 플레이어는
+  영상이 **보일 때만** 이 어서션을 건다 — 감상 모드가 이미 덮은 뒤 시작된 영상은 비켜 주지 않는다.
+- **네이티브 전체화면 앱(별도 Space) 위에는 안 뜬다.** `.fullScreenNone` 그대로 둔다 —
+  전체화면 게임·영상·발표를 덮지 않는 쪽이 안전하고, 전력 규칙도 전체화면 앱을 "사용자 집중"으로
+  보고 멈춘다. 덮게 하려면 올릴 때만 `.fullScreenAuxiliary`를 붙이면 된다.
+
+**실물 확인(2026-11-09, macOS 26, 1728×1117 한 화면):** 일반 화면에선 메뉴바까지 전부 덮고 재생 계속.
+30초 반복 4회 모두 입력 후 199~258ms에 내려감. 어서션을 잡으면 585ms에 내려가고, 잡는 동안 유휴가
+쌓여도 안 올라가며, 놓으면 874ms에 다시 올라옴. 실제 QuickTime 재생 중 12초 유휴에도 안 올라감.
+Firefox 재생 중에는 `NoDisplaySleepAssertion "video-playing"`이 잡히는 것까지 확인(그 상태로 감상
+모드를 띄워 보진 않음). 같은 설정의 시험 창을 TextEdit 전체화면 위에서 올리면 안 보이고, 일반
+화면에선 다 덮음(대조군). AVPlayer는 기본으로 화면 유지 어서션을 걸지 않음
+(`preventsDisplaySleepDuringVideoPlayback=false`) — Wallflow 영상 배경은 디스플레이 잠자기를 막지 않는다.
 - 토글: 메뉴바 `유휴 시 전체화면` + 설정 창에 분(threshold) 입력. 기본 **꺼짐**.
 
 **테스트:** 유휴/활동 판정(threshold 비교, 일시정지 보류 플래그)을 순수 함수로 빼서
