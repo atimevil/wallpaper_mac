@@ -116,6 +116,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         // 변환이 시작/성공/실패할 때마다 메뉴의 "(변환 중)" 같은 표시를
         // 다시 그린다 — 안 그러면 골랐을 때 한 번 그린 상태로 굳는다.
         displays.onConversionStateChanged = { [weak self] in self?.menuBar?.refreshStates() }
+        // 모니터를 꽂거나 빼면 "적용할 화면" 메뉴와 설정 창의 "지금 배경"이 바뀐다.
+        displays.onScreensChanged = { [weak self] in
+            self?.menuBar?.refreshStates()
+            self?.settings?.reloadProperties()
+        }
         refreshLibrary()
         restoreSelections()
         let rotation = RotationController(rotate: { [weak self] in self?.rotate() })
@@ -142,13 +147,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private func restoreSelections() {
         defer { menuBar?.refreshStates() }
         let items = (try? library.scan()) ?? []
-        if let saved = UserDefaults.standard.string(forKey: Self.lastSelectionKey),
-           let item = items.first(where: { $0.id == saved }) {
-            try? displays.assign(item, toDisplay: nil)
-        }
+        let saved = UserDefaults.standard.string(forKey: Self.lastSelectionKey)
+            .flatMap { id in items.first { $0.id == id } }
+        if let saved { displays.setDefaultItem(saved) }
+        // 화면마다 처음부터 자기 배경을 건다 — 기본을 모든 화면에 걸었다가 바꾸면 무거운 씬을
+        // 읽었다 버리는 일이 생긴다.
         let map = DisplaySelectionStore.load()
         for screen in displays.screensInfo() {
-            guard let id = map[screen.key], let item = items.first(where: { $0.id == id }) else { continue }
+            let own = map[screen.key].flatMap { id in items.first { $0.id == id } }
+            guard let item = own ?? saved else { continue }
             try? displays.assign(item, toDisplay: screen.id)
         }
         settings?.reloadProperties()
@@ -239,6 +246,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
         let present = Set(items.map(\.id))
         for gone in displays.assignedItemIDs.subtracting(present) {
+            // 스캔에서 빠졌다고 지운 게 아니다 — project.json을 고치는 중이거나 링크 대상이
+            // 잠깐 없을 수 있다. 라이브러리 항목(폴더·링크) 자체가 없어졌을 때만 정리한다.
+            // attributesOfItem은 링크를 따라가지 않아 깨진 링크도 "있음"으로 본다.
+            let entry = library.root.appendingPathComponent(gone).path
+            guard (try? FileManager.default.attributesOfItem(atPath: entry)) == nil else { continue }
             forgetRemoved(gone, remaining: items)
         }
         menuBar?.setItems(items)
@@ -247,7 +259,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     /// 지운 배경을 걸려 있던 모든 화면에서 내리고(남은 것으로 바꾸거나, 없으면 창을 내림),
     /// 저장된 선택·화면별 지정·자동 바꾸기 빼기 목록·배경별 볼륨에서도 뺀다.
     private func forgetRemoved(_ id: String, remaining: [WallpaperItem]) {
-        let replacement = remaining.first { $0.type != .unsupported }
+        // 살아 있으면 "모든 화면" 배경으로 바꾼다 — 화면별 지정은 아래에서 지우므로, 재시작하면
+        // 그 화면은 기본 배경으로 돌아간다. 지금도 같은 걸 걸어야 재시작 전후가 같다.
+        let fallback = displays.currentItem.flatMap { $0.id == id ? nil : $0 }
+        let replacement = fallback ?? remaining.first { $0.type != .unsupported && $0.id != id }
         displays.unassign(itemID: id, replacement: replacement)
         if UserDefaults.standard.string(forKey: Self.lastSelectionKey) == id {
             if let replacement {
@@ -294,10 +309,22 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             UserDefaults.standard.set(item.id, forKey: Self.lastSelectionKey)
             return
         }
+        // 화면별 지정이 있는 화면은 자기 배경의 다음으로, 없는 화면은 "모든 화면" 배경을 같이
+        // 넘긴다 — 지정 없는 화면까지 지정을 만들어 버리면 기본 배경이 굳고, 새로 꽂은 모니터에
+        // 옛 배경이 걸린다.
+        let nextDefault = next(displays.currentItem?.id)
+        if let nextDefault {
+            displays.setDefaultItem(nextDefault)
+            UserDefaults.standard.set(nextDefault.id, forKey: Self.lastSelectionKey)
+        }
         for screen in screens {
-            guard let item = next(displays.item(onDisplay: screen.id)?.id) else { continue }
-            try? displays.assign(item, toDisplay: screen.id)
-            map = DisplaySelection.setting(item.id, forDisplay: screen.key, in: map)
+            if map[screen.key] != nil {
+                guard let item = next(displays.item(onDisplay: screen.id)?.id) else { continue }
+                try? displays.assign(item, toDisplay: screen.id)
+                map = DisplaySelection.setting(item.id, forDisplay: screen.key, in: map)
+            } else if let nextDefault {
+                try? displays.assign(nextDefault, toDisplay: screen.id)
+            }
         }
         DisplaySelectionStore.save(map)
     }

@@ -57,6 +57,25 @@ final class IdleFullscreenAssertionTests: XCTestCase {
         XCTAssertFalse(check([30433: [assertion("PreventUserIdleDisplaySleep", level: 0)]]))
     }
 
+    /// 화면을 켜 두기만 하는 유틸리티는 영상 재생이 아니다 — 세면 그 앱을 쓰는 사람에겐
+    /// 감상 모드가 영영 안 뜬다(실측: Vorssaint가 "keep the display on"을 계속 잡고 있었다).
+    func testKeepAwakeUtilitiesDoNotBlock() {
+        for name in ["Vorssaint", "caffeinate", "Amphetamine", "KeepingYouAwake"] {
+            var a = assertion("PreventUserIdleDisplaySleep")
+            a["Process Name"] = name
+            XCTAssertFalse(check([70374: [a]]), name)
+        }
+    }
+
+    /// 유틸리티가 잡고 있어도 다른 앱이 영상을 틀면 비켜 준다.
+    func testVideoStillBlocksAlongsideKeepAwakeUtility() {
+        var util = assertion("PreventUserIdleDisplaySleep")
+        util["Process Name"] = "Vorssaint"
+        var video = assertion("NoDisplaySleepAssertion")
+        video["Process Name"] = "firefox"
+        XCTAssertTrue(check([70374: [util], 1235: [video]]))
+    }
+
     /// 겉 종류가 달라도 실제 종류가 화면이면 센다.
     func testTrueTypeCounts() {
         XCTAssertTrue(check([77: [assertion("SomethingElse", trueType: "PreventUserIdleDisplaySleep")]]))

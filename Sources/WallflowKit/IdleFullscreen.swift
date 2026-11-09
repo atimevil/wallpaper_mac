@@ -22,6 +22,14 @@ public enum IdleFullscreen {
         "PreventUserIdleDisplaySleep", "NoDisplaySleepAssertion",
     ]
 
+    /// 화면을 켜 두기만 하는 유틸리티(프로세스 이름). 이들의 어서션은 "영상을 보는 중"이
+    /// 아니라 세지 않는다 — 세면 이런 앱을 상시 쓰는 사람에겐 감상 모드가 영영 안 뜬다
+    /// (실측: Vorssaint가 "keep the display on"을 계속 잡고 있었다). 목록에 없는 유틸리티는
+    /// macOS 화면보호기처럼 비켜 주는 쪽(안전한 쪽)으로 남는다.
+    public static let keepAwakeUtilities: Set<String> = [
+        "Vorssaint", "caffeinate", "Amphetamine", "KeepingYouAwake", "Theine", "Caffeine", "Lungo",
+    ]
+
     /// `IOPMCopyAssertionsByProcess` 결과에서, 우리 말고 다른 앱이 화면을 켜 두라고
     /// 하는지 본다. 데몬이 우리 대신 만든 것(`AssertionOnBehalfOfPID`)도 우리 것이다.
     public static func otherAppKeepsDisplayAwake(
@@ -30,6 +38,7 @@ public enum IdleFullscreen {
         for (pid, list) in assertionsByPID where pid != selfPID {
             for a in list {
                 if (a["AssertionOnBehalfOfPID"] as? NSNumber)?.int32Value == selfPID { continue }
+                if let name = a["Process Name"] as? String, keepAwakeUtilities.contains(name) { continue }
                 guard ((a["AssertLevel"] as? NSNumber)?.intValue ?? 0) > 0 else { continue }
                 let types = [a["AssertType"], a["AssertionTrueType"]].compactMap { $0 as? String }
                 if types.contains(where: displayAwakeAssertionTypes.contains) { return true }

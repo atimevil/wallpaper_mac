@@ -25,6 +25,8 @@ final class DisplayManager {
     /// 변환 상태가 바뀔 때(시작/성공/실패) 불린다. 메뉴의 "(변환 중)" 같은
     /// 표시를 다시 그리게 하는 데 쓴다 — AppCoordinator가 menuBar.refreshStates로 잇는다.
     var onConversionStateChanged: (() -> Void)?
+    /// 화면이 붙거나 떨어진 뒤 불린다. 메뉴의 "적용할 화면"이 화면 수를 따라가야 한다.
+    var onScreensChanged: (() -> Void)?
     /// 모든 화면에 건 배경화면. 새로 연결된 모니터에도 이것을 건다.
     ///
     /// 배정 이력이 없는 화면을 빈 채로 두면, 모니터를 꽂았을 때 거기만
@@ -36,6 +38,10 @@ final class DisplayManager {
 
     /// 이 화면에 지금 걸린 배경.
     func item(onDisplay id: CGDirectDisplayID) -> WallpaperItem? { assignments[id] }
+
+    /// "모든 화면" 배경만 바꾼다(화면에 걸지는 않는다). 일부 화면에만 따로 건 상태에서
+    /// 자동으로 바꿀 때, 지정 없는 화면에 따로 걸면서 기본도 같이 넘기려고 쓴다.
+    func setDefaultItem(_ item: WallpaperItem) { defaultItem = item }
 
     /// 어느 화면에든 걸려 있거나 "모든 화면" 배경인 id들.
     var assignedItemIDs: Set<String> {
@@ -82,8 +88,18 @@ final class DisplayManager {
 
     func screensInfo() -> [ScreenInfo] {
         let screens = NSScreen.screens.compactMap { s in Self.displayID(of: s).map { (s, $0) } }
-        let keys = DisplaySelection.keys(forUUIDs: screens.map { Self.uuid(of: $0.1) })
-        return zip(screens, keys).map { ScreenInfo(id: $0.0.1, key: $0.1, name: $0.0.0.localizedName) }
+        // 같은 UUID 화면끼리의 순번은 화면 위치(왼쪽→오른쪽, 아래→위) 순서로 매긴다 —
+        // NSScreen 순서는 메뉴바가 있는 화면이 먼저라, 메뉴바를 옮기면 설정이 서로 바뀐다.
+        let byPosition = screens.indices.sorted {
+            let a = screens[$0].0.frame.origin, b = screens[$1].0.frame.origin
+            return (a.x, a.y) < (b.x, b.y)
+        }
+        let sortedKeys = DisplaySelection.keys(forUUIDs: byPosition.map { Self.uuid(of: screens[$0].1) })
+        var keyAt = [Int: String]()
+        for (i, index) in byPosition.enumerated() { keyAt[index] = sortedKeys[i] }
+        return screens.indices.map {
+            ScreenInfo(id: screens[$0].1, key: keyAt[$0] ?? "", name: screens[$0].0.localizedName)
+        }
     }
 
     /// 재연결·재부팅에도 같은 화면이면 같은 값(EDID 기반). 못 얻으면 번호로 대신한다.
@@ -174,7 +190,10 @@ final class DisplayManager {
     }
 
     @objc private func screensChanged() {
-        MainActor.assumeIsolated { rebuildWindows() }
+        MainActor.assumeIsolated {
+            rebuildWindows()
+            onScreensChanged?()
+        }
     }
 
     func rebuildWindows() {
@@ -198,8 +217,9 @@ final class DisplayManager {
                 existing.setFrame(screen.frame, display: true)
                 continue
             }
+            // 걸 배경이 있을 때만 보인다 — attach가 올린다. 빈 창을 먼저 올리면 걸 것이
+            // 없는 화면(배경을 다 지운 뒤 꽂은 모니터)이 검게 덮인다.
             let window = WallpaperWindow(screen: screen)
-            window.orderFront(nil)
             windows[id] = window
 
             // 이 화면에 배정이 있었으면 그것을, 저장된 화면별 지정이 있으면 그것을,

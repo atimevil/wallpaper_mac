@@ -129,6 +129,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             empty.isEnabled = false
             menu.addItem(empty)
         } else {
+            // 체크 표시 기준. 항목마다 물으면 화면 수만큼 UUID 조회를 반복한다.
+            let currentID = currentItem()?.id
             for (index, item) in items.enumerated() {
                 // 열 수 없는 것은 그렇다고 적는다. 목록에서 빼면 사용자는 자기가
                 // 받은 것이 왜 안 보이는지 알 수 없고, 아무 표시 없이 두면
@@ -160,7 +162,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 // 목록이 읽기 어려워진다.
                 menuItem.toolTip = toolTip
                 // 지금 대상에 걸린 배경에 체크 — 화면마다 다를 수 있어 무엇이 걸렸는지 보여야 한다.
-                menuItem.state = item.id == currentItem()?.id ? .on : .off
+                menuItem.state = item.id == currentID ? .on : .off
                 menu.addItem(menuItem)
             }
         }
